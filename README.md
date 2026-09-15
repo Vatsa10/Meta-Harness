@@ -68,3 +68,20 @@ The proposer receives `META_HARNESS_ROOT`, `META_HARNESS_OUTPUT`,
 `META_HARNESS_ITERATION`, and `META_HARNESS_COUNT`. It can inspect every prior
 candidate under `ROOT/candidates`, including `harness.py`, `scores.json`, and
 `traces.jsonl`, then write new candidate files into `OUTPUT`.
+
+Provider adapters are included for real runs. They read
+`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, retry transient failures, and expose
+the callable model interface used by every harness:
+
+```python
+from meta_harness import AnthropicModel, OpenAICompatibleModel
+
+model = AnthropicModel("claude-sonnet-4-20250514")
+model = OpenAICompatibleModel("gpt-4.1")
+```
+
+For hosted providers without filesystem tools, use `PromptedProposer`. For a
+coding-agent setup, use `CommandProposer` with the agent CLI. TerminalBench-
+style execution is available through `TerminalAgent` and `ShellPolicy`, with
+bounded commands, timeout handling, output caps, JSON action parsing, trace
+logging, and an explicit step limit.

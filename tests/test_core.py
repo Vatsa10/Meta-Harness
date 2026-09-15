@@ -4,6 +4,7 @@ from meta_harness.core import CandidateEvaluator, ParetoFrontier, SearchConfig, 
 from meta_harness.harnesses import LabelPrimedQueryHarness, MathRetrievalHarness
 from meta_harness.retrieval import BM25Index, TfidfIndex
 from meta_harness.core import TraceRecorder
+from meta_harness.terminal import ShellPolicy, TerminalAgent
 
 
 def test_end_to_end_search(tmp_path: Path):
@@ -44,3 +45,12 @@ def test_math_router_and_retrieval(tmp_path: Path):
     with TraceRecorder(tmp_path / "math.jsonl") as trace:
         answer = harness.run({"problem": "Find the angle of a triangle"}, lambda prompt: "answer", trace)
     assert answer == "answer"
+
+
+def test_terminal_agent_is_bounded(tmp_path: Path):
+    responses = iter(['{"command":"echo ready","done":false}', '{"done":true,"answer":"finished"}'])
+    agent = TerminalAgent(lambda prompt: next(responses), ShellPolicy(max_steps=3, timeout_seconds=2))
+    with TraceRecorder(tmp_path / "terminal.jsonl") as trace:
+        result = agent.run({"instruction": "prepare"}, trace)
+    assert result.completed is True
+    assert result.steps == 2
