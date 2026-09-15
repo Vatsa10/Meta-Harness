@@ -1,9 +1,6 @@
+.meta-harness*/
 venv/
 .env
-.meta-harness/
-.meta-harness-test/
-.meta-harness-demo/
-.meta-harness-cache/
 __pycache__/
 *.py[cod]
 .pytest_cache/
