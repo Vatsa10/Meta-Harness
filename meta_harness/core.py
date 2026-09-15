@@ -104,6 +104,11 @@ class FilesystemExperience:
         digest = hashlib.sha256(source.read_bytes()).hexdigest()[:12]
         candidate_id = candidate_id or f"candidate-{int(time.time() * 1000)}-{digest}"
         directory = self.candidate_dir(candidate_id)
+        suffix = 1
+        while directory.exists():
+            directory = self.candidate_dir(f"{candidate_id}-{suffix}")
+            suffix += 1
+        candidate_id = directory.name
         directory.mkdir(parents=True, exist_ok=False)
         shutil.copy2(source, directory / "harness.py")
         (directory / "proposal.json").write_text(json.dumps({"candidate_id": candidate_id}, indent=2), encoding="utf-8")
@@ -255,13 +260,20 @@ class SearchRunner:
         return result
 
     def run(self, initial: Sequence[Path | str], tasks: Sequence[Mapping[str, Any]]) -> list[EvaluationResult]:
+        self._write_run_manifest(tasks)
         results: list[EvaluationResult] = []
         for index, source in enumerate(initial):
             result = self._evaluate_source(Path(source), tasks, f"initial-{index:04d}")
             if result:
                 results.append(result)
         for iteration in range(1, self.config.iterations + 1):
-            proposals = self.proposer(self.experience, iteration, self.config.candidates_per_iteration)
+            try:
+                proposals = self.proposer(self.experience, iteration, self.config.candidates_per_iteration)
+            except Exception as exc:
+                proposal_dir = self.experience.root / "proposals" / f"iteration-{iteration:04d}"
+                proposal_dir.mkdir(parents=True, exist_ok=True)
+                (proposal_dir / "proposer.error").write_text(repr(exc), encoding="utf-8")
+                proposals = []
             for index, source in enumerate(proposals):
                 result = self._evaluate_source(Path(source), tasks, f"iteration-{iteration:04d}-{index:02d}")
                 if result:
@@ -269,3 +281,15 @@ class SearchRunner:
         frontier = ParetoFrontier.select(results)
         (self.experience.root / "frontier.json").write_text(json.dumps([asdict(x) for x in frontier], indent=2), encoding="utf-8")
         return frontier
+
+    def _write_run_manifest(self, tasks: Sequence[Mapping[str, Any]]) -> None:
+        manifest = {
+            "created_at": time.time(),
+            "python": sys.version,
+            "config": {"root": str(self.config.root), "iterations": self.config.iterations,
+                       "candidates_per_iteration": self.config.candidates_per_iteration,
+                       "keep_invalid": self.config.keep_invalid},
+            "task_count": len(tasks),
+            "tasks": [dict(task) for task in tasks],
+        }
+        (self.experience.root / "run.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
