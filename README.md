@@ -1,87 +1,145 @@
 # Meta-Harness
 
-This repository implements the paper's complete executable workflow: an agent
-proposes Python harnesses, candidates are validated and evaluated on a search
-set, and every source file, score, prompt, retrieval decision, model output,
-and error is retained in a filesystem experience store.
+Filesystem-backed end-to-end optimization of executable LLM harnesses, following
+*Meta-Harness: End-to-End Optimization of Model Harnesses* (`paper.pdf`).
 
-## Quick start
+A **harness** is the code around a fixed model: what it stores, retrieves, and shows the model
+at each step. This repository searches over that code. A coding-agent proposer reads the full
+experience filesystem — every prior candidate's source, scores, execution traces, and the
+reasoning that produced it — and writes new candidates. Candidates are evaluated on a search
+split; the Pareto frontier over (accuracy, context tokens) is scored once on a held-out split
+the proposer never sees.
 
-```powershell
-python -m meta_harness demo --iterations 3
-python -m meta_harness inspect .meta-harness-demo
+## Install
+
+```bash
+python -m venv venv
+venv/Scripts/activate          # Windows;  source venv/bin/activate elsewhere
+pip install -e .
+pip install -e ".[dev]"        # adds pytest
 ```
 
-The concrete harness implementations are available directly:
+No runtime dependencies. Python 3.10+.
+
+## Configure the model gateway (Unikey)
+
+All model traffic goes through [Unikey](https://www.getunikey.ai), an OpenAI-compatible
+gateway (`https://www.getunikey.ai/v1`, `Authorization: Bearer $UNIKEY_API_KEY`).
+
+```bash
+export UNIKEY_API_KEY=sk-...            # PowerShell: $env:UNIKEY_API_KEY="sk-..."
+meta-harness models --provider unikey   # GET /v1/models
+```
+
+The proposer is a coding agent, billed separately. Unikey also exposes an
+Anthropic-compatible `/v1/messages`, so Claude Code can be routed through it:
+
+```bash
+export ANTHROPIC_BASE_URL=https://www.getunikey.ai
+export ANTHROPIC_AUTH_TOKEN=$UNIKEY_API_KEY
+```
+
+`--provider openai|anthropic|compatible` still work, reading `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY` and their `*_BASE_URL` overrides.
+
+## Run a search
+
+```bash
+meta-harness run \
+  --tasks data/classification.jsonl \
+  --task-type classification \
+  --provider unikey --model gpt-5.2 \
+  --iterations 20 --candidates 2 --repeats 3 --max-workers 4 \
+  --proposer-model claude-sonnet-4-6 \
+  --root .meta-harness
+```
+
+Dataset formats: `.jsonl`, `.json`, `.csv`.
+
+| `--task-type` | required fields | optional | metric |
+|---|---|---|---|
+| `classification` | `input`, `label` | `labels` | exact match |
+| `math` | `problem` | `answer` | `\boxed{}` + numeric equivalence |
+| `terminal` | `instruction` | `test_command`, `image`, `workdir`, `timeout` | test command exit code |
+
+Without `--test-tasks`, `--tasks` is split 70/30 (`--search-fraction`, `--split-seed`).
+Without `--baseline`, the seeds in `baselines/` for that task type are used.
+Without `--proposer-command`, the proposer is the `claude` CLI; use `--proposer-command` to
+drive any other agent (it just has to write `.py` files into `$META_HARNESS_OUTPUT`).
+
+## What a run produces
+
+```
+.meta-harness/
+  run.json                       config + the search-split tasks
+  frontier.json                  Pareto frontier over (score, context_cost)
+  candidates/<id>/harness.py     candidate source
+  candidates/<id>/scores.json    score, context_cost, repeats, score_std, valid, error
+  candidates/<id>/traces.jsonl   every model call, task start/end, harness event
+  candidates/<id>/traces-N.jsonl additional repeats
+  candidates/<id>/proposer_reasoning.md
+  proposals/iteration-NNNN/      proposer stdout/stderr
+  views/iteration-NNNN/          what the proposer was allowed to read (ablation modes)
+.meta-harness-test/
+  test_results.json              held-out scores, written once, outside the proposer's reach
+.meta-harness-cache/             model-call cache, keyed by (model, prompt, kwargs)
+```
+
+Inspect a finished run: `meta-harness inspect .meta-harness`
+
+## Proposer-view ablation (paper Table 3)
+
+```bash
+meta-harness run ... --proposer-view scores    # source + scores only
+meta-harness run ... --proposer-view summary   # + LLM summaries, no raw traces
+meta-harness run ... --proposer-view full      # everything (default)
+```
+
+## Agentic coding domain
+
+Terminal tasks run the model's commands inside Docker:
+
+```bash
+meta-harness run --task-type terminal --tasks data/terminal.jsonl \
+  --provider unikey --model claude-sonnet-4-6
+```
+
+Each row needs an `image`. Rows without one are refused unless you pass
+`--allow-local-shell`, which executes model-authored commands **on your machine** — only do
+that in a throwaway environment.
+
+## Writing your own harness
 
 ```python
-from meta_harness import (
-    DraftVerificationHarness,
-    LabelPrimedQueryHarness,
-    MathRetrievalHarness,
-)
+class Harness:
+    def run(self, task, model, trace):
+        prompt = f"Classify: {task['input']}"
+        trace.event("prompt", {"prompt": prompt})
+        return model(prompt)
 ```
 
-`LabelPrimedQueryHarness` implements the paper's strongest classification
-strategy. `DraftVerificationHarness` implements the low-context two-call
-variant. `MathRetrievalHarness` implements the four-route BM25 policy with
-deduplication, difficulty reranking, and solution-technique bonuses.
+The instance persists across the tasks of one evaluation (that is your memory) and is recreated
+per evaluation. `model(prompt) -> str`; `model.call(prompt) -> (str, usage)`. Every call is
+priced in input tokens and written to the trace. `meta_harness.retrieval` provides
+`TfidfIndex`, `BM25Index`, and `reciprocal_rank_fusion`.
 
-The demo uses a deterministic classifier and proposer, so it needs no model
-provider or network access. For a real run, implement a proposer callback or
-use `CommandProposer` with a coding agent command.
+Seven working examples live in `baselines/`; the exact contract handed to the proposer is
+`meta_harness/skill/SKILL.md`.
 
-## Harness contract
+## Design notes
 
-Every candidate is a Python file exposing either `build_harness()` or a
-`Harness` class. The resulting object must implement:
+- `meta_harness/core.py` — the outer loop, experience filesystem, Pareto frontier, metering.
+- `meta_harness/sandbox.py` — interface validation in a subprocess under a timeout, so an
+  LLM-written `while True` cannot hang the search.
+- `meta_harness/agent_proposer.py` — the coding-agent proposer and the view ablation.
+- `meta_harness/cache.py` — disk cache so `--repeats` and re-runs do not re-bill.
+- `docs/superpowers/specs/` and `docs/superpowers/plans/` — the spec and task-by-task plan
+  this implementation follows.
 
-```python
-run(task, model, trace) -> prediction
+## Tests
+
+```bash
+python -m pytest tests -q
 ```
 
-`model(prompt, **kwargs)` is deliberately just a callable. A harness can use
-any model adapter, retrieval index, or state it needs. `trace` is a recorder;
-calling `trace.event(name, payload)` writes the raw diagnostic information
-that the proposer needs to diagnose failures.
-
-The public API is in `meta_harness.core`: `SearchConfig`, `SearchRunner`,
-`FilesystemExperience`, `CandidateEvaluator`, `ParetoFrontier`, and
-`CommandProposer`.
-
-## Running a real search
-
-Create a baseline candidate with the contract above and configure a proposer:
-
-```python
-from meta_harness import CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
-
-runner = SearchRunner(
-    SearchConfig(root=".run", iterations=20, candidates_per_iteration=2),
-    CandidateEvaluator(model=my_model),
-    CommandProposer(["python", "propose.py"]),
-)
-frontier = runner.run(["baseline.py"], search_tasks)
-```
-
-The proposer receives `META_HARNESS_ROOT`, `META_HARNESS_OUTPUT`,
-`META_HARNESS_ITERATION`, and `META_HARNESS_COUNT`. It can inspect every prior
-candidate under `ROOT/candidates`, including `harness.py`, `scores.json`, and
-`traces.jsonl`, then write new candidate files into `OUTPUT`.
-
-Provider adapters are included for real runs. They read
-`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, retry transient failures, and expose
-the callable model interface used by every harness:
-
-```python
-from meta_harness import AnthropicModel, OpenAICompatibleModel
-
-model = AnthropicModel("claude-sonnet-4-20250514")
-model = OpenAICompatibleModel("gpt-4.1")
-```
-
-For hosted providers without filesystem tools, use `PromptedProposer`. For a
-coding-agent setup, use `CommandProposer` with the agent CLI. TerminalBench-
-style execution is available through `TerminalAgent` and `ShellPolicy`, with
-bounded commands, timeout handling, output caps, JSON action parsing, trace
-logging, and an explicit step limit.
+78 tests, no network calls.

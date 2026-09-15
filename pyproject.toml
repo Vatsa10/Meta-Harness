@@ -4,9 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "meta-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Filesystem-backed end-to-end optimization of executable LLM harnesses"
 requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+meta-harness = "meta_harness.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["meta_harness*"]
+
+[tool.setuptools.package-data]
+meta_harness = ["skill/*.md"]
