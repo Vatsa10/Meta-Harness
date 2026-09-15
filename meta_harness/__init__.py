@@ -18,6 +18,9 @@ from .harnesses import (
     TerminalBootstrap,
     environment_snapshot,
 )
+from .providers import AnthropicModel, OpenAICompatibleModel, ProviderError, model_from_environment
+from .proposer import PromptedProposer
+from .terminal import ShellPolicy, TerminalAgent, TerminalResult
 
 __all__ = [
     "CandidateEvaluator", "CommandProposer", "EvaluationResult",
@@ -26,4 +29,6 @@ __all__ = [
     "BM25Index", "TfidfIndex", "reciprocal_rank_fusion",
     "DraftVerificationHarness", "LabelPrimedQueryHarness", "MathRetrievalHarness",
     "TerminalBootstrap", "environment_snapshot",
+    "AnthropicModel", "OpenAICompatibleModel", "ProviderError", "model_from_environment",
+    "PromptedProposer", "ShellPolicy", "TerminalAgent", "TerminalResult",
 ]
