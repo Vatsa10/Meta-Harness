@@ -10,9 +10,20 @@ from .core import (
     SearchConfig,
     SearchRunner,
 )
+from .retrieval import BM25Index, TfidfIndex, reciprocal_rank_fusion
+from .harnesses import (
+    DraftVerificationHarness,
+    LabelPrimedQueryHarness,
+    MathRetrievalHarness,
+    TerminalBootstrap,
+    environment_snapshot,
+)
 
 __all__ = [
     "CandidateEvaluator", "CommandProposer", "EvaluationResult",
     "FilesystemExperience", "HarnessValidationError", "ParetoFrontier",
     "SearchConfig", "SearchRunner",
+    "BM25Index", "TfidfIndex", "reciprocal_rank_fusion",
+    "DraftVerificationHarness", "LabelPrimedQueryHarness", "MathRetrievalHarness",
+    "TerminalBootstrap", "environment_snapshot",
 ]
