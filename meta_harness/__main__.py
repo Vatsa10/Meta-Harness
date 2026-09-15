@@ -81,6 +81,16 @@ def split_command(command: str) -> list[str]:
             for token in shlex.split(command, posix=False)]
 
 
+def resolve_command(tokens: Sequence[str]) -> list[str]:
+    """Absolutize tokens that name a real file.
+
+    The proposer runs with its working directory set to the experience root, so a relative
+    script path in --proposer-command would resolve against the wrong directory.
+    """
+    return [str(Path(token).resolve()) if token and Path(token).exists() else token
+            for token in tokens]
+
+
 def _load_tasks(args) -> tuple[list[dict], list[dict]]:
     adapt = ADAPTERS[args.task_type]
     search = adapt(read_records(args.tasks))
@@ -99,7 +109,8 @@ def _command_run(args) -> int:
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.root).parent / ".meta-harness-cache"
     model = CachedModel(base_model, cache_dir, enabled=not args.no_cache)
     if args.proposer_command:
-        proposer = CommandProposer(split_command(args.proposer_command), timeout=args.proposer_timeout)
+        proposer = CommandProposer(resolve_command(split_command(args.proposer_command)),
+                                   timeout=args.proposer_timeout)
     else:
         proposer = ClaudeCodeProposer(binary=args.proposer_binary, model=args.proposer_model,
                                       view=args.proposer_view, summarizer=model,

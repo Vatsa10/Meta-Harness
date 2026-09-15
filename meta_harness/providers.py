@@ -52,7 +52,9 @@ class _HttpClient:
             except urllib.error.HTTPError as error:
                 body_text = error.read().decode("utf-8", errors="replace")
                 last_error = ProviderError(f"HTTP {error.code}: {body_text[:1000]}")
-                if error.code not in {408, 409, 429, 500, 502, 503, 504}:
+                # Retry anything transient: rate limits, conflicts, and every 5xx. Gateways in
+                # front of model providers emit non-standard ones (Cloudflare 520-527).
+                if not (error.code in {408, 409, 429} or error.code >= 500):
                     break
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
                 last_error = error

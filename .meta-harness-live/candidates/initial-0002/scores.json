@@ -1,0 +1,16 @@
+{
+  "candidate_id": "initial-0002",
+  "score": 1.0,
+  "metrics": {
+    "prompt_tokens": 19698.0,
+    "model_calls": 25.0
+  },
+  "context_cost": 787.92,
+  "examples": 25,
+  "elapsed_seconds": 39.80546510000568,
+  "valid": true,
+  "error": null,
+  "repeats": 1,
+  "score_std": 0.0,
+  "split": "search"
+}

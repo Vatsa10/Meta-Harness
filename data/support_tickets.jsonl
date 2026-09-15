@@ -1,0 +1,24 @@
+{"input": "My card was charged twice for the same order last Tuesday.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "The export button spins forever and never downloads the CSV.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Can you add dark mode to the dashboard?", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "I can't log in, the reset email never arrives.", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Please cancel my subscription and refund this month.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Charts render blank on Safari but fine on Chrome.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Would love an API endpoint for bulk user import.", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "How do I transfer ownership of the workspace to a colleague?", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Invoice 4821 shows the wrong VAT rate for Germany.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Saving a filter throws a 500 error every time.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "It would help if we could schedule reports weekly.", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Two-factor codes are rejected even though the clock is synced.", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "We were moved to the enterprise plan without being told the price.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Timestamps display in UTC instead of my local timezone.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Any chance of a Slack integration for alerts?", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Remove my old email address from the team member list.", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "The annual discount was not applied at checkout.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Uploading a file over 10MB silently fails with no error.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Please support SSO via Okta for our organisation.", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "My account says suspended but I have no idea why.", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "I need a receipt with our company tax number on it.", "label": "billing", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Search returns results from a project I already deleted.", "label": "bug", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "Could the mobile app work offline for read-only access?", "label": "feature_request", "labels": ["billing", "bug", "account", "feature_request"]}
+{"input": "How do I merge two accounts that share the same email domain?", "label": "account", "labels": ["billing", "bug", "account", "feature_request"]}

@@ -1,0 +1,21 @@
+{
+  "search_root": ".meta-harness-live",
+  "results": [
+    {
+      "candidate_id": "iteration-0004-00",
+      "score": 0.8181818181818182,
+      "metrics": {
+        "prompt_tokens": 11242.0,
+        "model_calls": 11.0
+      },
+      "context_cost": 1022.0,
+      "examples": 11,
+      "elapsed_seconds": 26.54308480000327,
+      "valid": true,
+      "error": null,
+      "repeats": 1,
+      "score_std": 0.0,
+      "split": "test"
+    }
+  ]
+}

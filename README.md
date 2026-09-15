@@ -65,7 +65,10 @@ Dataset formats: `.jsonl`, `.json`, `.csv`.
 Without `--test-tasks`, `--tasks` is split 70/30 (`--search-fraction`, `--split-seed`).
 Without `--baseline`, the seeds in `baselines/` for that task type are used.
 Without `--proposer-command`, the proposer is the `claude` CLI; use `--proposer-command` to
-drive any other agent (it just has to write `.py` files into `$META_HARNESS_OUTPUT`).
+drive any other agent, or `python tools/llm_proposer.py` for a plain-API proposer that needs no
+agent installed. See [docs/using-with-coding-agents.md](docs/using-with-coding-agents.md).
+
+Two sample datasets ship in `data/`.
 
 ## What a run produces
 
@@ -133,6 +136,9 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
   LLM-written `while True` cannot hang the search.
 - `meta_harness/agent_proposer.py` — the coding-agent proposer and the view ablation.
 - `meta_harness/cache.py` — disk cache so `--repeats` and re-runs do not re-bill.
+- `tools/llm_proposer.py` — proposer that needs only an API key, no coding-agent CLI.
+- `docs/using-with-coding-agents.md` — Claude Code as proposer, optimizing agent harnesses,
+  and shipping a discovered harness back into your own agent.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — the spec and task-by-task plan
   this implementation follows.
 
