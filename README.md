@@ -10,6 +10,18 @@ reasoning that produced it — and writes new candidates. Candidates are evaluat
 split; the Pareto frontier over (accuracy, context tokens) is scored once on a held-out split
 the proposer never sees.
 
+## Use it from Claude Code
+
+The repository is also a Claude Code plugin — four skills and a read-only analyst agent, with
+Claude Haiku 4.5 as the default harness model (the paper's §4.3 setup).
+
+```bash
+claude --plugin-dir .            # try it
+/meta-harness:search data/ticket_intents.jsonl
+```
+
+See [docs/plugin.md](docs/plugin.md) for install, the skill list, and why Haiku is the default.
+
 ## Install
 
 ```bash
@@ -137,6 +149,7 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
 - `meta_harness/agent_proposer.py` — the coding-agent proposer and the view ablation.
 - `meta_harness/cache.py` — disk cache so `--repeats` and re-runs do not re-bill.
 - `tools/llm_proposer.py` — proposer that needs only an API key, no coding-agent CLI.
+- `docs/plugin.md` — the Claude Code plugin: skills, agent, install, Haiku defaults.
 - `docs/using-with-coding-agents.md` — Claude Code as proposer, optimizing agent harnesses,
   and shipping a discovered harness back into your own agent.
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — the spec and task-by-task plan

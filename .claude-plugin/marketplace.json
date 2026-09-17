@@ -1,0 +1,14 @@
+{
+  "name": "meta-harness-marketplace",
+  "owner": {
+    "name": "Vatsa"
+  },
+  "plugins": [
+    {
+      "name": "meta-harness",
+      "source": "./",
+      "description": "Search over LLM harness code with a coding-agent proposer. Haiku 4.5 by default."
+    }
+  ],
+  "description": "Harness search: optimize the code around a frozen model, with Claude Haiku 4.5 as the default harness model."
+}
