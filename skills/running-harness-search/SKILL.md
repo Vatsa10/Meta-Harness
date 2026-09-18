@@ -51,7 +51,9 @@ python -m meta_harness run \
 ```
 
 Defaults: the harness model runs through the local `claude` CLI (`--model haiku`, no API key), and
-the proposer is Claude Code itself. `--task-type` is `classification`, `math`, or `terminal`.
+the proposer is Claude Code itself. `--task-type` is `classification`, `math`, `terminal`, or
+`agent` — the last searches over Claude Code's own scaffold, covered by
+`optimizing-claude-code`.
 `--provider unikey --model <id>` routes the harness model through a gateway instead, and
 `--proposer-command "python tools/llm_proposer.py"` replaces the agent proposer with a plain API
 call when no agent CLI is available.
