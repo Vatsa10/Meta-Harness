@@ -57,7 +57,8 @@ def validate_in_subprocess(source: Path | str, timeout: float = 20.0) -> None:
     source = Path(source)
     try:
         completed = subprocess.run([sys.executable, "-m", "meta_harness.sandbox", str(source)],
-                                   capture_output=True, text=True, timeout=timeout)
+                                   capture_output=True, text=True, timeout=timeout,
+                                   encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         raise HarnessValidationError(f"validation timed out after {timeout}s") from None
     if completed.returncode != 0:

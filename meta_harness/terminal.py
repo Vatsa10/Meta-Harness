@@ -39,7 +39,9 @@ class TerminalResult:
 def run_command(command: str, policy: ShellPolicy) -> tuple[int, str]:
     policy.check(command)
     try:
-        completed = subprocess.run(command, shell=True, cwd=policy.cwd, capture_output=True, text=True, timeout=policy.timeout_seconds)
+        completed = subprocess.run(command, shell=True, cwd=policy.cwd, capture_output=True, text=True,
+                                   timeout=policy.timeout_seconds,
+                                   encoding="utf-8", errors="replace")
         output = (completed.stdout + completed.stderr)[-policy.max_output_chars:]
         return completed.returncode, output
     except subprocess.TimeoutExpired as error:

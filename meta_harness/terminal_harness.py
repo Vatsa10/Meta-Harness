@@ -40,7 +40,8 @@ def _run_in_docker(command: str, policy: DockerPolicy) -> tuple[int, str]:
     policy.check(command)
     try:
         completed = subprocess.run(policy.wrap(command), capture_output=True, text=True,
-                                   timeout=policy.timeout_seconds)
+                                   timeout=policy.timeout_seconds,
+                                   encoding="utf-8", errors="replace")
         return completed.returncode, (completed.stdout + completed.stderr)[-policy.max_output_chars:]
     except subprocess.TimeoutExpired as error:
         return 124, (str(error.stdout or "")[-policy.max_output_chars:]) + "\n[command timed out]"

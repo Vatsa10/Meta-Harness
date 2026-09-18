@@ -90,7 +90,8 @@ def terminal_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 1
                  if container else command)
     try:
         completed = subprocess.run(argv, shell=not container, capture_output=True, text=True,
-                                   timeout=timeout, cwd=None if container else (workdir or None))
+                                   timeout=timeout, encoding="utf-8", errors="replace",
+                                   cwd=None if container else (workdir or None))
     except (OSError, subprocess.SubprocessError):
         return 0.0
     return float(completed.returncode == 0)
@@ -126,7 +127,8 @@ def agent_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 300.
         target.write_text(str(content), encoding="utf-8")
     try:
         completed = subprocess.run(command, shell=True, cwd=path, capture_output=True,
-                                   text=True, timeout=timeout)
+                                   text=True, timeout=timeout,
+                                   encoding="utf-8", errors="replace")
     except (OSError, subprocess.SubprocessError):
         return 0.0
     return float(completed.returncode == 0)

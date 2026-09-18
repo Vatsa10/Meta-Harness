@@ -129,7 +129,8 @@ class ClaudeCodeProposer:
             "META_HARNESS_VIEW": self.view,
         })
         completed = subprocess.run(self._command(), cwd=view, env=env, text=True,
-                                   capture_output=True, timeout=self.timeout)
+                                   capture_output=True, timeout=self.timeout,
+                                   encoding="utf-8", errors="replace")
         (output / "proposer.stdout").write_text(completed.stdout or "", encoding="utf-8")
         (output / "proposer.stderr").write_text(completed.stderr or "", encoding="utf-8")
         if completed.returncode:

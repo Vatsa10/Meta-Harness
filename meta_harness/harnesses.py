@@ -178,7 +178,9 @@ def environment_snapshot(timeout: float = 15.0) -> str:
     lines = ["[Environment Snapshot]"]
     for command in commands:
         try:
-            completed = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout / len(commands))
+            completed = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                       timeout=timeout / len(commands),
+                                       encoding="utf-8", errors="replace")
             output = (completed.stdout + completed.stderr).strip().splitlines()
             lines.append(f"$ {command}\n{output[0] if output else '[unavailable]'}")
         except (OSError, subprocess.SubprocessError):

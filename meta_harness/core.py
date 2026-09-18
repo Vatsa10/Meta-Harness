@@ -288,7 +288,8 @@ class CommandProposer:
         env.update({"META_HARNESS_ROOT": str(experience.root.resolve()), "META_HARNESS_OUTPUT": str(out.resolve()),
                     "META_HARNESS_ITERATION": str(iteration), "META_HARNESS_COUNT": str(count)})
         completed = subprocess.run(self.command, cwd=experience.root, env=env, text=True,
-                                   capture_output=True, timeout=self.timeout)
+                                   capture_output=True, timeout=self.timeout,
+                                   encoding="utf-8", errors="replace")
         (out / "proposer.stdout").write_text(completed.stdout or "", encoding="utf-8")
         (out / "proposer.stderr").write_text(completed.stderr or "", encoding="utf-8")
         if completed.returncode:
