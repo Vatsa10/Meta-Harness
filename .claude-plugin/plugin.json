@@ -1,8 +1,8 @@
 {
   "name": "meta-harness",
   "displayName": "Meta-Harness",
-  "description": "Harness engineering discipline: attribute every prompt/agent change, keep every candidate, diagnose from traces, and hold out a split. Escalates to an automated propose-evaluate-log search when hand-tuning stalls.",
-  "version": "0.4.0",
+  "description": "Harness engineering for Claude Code: attribute every prompt/agent change, keep every candidate, diagnose from traces, hold out a split - and search over Claude Code's own scaffold against your repo's real failures.",
+  "version": "0.5.0",
   "author": {
     "name": "Vatsa"
   },
