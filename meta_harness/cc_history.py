@@ -406,6 +406,70 @@ def harness_report(sessions: Sequence[Session]) -> dict[str, Any]:
     }
 
 
+def sessions_between(sessions: Sequence[Session], since: str = "", before: str = "") -> list[Session]:
+    """Filter by ISO timestamp. Empty bounds mean open-ended."""
+    out = []
+    for session in sessions:
+        stamp = session.started or session.ended
+        if since and stamp and stamp < since:
+            continue
+        if before and stamp and stamp >= before:
+            continue
+        out.append(session)
+    return out
+
+
+COMPARED_METRICS = ("error_rate", "read_to_write_ratio", "tool_calls", "sessions",
+                    "subagent_calls", "workflow_calls", "skill_calls")
+# Only these have a defensible direction. Volume metrics - tool calls, delegations, session
+# count - move with whatever work happened in the window, so calling them better or worse
+# would be inventing a verdict the data does not support.
+LOWER_IS_BETTER = ("error_rate", "tool_error_per_session", "thrash_per_session",
+                   "correction_per_session")
+HIGHER_IS_BETTER = ("read_to_write_ratio",)
+
+
+def _per_session(report: Mapping[str, Any]) -> dict[str, float]:
+    sessions = max(1, int(report.get("sessions", 0) or 0))
+    kinds = report.get("episode_kinds") or {}
+    return {
+        "tool_error_per_session": round(kinds.get("tool_error", 0) / sessions, 2),
+        "thrash_per_session": round(kinds.get("thrash", 0) / sessions, 2),
+        "correction_per_session": round(kinds.get("correction", 0) / sessions, 2),
+        "tool_calls_per_session": round(int(report.get("tool_calls", 0) or 0) / sessions, 1),
+    }
+
+
+def compare_reports(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any]:
+    """Diff two harness reports.
+
+    This is observational, not an experiment: the two windows cover different work. A moved
+    number is a reason to look, never proof the harness change caused it. Episode counts are
+    normalised per session because window sizes differ.
+    """
+    rows = []
+    left = dict(before)
+    right = dict(after)
+    left.update(_per_session(before))
+    right.update(_per_session(after))
+    keys = [k for k in COMPARED_METRICS if k in left or k in right]
+    keys += [k for k in _per_session(before) if k not in keys]
+    for key in keys:
+        a = float(left.get(key, 0) or 0)
+        b = float(right.get(key, 0) or 0)
+        delta = round(b - a, 4)
+        improved = None
+        if delta and key in LOWER_IS_BETTER:
+            improved = delta < 0
+        elif delta and key in HIGHER_IS_BETTER:
+            improved = delta > 0
+        rows.append({"metric": key, "before": a, "after": b, "delta": delta,
+                     "improved": improved})
+    return {"metrics": rows,
+            "caveat": ("Observational: the two windows cover different work. Treat a moved "
+                       "number as a lead, not a result.")}
+
+
 def write_history_view(sessions: Sequence[Session], destination: Path,
                        include_text: bool = False) -> Path:
     """Materialize mined history where a proposer can grep it, alongside candidate traces."""
@@ -554,7 +618,9 @@ def draft_tasks(sessions: Sequence[Session], limit: int = 20,
     return drafts
 
 
-__all__ = ["ARTIFACT_MARKERS", "CORRECTION_PATTERNS", "FileVersion", "SKILL_TOOLS",
+__all__ = ["ARTIFACT_MARKERS", "COMPARED_METRICS", "CORRECTION_PATTERNS", "FileVersion",
+           "HIGHER_IS_BETTER", "LOWER_IS_BETTER",
+           "SKILL_TOOLS", "compare_reports", "sessions_between",
            "SUBAGENT_TOOLS", "guess_test_command", "read_file_history",
            "WORKFLOW_TOOLS", "is_artifact_project",
            "FailureEpisode", "Session", "ToolCall", "Turn",

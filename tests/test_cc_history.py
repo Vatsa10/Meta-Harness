@@ -267,3 +267,57 @@ def test_drafts_cap_the_number_of_seeded_files(tmp_path: Path):
     drafts = draft_tasks(load_sessions(home=home, include_text=True, min_turns=3), home=home)
     assert len(drafts[0]["files"]) == MAX_DRAFT_FILES
     assert drafts[0]["_files_touched_in_session"] == MAX_DRAFT_FILES + 4
+
+
+# --- comparing windows -----------------------------------------------------
+
+def test_sessions_between_filters_by_timestamp(tmp_path: Path):
+    from meta_harness.cc_history import sessions_between
+
+    def at(stamp):
+        session = parse_session(_write_transcript(
+            tmp_path / "proj" / f"{stamp[:10]}.jsonl",
+            [{"type": "assistant", "message": {"content": []}, "timestamp": stamp}]))
+        return session
+
+    early, late = at("2026-09-01T00:00:00Z"), at("2026-09-20T00:00:00Z")
+    both = [early, late]
+    assert len(sessions_between(both, before="2026-09-10")) == 1
+    assert len(sessions_between(both, since="2026-09-10")) == 1
+    assert len(sessions_between(both)) == 2
+
+
+def test_compare_flags_direction_only_where_it_is_defensible():
+    from meta_harness.cc_history import compare_reports
+
+    before = {"sessions": 10, "tool_calls": 1000, "error_rate": 0.05,
+              "read_to_write_ratio": 0.4, "subagent_calls": 50,
+              "episode_kinds": {"tool_error": 100, "thrash": 20, "correction": 10}}
+    after = {"sessions": 10, "tool_calls": 900, "error_rate": 0.03,
+             "read_to_write_ratio": 0.9, "subagent_calls": 40,
+             "episode_kinds": {"tool_error": 60, "thrash": 8, "correction": 4}}
+    rows = {r["metric"]: r for r in compare_reports(before, after)["metrics"]}
+
+    assert rows["error_rate"]["improved"] is True
+    assert rows["read_to_write_ratio"]["improved"] is True
+    assert rows["correction_per_session"]["improved"] is True
+    # Volume moves with whatever work happened in the window; claiming a direction there
+    # would be inventing a verdict the data cannot support.
+    assert rows["tool_calls"]["improved"] is None
+    assert rows["subagent_calls"]["improved"] is None
+
+
+def test_compare_normalises_episodes_per_session():
+    from meta_harness.cc_history import compare_reports
+
+    # Twice the sessions and twice the errors is the same rate, not a regression.
+    before = {"sessions": 5, "episode_kinds": {"tool_error": 50}}
+    after = {"sessions": 10, "episode_kinds": {"tool_error": 100}}
+    rows = {r["metric"]: r for r in compare_reports(before, after)["metrics"]}
+    assert rows["tool_error_per_session"]["delta"] == 0.0
+
+
+def test_compare_carries_its_caveat():
+    from meta_harness.cc_history import compare_reports
+
+    assert "Observational" in compare_reports({"sessions": 1}, {"sessions": 1})["caveat"]

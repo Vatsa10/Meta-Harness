@@ -13,8 +13,8 @@ from .core import (CandidateEvaluator, CommandProposer, FilesystemExperience, Pa
                    SearchConfig, SearchRunner)
 from .datasets import (agent_tasks, classification_tasks, math_tasks, read_records,
                         split_tasks, terminal_tasks)
-from .cc_history import (draft_tasks, harness_report, load_sessions, project_slug,
-                         write_history_view)
+from .cc_history import (compare_reports, draft_tasks, harness_report, load_sessions,
+                         project_slug, sessions_between, write_history_view)
 from .demo import run as run_demo
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
@@ -62,6 +62,15 @@ def build_parser() -> argparse.ArgumentParser:
     mine.add_argument("--include-text", action="store_true",
                       help="keep message text. Transcripts contain whatever you typed; off by default")
     mine.add_argument("--draft-tasks", help="also write draft eval tasks to this JSONL path")
+
+    compare = sub.add_parser(
+        "compare", help="diff two windows of Claude Code history before and after a harness change")
+    compare.add_argument("--split", required=True,
+                         help="ISO timestamp dividing before from after, e.g. 2026-09-18")
+    compare.add_argument("--project", help="project slug or path (default: every project)")
+    compare.add_argument("--this-project", action="store_true")
+    compare.add_argument("--limit", type=int, default=200)
+    compare.add_argument("--min-turns", type=int, default=4)
 
     run = sub.add_parser("run", help="run a provider-backed harness search")
     run.add_argument("--tasks", required=True, help="JSON, JSONL, or CSV dataset")
@@ -174,6 +183,27 @@ def _command_mine(args) -> int:
     return 0
 
 
+def _command_compare(args) -> int:
+    project = args.project
+    if args.this_project:
+        project = project_slug(Path.cwd())
+    elif project and ("/" in project or "\\" in project or Path(project).exists()):
+        project = project_slug(project)
+    sessions = load_sessions(project=project, limit=args.limit, include_text=True,
+                             min_turns=args.min_turns)
+    before = sessions_between(sessions, before=args.split)
+    after = sessions_between(sessions, since=args.split)
+    if not before or not after:
+        print(json.dumps({"error": "need sessions on both sides of --split",
+                          "before": len(before), "after": len(after)}, indent=2))
+        return 1
+    diff = compare_reports(harness_report(before), harness_report(after))
+    print(json.dumps({"split": args.split,
+                      "sessions_before": len(before), "sessions_after": len(after),
+                      **diff}, indent=2))
+    return 0
+
+
 def _command_run(args) -> int:
     if args.allow_local_shell:
         os.environ["META_HARNESS_ALLOW_LOCAL_SHELL"] = "1"
@@ -250,6 +280,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "mine":
         return _command_mine(args)
+    if args.command == "compare":
+        return _command_compare(args)
     if args.command == "run":
         return _command_run(args)
     experience = FilesystemExperience(args.root)
