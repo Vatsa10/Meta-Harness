@@ -261,3 +261,28 @@ def test_turns_and_cost_span_subagent_results(monkeypatch, tmp_path: Path):
     assert run.input_tokens == 1100
     assert round(run.cost_usd, 4) == 0.06
     assert run.subagent_results == 1
+
+
+# --- package-wide invariant ------------------------------------------------
+
+def test_no_subprocess_decodes_text_without_an_explicit_encoding():
+    """Windows defaults to cp1252, which raises the moment a tool prints a check mark.
+
+    This killed a completed search's held-out evaluation. Enforcing the rule here beats
+    remembering it: a new subprocess.run with text=True and no encoding fails this test.
+    """
+    import ast
+
+    offenders = []
+    package = Path(__file__).resolve().parent.parent / "meta_harness"
+    for module in sorted(package.glob("*.py")):
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name != "run":
+                continue
+            keywords = {k.arg for k in node.keywords}
+            if "text" in keywords and "encoding" not in keywords:
+                offenders.append(f"{module.name}:{node.lineno}")
+    assert offenders == [], f"subprocess.run without encoding: {offenders}"

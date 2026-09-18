@@ -28,12 +28,14 @@ class DockerPolicy(ShellPolicy):
 def start_container(image: str, workdir: str = "/app") -> str:
     name = f"meta-harness-{uuid.uuid4().hex[:10]}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-w", workdir,
-                    image, "sleep", "infinity"], check=True, capture_output=True, text=True)
+                    image, "sleep", "infinity"], check=True, capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
     return name
 
 
 def stop_container(name: str) -> None:
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True)
+    subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True,
+                   encoding="utf-8", errors="replace")
 
 
 def _run_in_docker(command: str, policy: DockerPolicy) -> tuple[int, str]:
