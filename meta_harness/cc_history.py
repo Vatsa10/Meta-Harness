@@ -17,6 +17,7 @@ transcript contains whatever the user typed; pass `include_text=True` only delib
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -143,6 +144,89 @@ class FailureEpisode:
     user_text: str = ""
     assistant_text: str = ""
     tools: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FileVersion:
+    """A file Claude Code changed, with the contents it had beforehand."""
+
+    tracking_path: str
+    version: int
+    backup_file: str = ""
+    previous_content: str | None = None   # None when the file did not exist yet
+    timestamp: str = ""
+
+
+def read_file_history(session_id: str, home: Path | None = None) -> list[FileVersion]:
+    """Pre-edit contents of every file a session changed.
+
+    Claude Code records a `file-history-delta` per change, naming the relative path and the
+    backup blob that holds what the file looked like before. The blobs live under
+    `~/.claude/file-history/<session-id>/<hash>@v<n>`. A delta with no backup file is a
+    creation: there was nothing there before.
+    """
+    home = home or claude_home()
+    store = home / "file-history" / session_id
+    versions: list[FileVersion] = []
+    for path in iter_session_paths(home):
+        if path.stem != session_id:
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or '"file-history-delta"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("type") != "file-history-delta":
+                continue
+            backup = record.get("backup")
+            if isinstance(backup, str):
+                try:
+                    backup = ast.literal_eval(backup)   # stored as a Python repr, not JSON
+                except (ValueError, SyntaxError):
+                    backup = {}
+            backup = backup if isinstance(backup, dict) else {}
+            name = backup.get("backupFileName") or ""
+            version = FileVersion(
+                tracking_path=str(record.get("trackingPath", "")),
+                version=int(backup.get("version", 0) or 0),
+                backup_file=str(name),
+                timestamp=str(record.get("backupTime") or record.get("timestamp") or ""),
+            )
+            if name:
+                blob = store / str(name)
+                if blob.is_file():
+                    try:
+                        version.previous_content = json.loads(
+                            blob.read_text(encoding="utf-8", errors="replace"))
+                    except ValueError:
+                        version.previous_content = blob.read_text(encoding="utf-8", errors="replace")
+            versions.append(version)
+        break
+    return versions
+
+
+TEST_COMMAND_HINTS = (
+    ("pytest.ini", "python -m pytest -q"),
+    ("pyproject.toml", "python -m pytest -q"),
+    ("tox.ini", "python -m pytest -q"),
+    ("package.json", "npm test"),
+    ("Cargo.toml", "cargo test"),
+    ("go.mod", "go test ./..."),
+)
+
+
+def guess_test_command(cwd: str) -> str:
+    """Best guess from what the repository contains. A human still has to confirm it."""
+    root = Path(cwd) if cwd else None
+    if not root or not root.is_dir():
+        return ""
+    for marker, command in TEST_COMMAND_HINTS:
+        if (root / marker).is_file():
+            return command
+    return ""
 
 
 def _blocks(message: Any) -> list[dict[str, Any]]:
@@ -394,34 +478,84 @@ Text is redacted unless the run was mined with `--include-text`.
 """
 
 
-def draft_tasks(sessions: Sequence[Session], limit: int = 20) -> list[dict[str, Any]]:
-    """Draft eval tasks from correction episodes. Each needs a human to finish it.
+MAX_DRAFT_FILES = 6
+MAX_DRAFT_FILE_CHARS = 12000
 
-    A verifiable task needs a test command, and history does not contain one. These drafts carry
-    the request and the context; the `test_command` and `test_files` are left blank on purpose.
+
+def _relative(path: str, cwd: str) -> str:
+    """Deltas record a path relative to cwd in some sessions and absolute in others."""
+    text = str(path).replace("\\", "/")
+    base = str(cwd or "").replace("\\", "/").rstrip("/")
+    if base and text.lower().startswith(base.lower() + "/"):
+        return text[len(base) + 1:]
+    return text
+
+
+def draft_tasks(sessions: Sequence[Session], limit: int = 20,
+                home: Path | None = None) -> list[dict[str, Any]]:
+    """Draft eval tasks from correction episodes, filled in as far as history allows.
+
+    What history can supply: the request that preceded the work, the files the agent changed,
+    the contents those files had beforehand, and a guess at the repository's test command.
+
+    What it cannot supply: the verification. `test_files` is left empty on purpose - deciding
+    what "correct" means for a past failure is a judgement only the human can make. A draft is
+    a task with that one hole in it, not a finished task.
     """
-    drafts = []
+    drafts: list[dict[str, Any]] = []
     for session in sessions:
-        for episode in failure_episodes(session):
-            if episode.kind != "correction" or not episode.user_text:
+        episodes = [e for e in failure_episodes(session) if e.kind == "correction"]
+        if not episodes:
+            continue
+        history = read_file_history(session.session_id, home)
+        # Earliest recorded state per path: what the file looked like before the session
+        # started changing it.
+        seeded: dict[str, str] = {}
+        created: list[str] = []
+        for version in history:
+            if not version.tracking_path:
                 continue
+            if version.previous_content is None:
+                if version.tracking_path not in seeded:
+                    created.append(version.tracking_path)
+            elif version.tracking_path not in seeded:
+                seeded[version.tracking_path] = version.previous_content
+
+        # A session touches far more than one failure needs. Keep the smallest files - the
+        # big ones are usually incidental - and leave trimming to the human.
+        scoped = sorted(seeded.items(), key=lambda kv: len(kv[1]))[:MAX_DRAFT_FILES]
+        files = {_relative(path, session.cwd): body[:MAX_DRAFT_FILE_CHARS]
+                 for path, body in scoped}
+
+        for episode in episodes:
+            before = [t for t in session.turns
+                      if t.role == "user" and t.text and t.index < episode.turn_index]
+            request = before[-2].text if len(before) >= 2 else (before[0].text if before else "")
             drafts.append({
-                "instruction": "",
+                "instruction": request,
+                "files": files,
+                "test_files": {},
+                "test_command": guess_test_command(session.cwd),
                 "_source": {"session": session.session_id, "project": session.project,
                             "cwd": session.cwd, "turn": episode.turn_index},
                 "_correction": episode.user_text,
+                "_matched": episode.matched,
                 "_tools_before_correction": episode.tools,
-                "files": {},
-                "test_files": {},
-                "test_command": "",
-                "_todo": "Fill instruction, files, test_files and test_command from this episode.",
+                "_files_created_in_session": sorted({_relative(c, session.cwd) for c in created}),
+                "_files_touched_in_session": len(seeded),
+                "_todo": ("Write test_files: the verification that would have caught this. "
+                          f"files/ holds the {MAX_DRAFT_FILES} smallest of "
+                          "_files_touched_in_session - trim to what the task actually needs, "
+                          "confirm test_command, and rewrite instruction as the requirement in "
+                          "prose."),
             })
             if len(drafts) >= limit:
                 return drafts
     return drafts
 
 
-__all__ = ["ARTIFACT_MARKERS", "CORRECTION_PATTERNS", "SKILL_TOOLS", "SUBAGENT_TOOLS",
+__all__ = ["ARTIFACT_MARKERS", "CORRECTION_PATTERNS", "FileVersion", "SKILL_TOOLS",
+           "SUBAGENT_TOOLS", "guess_test_command", "read_file_history",
            "WORKFLOW_TOOLS", "is_artifact_project",
            "FailureEpisode", "Session", "ToolCall", "Turn",
            "claude_home", "draft_tasks", "failure_episodes", "harness_report",

@@ -168,8 +168,11 @@ def test_draft_tasks_leave_verification_to_a_human(tmp_path: Path):
     ])
     drafts = draft_tasks([parse_session(path, include_text=True)])
     assert drafts, "a correction episode should yield a draft"
-    assert drafts[0]["test_command"] == ""      # history contains no verification
-    assert drafts[0]["instruction"] == ""
+    # History supplies the request that preceded the work...
+    assert drafts[0]["instruction"] == "fix it"
+    assert drafts[0]["_correction"]
+    # ...but never the verification. That hole is the human's to fill.
+    assert drafts[0]["test_files"] == {}
     assert "_todo" in drafts[0]
 
 
@@ -184,3 +187,83 @@ def test_load_sessions_skips_short_ones_and_artifacts(tmp_path: Path):
     _write_transcript(home / "projects" / "D--real" / "tiny.jsonl", [_assistant(tools=["Read"])])
     sessions = load_sessions(home=home, min_turns=4)
     assert [s.session_id for s in sessions] == ["a"]
+
+
+# --- file history ----------------------------------------------------------
+
+def _delta(tracking_path, backup_name, version=1):
+    backup = {"backupFileName": backup_name, "version": version,
+              "backupTime": "2026-09-18T10:00:00Z", "realParentDir": "D:\repo"}
+    # Claude Code stores this field as a Python repr, not as JSON.
+    return {"type": "file-history-delta", "trackingPath": tracking_path,
+            "backup": repr(backup), "timestamp": "2026-09-18T10:00:00Z"}
+
+
+def test_read_file_history_recovers_previous_contents(tmp_path: Path):
+    home = tmp_path / "claude"
+    _write_transcript(home / "projects" / "D--repo" / "sess.jsonl", [
+        _delta("src/a.py", "hash1@v2", version=2),
+        _delta("src/new.py", None, version=1),
+    ])
+    blob = home / "file-history" / "sess" / "hash1@v2"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_text(json.dumps("def a():\n    return 1\n"), encoding="utf-8")
+
+    from meta_harness.cc_history import read_file_history
+
+    versions = read_file_history("sess", home=home)
+    by_path = {v.tracking_path: v for v in versions}
+    assert by_path["src/a.py"].previous_content == "def a():\n    return 1\n"
+    # No backup file means the agent created it: there was nothing there before.
+    assert by_path["src/new.py"].previous_content is None
+
+
+def test_guess_test_command_from_repo_markers(tmp_path: Path):
+    from meta_harness.cc_history import guess_test_command
+
+    (tmp_path / "pyproject.toml").write_text("[project]", encoding="utf-8")
+    assert guess_test_command(str(tmp_path)) == "python -m pytest -q"
+    assert guess_test_command(str(tmp_path / "missing")) == ""
+
+
+def test_drafts_seed_files_and_leave_verification_empty(tmp_path: Path):
+    home = tmp_path / "claude"
+    _write_transcript(home / "projects" / "D--repo" / "sess.jsonl", [
+        _human("make the parser handle empty input"),
+        _assistant(tools=["Edit"]),
+        _results([("t0", False)]),
+        _assistant(text="Done."),
+        _human("no, that broke it - revert"),
+        _delta("src/parser.py", "h1@v2", version=2),
+    ])
+    blob = home / "file-history" / "sess" / "h1@v2"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    blob.write_text(json.dumps("old parser body"), encoding="utf-8")
+
+    sessions = load_sessions(home=home, include_text=True, min_turns=3)
+    drafts = draft_tasks(sessions, home=home)
+    assert drafts
+    draft = drafts[0]
+    assert draft["files"]["src/parser.py"] == "old parser body"
+    assert draft["instruction"]                 # the ask that preceded the work
+    assert draft["test_files"] == {}            # history cannot supply the verification
+    assert "_todo" in draft
+
+
+def test_drafts_cap_the_number_of_seeded_files(tmp_path: Path):
+    from meta_harness.cc_history import MAX_DRAFT_FILES
+
+    home = tmp_path / "claude"
+    records = [_human("do a thing"), _assistant(tools=["Edit"]), _results([("t0", False)]),
+               _assistant(text="Done."), _human("that's wrong, revert")]
+    for index in range(MAX_DRAFT_FILES + 4):
+        records.append(_delta(f"src/f{index}.py", f"h{index}@v2", version=2))
+    _write_transcript(home / "projects" / "D--repo" / "sess.jsonl", records)
+    for index in range(MAX_DRAFT_FILES + 4):
+        blob = home / "file-history" / "sess" / f"h{index}@v2"
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_text(json.dumps("x" * (100 + index)), encoding="utf-8")
+
+    drafts = draft_tasks(load_sessions(home=home, include_text=True, min_turns=3), home=home)
+    assert len(drafts[0]["files"]) == MAX_DRAFT_FILES
+    assert drafts[0]["_files_touched_in_session"] == MAX_DRAFT_FILES + 4
