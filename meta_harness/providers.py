@@ -155,6 +155,10 @@ def list_unikey_models(api_key: str | None = None, base_url: str | None = None, 
 
 def model_from_environment(provider: str, model: str, **kwargs: Any) -> Any:
     provider = provider.lower()
+    if provider in {"claude-cli", "claude-code", "cli"}:
+        from .claude_cli import ClaudeCliModel
+
+        return ClaudeCliModel(model, **kwargs)
     if provider in {"unikey", "getunikey"}:
         return UnikeyModel(model, **kwargs)
     if provider in {"openai", "compatible", "azure"}:

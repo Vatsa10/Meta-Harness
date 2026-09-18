@@ -14,6 +14,7 @@ from .core import (
 )
 from .agent_proposer import SKILL_PATH, ClaudeCodeProposer, build_view
 from .cache import CachedModel, DiskCache
+from .claude_cli import ClaudeCliError, ClaudeCliModel
 from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
 from .metrics import METRICS, estimate_tokens, exact_match, math_equivalence, normalize_answer, terminal_metric
 from .retrieval import BM25Index, TfidfIndex, reciprocal_rank_fusion
@@ -45,6 +46,7 @@ __all__ = [
     "SearchConfig", "SearchRunner", "TraceRecorder",
     "SKILL_PATH", "ClaudeCodeProposer", "build_view",
     "CachedModel", "DiskCache",
+    "ClaudeCliError", "ClaudeCliModel",
     "classification_tasks", "math_tasks", "read_records", "split_tasks", "terminal_tasks",
     "METRICS", "estimate_tokens", "exact_match", "math_equivalence", "normalize_answer",
     "terminal_metric",

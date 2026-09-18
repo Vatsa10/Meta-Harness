@@ -23,6 +23,9 @@ DEFAULT_BASELINES = {
     "terminal": ["terminal_basic.py"],
 }
 ADAPTERS = {"classification": classification_tasks, "math": math_tasks, "terminal": terminal_tasks}
+# Aliases the CLI resolves to the current model of each size. The paper's agentic-coding
+# result (section 4.3) is on Haiku 4.5, so haiku is the default harness model here.
+CLAUDE_CLI_MODELS = ["haiku", "sonnet", "opus"]
 
 
 def default_baselines(task_type: str) -> list[Path]:
@@ -40,8 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = sub.add_parser("inspect", help="show stored results and Pareto frontier")
     inspect.add_argument("root", nargs="?", default=".meta-harness")
 
-    models = sub.add_parser("models", help="list models offered by the gateway")
-    models.add_argument("--provider", choices=["unikey"], default="unikey")
+    models = sub.add_parser("models", help="list available harness models")
+    models.add_argument("--provider", choices=["claude-cli", "unikey"], default="claude-cli")
 
     run = sub.add_parser("run", help="run a provider-backed harness search")
     run.add_argument("--tasks", required=True, help="JSON, JSONL, or CSV dataset")
@@ -49,8 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--search-fraction", type=float, default=0.7)
     run.add_argument("--split-seed", type=int, default=0)
     run.add_argument("--baseline", nargs="+", help="seed harness files (default: bundled baselines)")
-    run.add_argument("--provider", choices=["unikey", "openai", "anthropic", "compatible"], default="unikey")
-    run.add_argument("--model", required=True)
+    run.add_argument("--provider", choices=["claude-cli", "unikey", "openai", "anthropic", "compatible"],
+                     default="claude-cli",
+                     help="where the harness model runs. claude-cli (default) uses the local "
+                          "Claude Code CLI and needs no API key")
+    run.add_argument("--model", default="haiku",
+                     help="harness model; a claude-cli alias (haiku, sonnet, opus) or a "
+                          "gateway model id")
     run.add_argument("--task-type", choices=["classification", "math", "terminal"], default="classification")
     run.add_argument("--root", default=".meta-harness")
     run.add_argument("--test-root")
@@ -105,6 +113,13 @@ def _command_run(args) -> int:
     if args.allow_local_shell:
         os.environ["META_HARNESS_ALLOW_LOCAL_SHELL"] = "1"
     search_tasks, test_tasks = _load_tasks(args)
+    if args.provider == "claude-cli":
+        from .claude_cli import ClaudeCliModel
+
+        if not ClaudeCliModel.available():
+            print("claude CLI not found on PATH. Install Claude Code, or pass "
+                  "--provider unikey with UNIKEY_API_KEY set.")
+            return 1
     base_model = model_from_environment(args.provider, args.model)
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.root).parent / ".meta-harness-cache"
     model = CachedModel(base_model, cache_dir, enabled=not args.no_cache)
@@ -143,6 +158,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps([r.__dict__ for r in ParetoFrontier.select(FilesystemExperience(root).results())], indent=2))
         return 0
     if args.command == "models":
+        if args.provider == "claude-cli":
+            from .claude_cli import ClaudeCliModel
+
+            if not ClaudeCliModel.available():
+                print("claude CLI not found on PATH; install Claude Code or use --provider unikey")
+                return 1
+            print("\n".join(CLAUDE_CLI_MODELS))
+            return 0
         print("\n".join(list_unikey_models()))
         return 0
     if args.command == "run":
