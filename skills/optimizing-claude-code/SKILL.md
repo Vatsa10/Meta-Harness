@@ -35,10 +35,35 @@ documentation. Not everything is a search problem.
 | Tool set | Denying `Bash` so the agent edits rather than shells out |
 | Turn budget | 15 vs 30 vs 60 turns |
 | Subagents | A dedicated reviewer agent invoked before finishing |
+| Skills | A `SKILL.md` the candidate writes and the session loads |
 | Model | Haiku with better doctrine vs Sonnet with none |
 
 All six are searchable. Arguing about which is best without scoring them is the thing this skill
 exists to stop.
+
+## Start from the history Claude Code already wrote
+
+Before inventing anything, read what actually happened. Claude Code keeps every session at
+`~/.claude/projects/<slug>/<session>.jsonl` - tool calls, tool errors, delegations, and the turn
+where a human told it it was wrong.
+
+```bash
+python -m meta_harness mine --limit 80 --out .meta-harness/history
+python -m meta_harness mine --this-project --out .meta-harness/history   # just this repo
+```
+
+That writes `report.json` (tool histogram, error rate, read-to-write ratio, subagent / workflow /
+skill counts) and `episodes.jsonl` (one line per observed failure: `tool_error`, `correction`,
+`thrash`). Message text is redacted unless you pass `--include-text`; everything stays on this
+machine.
+
+Read the report before writing tasks. A read-to-write ratio well below 1 means the agent edits
+more than it reads. A tool with a high error share is a harness problem, not a model problem. A
+`correction` episode is the strongest evidence you have: a human said it was wrong, and the
+`tools` field says what it had just been doing.
+
+Pass `--mine-history` to `run` and the proposer gets this alongside the candidate traces, which
+is the paper's point - diagnose from real accumulated experience, not from scores.
 
 ## Build the benchmark from real failures
 
@@ -100,6 +125,12 @@ tell you:
 | Burned turns re-reading the same file | Framing: put the file list in the prompt |
 | Hit `error_max_turns` | Turn budget, or doctrine that wastes turns |
 | Left a TODO or a stub | Explicit prohibition in the doctrine |
+| Delegated, then repeated the work itself | Drop the subagent, or narrow what it is asked |
+
+Count delegation honestly: a delegating session emits a result event per subagent, so its tokens
+and turns are the sum, not the parent's alone. On a four-task benchmark here the reviewer-subagent
+seed matched the plain one on pass rate while costing 1.7x the tokens - Pareto-dominated, and only
+visible once the accounting was right.
 
 **REQUIRED SUB-SKILL:** `reading-execution-traces` for the method.
 
