@@ -64,6 +64,31 @@ def terminal_tasks(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return result
 
 
+def agent_tasks(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Coding-agent tasks: an instruction, a seeded workspace, and a verification command."""
+    result = []
+    for record in records:
+        instruction = record.get("instruction") or record.get("input")
+        if not instruction:
+            raise ValueError("agent records need 'instruction'")
+        if not record.get("test_command"):
+            raise ValueError("agent records need 'test_command' - the score is its exit code")
+        task = {
+            "instruction": str(instruction),
+            "test_command": str(record["test_command"]),
+            "files": dict(record.get("files") or {}),
+            # Written into the workspace only at scoring time, never shown to the agent.
+            "test_files": dict(record.get("test_files") or {}),
+            "timeout": float(record.get("timeout", 900.0)),
+        }
+        if record.get("repo"):
+            task["repo"] = str(record["repo"])
+        if not task["files"] and "repo" not in task:
+            raise ValueError("agent records need 'files' or 'repo' to seed the workspace")
+        result.append(task)
+    return result
+
+
 def split_tasks(tasks: Sequence[Mapping[str, Any]], search_fraction: float = 0.7,
                 seed: int = 0) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Shuffle deterministically, then cut into a search split and a held-out test split."""

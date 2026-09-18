@@ -14,6 +14,8 @@ from .core import (
 )
 from .agent_proposer import SKILL_PATH, ClaudeCodeProposer, build_view
 from .cache import CachedModel, DiskCache
+from .cc_harness import AgentConfig, ClaudeCodeHarness
+from .cc_history import harness_report, load_sessions, project_slug, write_history_view
 from .claude_cli import ClaudeCliError, ClaudeCliModel
 from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
 from .metrics import METRICS, estimate_tokens, exact_match, math_equivalence, normalize_answer, terminal_metric
@@ -47,6 +49,8 @@ __all__ = [
     "SKILL_PATH", "ClaudeCodeProposer", "build_view",
     "CachedModel", "DiskCache",
     "ClaudeCliError", "ClaudeCliModel",
+    "AgentConfig", "ClaudeCodeHarness",
+    "harness_report", "load_sessions", "project_slug", "write_history_view",
     "classification_tasks", "math_tasks", "read_records", "split_tasks", "terminal_tasks",
     "METRICS", "estimate_tokens", "exact_match", "math_equivalence", "normalize_answer",
     "terminal_metric",

@@ -96,11 +96,48 @@ def terminal_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 1
     return float(completed.returncode == 0)
 
 
+def agent_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 300.0) -> float:
+    """Score an agent run by running the task's own test command in its workspace.
+
+    `prediction` is the workspace path the harness worked in. Verification is deliberately
+    outside the harness: a candidate cannot report its own score.
+    """
+    import os
+    from pathlib import Path
+
+    command = str(task.get("test_command", "")).strip()
+    workspace = str(prediction or "").strip()
+    if not command or not workspace:
+        return 0.0
+    path = Path(workspace)
+    root = os.environ.get("META_HARNESS_WORKSPACE_ROOT")
+    if not path.is_dir():
+        return 0.0
+    if root and not str(path.resolve()).startswith(str(Path(root).resolve())):
+        # A candidate pointing outside the run's workspace root is not being scored.
+        return 0.0
+    # Hidden tests land only now, after the agent is done. It never saw them, so it could not
+    # reverse-engineer the spec from assertions or edit them to pass.
+    for relative, content in (task.get("test_files") or {}).items():
+        target = path / Path(str(relative))
+        if not str(target.resolve()).startswith(str(path.resolve())):
+            return 0.0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(content), encoding="utf-8")
+    try:
+        completed = subprocess.run(command, shell=True, cwd=path, capture_output=True,
+                                   text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    return float(completed.returncode == 0)
+
+
 METRICS: dict[str, Callable[[Any, Mapping[str, Any]], float]] = {
     "classification": exact_match,
     "math": math_equivalence,
     "terminal": terminal_metric,
+    "agent": agent_metric,
 }
 
-__all__ = ["METRICS", "estimate_tokens", "exact_match", "math_equivalence", "normalize_answer",
-           "terminal_metric"]
+__all__ = ["METRICS", "agent_metric", "estimate_tokens", "exact_match", "math_equivalence",
+           "normalize_answer", "terminal_metric"]

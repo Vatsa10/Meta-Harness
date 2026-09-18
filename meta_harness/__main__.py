@@ -11,7 +11,10 @@ from .agent_proposer import ClaudeCodeProposer
 from .cache import CachedModel
 from .core import (CandidateEvaluator, CommandProposer, FilesystemExperience, ParetoFrontier,
                    SearchConfig, SearchRunner)
-from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
+from .datasets import (agent_tasks, classification_tasks, math_tasks, read_records,
+                        split_tasks, terminal_tasks)
+from .cc_history import (draft_tasks, harness_report, load_sessions, project_slug,
+                         write_history_view)
 from .demo import run as run_demo
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
@@ -21,8 +24,10 @@ DEFAULT_BASELINES = {
     "classification": ["zero_shot.py", "few_shot.py", "ace.py", "mce.py"],
     "math": ["math_zero_shot.py", "math_bm25.py"],
     "terminal": ["terminal_basic.py"],
+    "agent": ["cc_default.py", "cc_guided.py", "cc_subagent.py"],
 }
-ADAPTERS = {"classification": classification_tasks, "math": math_tasks, "terminal": terminal_tasks}
+ADAPTERS = {"classification": classification_tasks, "math": math_tasks,
+            "terminal": terminal_tasks, "agent": agent_tasks}
 # Aliases the CLI resolves to the current model of each size. The paper's agentic-coding
 # result (section 4.3) is on Haiku 4.5, so haiku is the default harness model here.
 CLAUDE_CLI_MODELS = ["haiku", "sonnet", "opus"]
@@ -46,6 +51,18 @@ def build_parser() -> argparse.ArgumentParser:
     models = sub.add_parser("models", help="list available harness models")
     models.add_argument("--provider", choices=["claude-cli", "unikey"], default="claude-cli")
 
+    mine = sub.add_parser(
+        "mine", help="read this machine's Claude Code history into a proposer-readable view")
+    mine.add_argument("--project", help="project slug, or a path (default: every project)")
+    mine.add_argument("--this-project", action="store_true",
+                      help="only the current working directory's history")
+    mine.add_argument("--limit", type=int, default=100, help="most recent sessions to read")
+    mine.add_argument("--min-turns", type=int, default=4)
+    mine.add_argument("--out", default=".meta-harness/history")
+    mine.add_argument("--include-text", action="store_true",
+                      help="keep message text. Transcripts contain whatever you typed; off by default")
+    mine.add_argument("--draft-tasks", help="also write draft eval tasks to this JSONL path")
+
     run = sub.add_parser("run", help="run a provider-backed harness search")
     run.add_argument("--tasks", required=True, help="JSON, JSONL, or CSV dataset")
     run.add_argument("--test-tasks", help="held-out dataset; omit to split --tasks")
@@ -59,7 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default="haiku",
                      help="harness model; a claude-cli alias (haiku, sonnet, opus) or a "
                           "gateway model id")
-    run.add_argument("--task-type", choices=["classification", "math", "terminal"], default="classification")
+    run.add_argument("--task-type", choices=["classification", "math", "terminal", "agent"],
+                     default="classification")
     run.add_argument("--root", default=".meta-harness")
     run.add_argument("--test-root")
     run.add_argument("--iterations", type=int, default=10)
@@ -77,6 +95,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--task-timeout", type=float, default=600.0)
     run.add_argument("--allow-local-shell", action="store_true",
                      help="terminal tasks only: run model-authored commands on this machine")
+    run.add_argument("--workspace-root",
+                     help="agent tasks only: where throwaway task workspaces are created")
+    run.add_argument("--agent-bash", action="store_true",
+                     help="agent tasks only: let candidate harnesses grant the Bash tool")
+    run.add_argument("--mine-history", action="store_true",
+                     help="mine local Claude Code history into <root>/history so the proposer "
+                          "can diagnose from real sessions")
+    run.add_argument("--history-limit", type=int, default=60)
+    run.add_argument("--history-include-text", action="store_true")
     return parser
 
 
@@ -109,9 +136,62 @@ def _load_tasks(args) -> tuple[list[dict], list[dict]]:
     return split_tasks(search, args.search_fraction, args.split_seed)
 
 
+def _command_mine(args) -> int:
+    project = args.project
+    if args.this_project:
+        project = project_slug(Path.cwd())
+    elif project and ("/" in project or "\\" in project or Path(project).exists()):
+        project = project_slug(project)
+    sessions = load_sessions(project=project, limit=args.limit,
+                             include_text=args.include_text, min_turns=args.min_turns)
+    if not sessions:
+        print(json.dumps({"sessions": 0,
+                          "hint": "no transcripts found; check --project or ~/.claude/projects"},
+                         indent=2))
+        return 1
+    destination = write_history_view(sessions, Path(args.out), include_text=args.include_text)
+    report = harness_report(sessions)
+    if args.draft_tasks:
+        drafts = draft_tasks(sessions)
+        Path(args.draft_tasks).parent.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(json.dumps(d) for d in drafts)
+        Path(args.draft_tasks).write_text(body + ("\n" if drafts else ""), encoding="utf-8")
+    print(json.dumps({
+        "view": str(destination),
+        "redacted": not args.include_text,
+        "sessions": report["sessions"],
+        "tool_calls": report["tool_calls"],
+        "error_rate": report["error_rate"],
+        "read_to_write_ratio": report["read_to_write_ratio"],
+        "subagent_calls": report["subagent_calls"],
+        "workflow_calls": report["workflow_calls"],
+        "skill_calls": report["skill_calls"],
+        "episode_kinds": report["episode_kinds"],
+        "top_tools": dict(list(report["tool_histogram"].items())[:8]),
+        "top_errors": dict(list(report["tool_errors"].items())[:6]),
+        "draft_tasks": args.draft_tasks,
+    }, indent=2))
+    return 0
+
+
 def _command_run(args) -> int:
     if args.allow_local_shell:
         os.environ["META_HARNESS_ALLOW_LOCAL_SHELL"] = "1"
+    if args.agent_bash:
+        os.environ["META_HARNESS_AGENT_BASH"] = "1"
+    if args.task_type == "agent":
+        root = Path(args.workspace_root or (Path(args.root).parent / ".meta-harness-workspaces"))
+        root.mkdir(parents=True, exist_ok=True)
+        os.environ["META_HARNESS_WORKSPACE_ROOT"] = str(root.resolve())
+    if args.mine_history:
+        sessions = load_sessions(limit=args.history_limit,
+                                 include_text=args.history_include_text)
+        if sessions:
+            view = write_history_view(sessions, Path(args.root) / "history",
+                                      include_text=args.history_include_text)
+            print(f"mined {len(sessions)} session(s) of Claude Code history into {view}")
+        else:
+            print("no local Claude Code history found; continuing without it")
     search_tasks, test_tasks = _load_tasks(args)
     if args.provider == "claude-cli":
         from .claude_cli import ClaudeCliModel
@@ -168,6 +248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         print("\n".join(list_unikey_models()))
         return 0
+    if args.command == "mine":
+        return _command_mine(args)
     if args.command == "run":
         return _command_run(args)
     experience = FilesystemExperience(args.root)

@@ -1,0 +1,186 @@
+import json
+from pathlib import Path
+
+from meta_harness.cc_history import (draft_tasks, failure_episodes, harness_report,
+                                     is_artifact_project, load_sessions, parse_session,
+                                     project_slug, write_history_view)
+
+
+def _write_transcript(path: Path, records) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    return path
+
+
+def _assistant(tools=(), text="", sidechain=False):
+    content = [{"type": "text", "text": text}] if text else []
+    for index, name in enumerate(tools):
+        content.append({"type": "tool_use", "id": f"t{index}", "name": name, "input": {"a": 1}})
+    return {"type": "assistant", "message": {"content": content}, "isSidechain": sidechain,
+            "cwd": "D:\\repo", "gitBranch": "main", "version": "2.1.0",
+            "timestamp": "2026-09-18T10:00:00Z"}
+
+
+def _results(ids_errors):
+    content = [{"type": "tool_result", "tool_use_id": i, "is_error": e, "content": "out"}
+               for i, e in ids_errors]
+    return {"type": "user", "message": {"content": content}}
+
+
+def _human(text):
+    return {"type": "user", "message": {"content": text}}
+
+
+# --- slug ------------------------------------------------------------------
+
+def test_project_slug_uses_one_dash_per_non_alnum():
+    # Claude Code writes D:\a\b as D--a-b: the colon and the separator each become a dash.
+    assert project_slug("D:\\a\\b").endswith("D--a-b") or project_slug("/a/b").endswith("-a-b")
+
+
+def test_artifact_projects_are_recognised():
+    assert is_artifact_project("D--x--meta-harness-workspaces-mh-agent-abc")
+    assert not is_artifact_project("D--Files-Projects-RealWork")
+
+
+# --- parsing ---------------------------------------------------------------
+
+def test_parses_tools_and_errors(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _human("do the thing"),
+        _assistant(tools=["Read", "Edit"]),
+        _results([("t0", False), ("t1", True)]),
+    ])
+    session = parse_session(path)
+    assert session.tool_counts == {"Read": 1, "Edit": 1}
+    assert session.error_count == 1
+    assert session.cwd == "D:\\repo" and session.git_branch == "main"
+
+
+def test_redaction_drops_assistant_text_by_default(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _assistant(text="secret internal reasoning", tools=["Read"]),
+    ])
+    assert parse_session(path).turns[0].text == ""
+    assert "secret" in parse_session(path, include_text=True).turns[0].text
+
+
+def test_subagent_and_workflow_counted_from_tool_calls(tmp_path: Path):
+    # isSidechain is false in real transcripts; delegation shows up as a tool call.
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _assistant(tools=["Agent", "Agent", "Workflow", "Skill", "Read"]),
+    ])
+    session = parse_session(path)
+    assert session.subagent_turns == 2
+    assert session.workflow_calls == 1
+    assert session.skill_calls == 1
+
+
+# --- episodes --------------------------------------------------------------
+
+def test_tool_error_episode(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _assistant(tools=["Bash"]), _results([("t0", True)]),
+    ])
+    episodes = failure_episodes(parse_session(path))
+    assert [e.kind for e in episodes] == ["tool_error"]
+    assert episodes[0].tools == ["Bash"]
+
+
+def test_correction_detected_across_a_toolless_closing_turn(tmp_path: Path):
+    # The human never replies to a tool call; their turn lands after a closing assistant
+    # message with no tools. A one-turn lookback would miss every correction.
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _human("fix it"),
+        _assistant(tools=["Edit"]),
+        _results([("t0", False)]),
+        _assistant(text="Done."),
+        _human("no, that broke the build - revert"),
+    ])
+    episodes = failure_episodes(parse_session(path, include_text=True))
+    kinds = [e.kind for e in episodes]
+    assert "correction" in kinds
+    correction = next(e for e in episodes if e.kind == "correction")
+    assert "Edit" in correction.tools
+    assert correction.matched
+
+
+def test_correction_needs_preceding_work(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [_human("that's wrong")])
+    assert failure_episodes(parse_session(path, include_text=True)) == []
+
+
+def test_thrash_episode(tmp_path: Path):
+    records = []
+    for _ in range(8):
+        records.append(_assistant(tools=["Bash"]))
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", records)
+    assert any(e.kind == "thrash" for e in failure_episodes(parse_session(path)))
+
+
+# --- report and view -------------------------------------------------------
+
+def test_report_aggregates_read_write_ratio(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _assistant(tools=["Read", "Write", "Write", "Write", "Write"]),
+    ])
+    report = harness_report([parse_session(path)])
+    assert report["read_to_write_ratio"] == 0.25
+    assert report["tool_calls"] == 5
+
+
+def test_view_redacts_user_text_but_keeps_the_signal(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _human("fix it"), _assistant(tools=["Edit"]), _results([("t0", False)]),
+        _assistant(text="Done."), _human("no, that doesn't work - revert it"),
+    ])
+    sessions = [parse_session(path, include_text=True)]
+    view = write_history_view(sessions, tmp_path / "view", include_text=False)
+    episodes = [json.loads(l) for l in (view / "episodes.jsonl").read_text().splitlines()]
+    correction = next(e for e in episodes if e["kind"] == "correction")
+    assert correction["user_text"] == ""          # the private part is gone
+    assert correction["matched"]                   # the signal is kept
+    assert correction["tools"] == ["Edit"]
+    assert not any("doesn't work" in l for l in (view / "episodes.jsonl").read_text().splitlines())
+
+
+def test_view_keeps_transcript_when_asked(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [_human("hello there")])
+    sessions = [parse_session(path, include_text=True)]
+    view = write_history_view(sessions, tmp_path / "view", include_text=True)
+    summary = json.loads((view / "sessions" / "s1.json").read_text())
+    assert "transcript" in summary
+
+
+def test_view_writes_report_and_readme(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [_assistant(tools=["Read"])])
+    view = write_history_view([parse_session(path)], tmp_path / "view")
+    assert json.loads((view / "report.json").read_text())["tool_calls"] == 1
+    assert "episodes.jsonl" in (view / "README.md").read_text()
+
+
+# --- drafts ----------------------------------------------------------------
+
+def test_draft_tasks_leave_verification_to_a_human(tmp_path: Path):
+    path = _write_transcript(tmp_path / "proj" / "s1.jsonl", [
+        _human("fix it"), _assistant(tools=["Edit"]), _results([("t0", False)]),
+        _assistant(text="Done."), _human("no, you broke the tests"),
+    ])
+    drafts = draft_tasks([parse_session(path, include_text=True)])
+    assert drafts, "a correction episode should yield a draft"
+    assert drafts[0]["test_command"] == ""      # history contains no verification
+    assert drafts[0]["instruction"] == ""
+    assert "_todo" in drafts[0]
+
+
+# --- loading ---------------------------------------------------------------
+
+def test_load_sessions_skips_short_ones_and_artifacts(tmp_path: Path):
+    home = tmp_path / "claude"
+    _write_transcript(home / "projects" / "D--real" / "a.jsonl",
+                      [_assistant(tools=["Read"]) for _ in range(6)])
+    _write_transcript(home / "projects" / "D--x--mh-agent-zzz" / "b.jsonl",
+                      [_assistant(tools=["Read"]) for _ in range(6)])
+    _write_transcript(home / "projects" / "D--real" / "tiny.jsonl", [_assistant(tools=["Read"])])
+    sessions = load_sessions(home=home, min_turns=4)
+    assert [s.session_id for s in sessions] == ["a"]

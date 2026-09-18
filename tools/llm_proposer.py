@@ -8,8 +8,9 @@ and makes a full search runnable anywhere.
     meta-harness run ... --proposer-command "python tools/llm_proposer.py"
 
 Environment: META_HARNESS_ROOT, META_HARNESS_OUTPUT, META_HARNESS_ITERATION,
-META_HARNESS_COUNT (set by the runner), plus UNIKEY_API_KEY and optionally
-META_HARNESS_PROPOSER_MODEL (default: claude-opus-4-8).
+META_HARNESS_COUNT (set by the runner). By default it calls the local `claude` CLI
+(no API key); META_HARNESS_PROPOSER_PROVIDER and META_HARNESS_PROPOSER_MODEL
+override that.
 """
 
 from __future__ import annotations
@@ -35,14 +36,32 @@ Required interface:
 
     class Harness:
         def run(self, task, model, trace):
-            # task: classification {"input", "label"?, "labels"?} | math {"problem", "answer"?}
+            # task: classification {"input","label"?,"labels"?} | math {"problem","answer"?}
+            #     | agent {"instruction","files","test_command"}
             # model(prompt) -> str        (every call is priced in input tokens)
             # trace.event(name, payload)  (written to traces.jsonl for the next proposer)
             ...
 
 The instance persists across the tasks of one evaluation, so self is your memory. The label is
 available only AFTER you predict - use it to update memory, never to produce the prediction.
-Standard library only, plus meta_harness.retrieval (TfidfIndex, BM25Index).
+Standard library only, plus meta_harness.retrieval (TfidfIndex, BM25Index) and, for agent
+tasks, meta_harness.cc_harness.
+
+AGENT TASKS: the harness under search is a Claude Code invocation. Subclass ClaudeCodeHarness
+and return an AgentConfig from config(task):
+
+    from meta_harness.cc_harness import AgentConfig, ClaudeCodeHarness
+
+    class Harness(ClaudeCodeHarness):
+        def config(self, task):
+            return AgentConfig(append_system_prompt="...", prompt_template="{instruction}",
+                               allowed_tools=("Read","Write","Edit","Glob","Grep"),
+                               max_turns=30, model="haiku")
+
+You control the doctrine, the instruction framing, the tool set, the turn budget and the model.
+You do not control scoring: the task's own test_command runs afterwards, and the tests are
+hidden from the agent. Never try to report your own score. Read agent_step trace events to see
+what the agent did and where it stopped.
 
 Two objectives: higher score, lower context cost (input tokens). Never hard-code dataset
 strings or answers. Never crash on empty labels, empty memory, or an odd model reply.
@@ -98,6 +117,42 @@ def first_prompt(directory: Path) -> str:
                 except ValueError:
                     return ""
     return ""
+
+
+def history_digest(root: Path, limit: int = 12) -> str:
+    """Mined Claude Code history, if this run enabled it. Real failures beat candidate traces."""
+    report_path = root / "history" / "report.json"
+    if not report_path.is_file():
+        return ""
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    lines = ["\n=== mined Claude Code history (real sessions on this machine) ===",
+             f"sessions={report.get('sessions')} tool_calls={report.get('tool_calls')} "
+             f"error_rate={report.get('error_rate')} read_to_write={report.get('read_to_write_ratio')}",
+             f"subagent_calls={report.get('subagent_calls')} workflow_calls={report.get('workflow_calls')} "
+             f"skill_calls={report.get('skill_calls')}",
+             f"episodes={report.get('episode_kinds')}",
+             f"top tools={list((report.get('tool_histogram') or {}).items())[:8]}",
+             f"top errors={list((report.get('tool_errors') or {}).items())[:6]}"]
+    episodes_path = root / "history" / "episodes.jsonl"
+    if episodes_path.is_file():
+        shown = 0
+        with episodes_path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                try:
+                    episode = json.loads(line)
+                except ValueError:
+                    continue
+                if episode.get("kind") != "correction":
+                    continue
+                lines.append(f"  correction: {episode.get('detail')} after tools "
+                             f"{episode.get('tools')} [{episode.get('matched')}]")
+                shown += 1
+                if shown >= limit:
+                    break
+    return "\n".join(lines)
 
 
 def build_prompt(root: Path, iteration: int, count: int) -> str:
@@ -160,8 +215,8 @@ def main() -> int:
     count = int(os.environ.get("META_HARNESS_COUNT", "1"))
     output.mkdir(parents=True, exist_ok=True)
 
-    model = model_from_environment(os.environ.get("META_HARNESS_PROPOSER_PROVIDER", "unikey"),
-                                   os.environ.get("META_HARNESS_PROPOSER_MODEL", "claude-opus-4-8"))
+    model = model_from_environment(os.environ.get("META_HARNESS_PROPOSER_PROVIDER", "claude-cli"),
+                                   os.environ.get("META_HARNESS_PROPOSER_MODEL", "opus"))
     prompt = build_prompt(root, iteration, count)
     print(f"[proposer] prompt {len(prompt)} chars, asking for {count} candidate(s)")
     # No max_tokens: the gateway's per-model default is more portable than guessing which
