@@ -12,15 +12,20 @@ the proposer never sees.
 
 ## Use it from Claude Code
 
-The repository is also a Claude Code plugin — four skills and a read-only analyst agent, with
-Claude Haiku 4.5 as the default harness model (the paper's §4.3 setup).
+The repository is also a Claude Code plugin. Not a wrapper around the CLI — four model-invoked
+skills that change how Claude works on prompts, agent scaffolds and retrieval:
 
 ```bash
-claude --plugin-dir .            # try it
-/meta-harness:search data/ticket_intents.jsonl
+claude --plugin-dir .
 ```
 
-See [docs/plugin.md](docs/plugin.md) for install, the skill list, and why Haiku is the default.
+`optimizing-harnesses` carries the discipline (one change per candidate, every candidate kept, no
+score without a trace, held-out split read once). `building-eval-sets`, `reading-execution-traces`
+and `running-harness-search` handle the pieces. The engine below is the escalation path when
+hand-tuning stalls; the skills need nothing installed.
+
+See [docs/plugin.md](docs/plugin.md) for the skill list, the baseline testing behind it, and why
+Haiku 4.5 is the default harness model.
 
 ## Install
 

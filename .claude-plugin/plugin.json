@@ -1,18 +1,20 @@
 {
   "name": "meta-harness",
   "displayName": "Meta-Harness",
-  "description": "Search over LLM harness code: a coding-agent proposer reads every prior candidate's source, scores and execution traces, then writes better harnesses. Defaults to Claude Haiku 4.5 as the harness model, following the paper's agentic-coding setup.",
-  "version": "0.3.0",
+  "description": "Harness engineering discipline: attribute every prompt/agent change, keep every candidate, diagnose from traces, and hold out a split. Escalates to an automated propose-evaluate-log search when hand-tuning stalls.",
+  "version": "0.4.0",
   "author": {
     "name": "Vatsa"
   },
   "license": "MIT",
   "keywords": [
-    "harness",
-    "optimization",
     "prompt-engineering",
     "context-engineering",
     "evaluation",
-    "haiku"
+    "eval-set",
+    "harness",
+    "optimization",
+    "agent-scaffold",
+    "traces"
   ]
 }
