@@ -195,3 +195,69 @@ def test_agent_tasks_requires_a_workspace_source():
 def test_agent_tasks_defaults_timeout():
     task = agent_tasks([{"instruction": "x", "test_command": "exit 0", "files": {"a.py": ""}}])[0]
     assert task["timeout"] == 900.0
+
+
+# --- subagents: the ceiling must bind them too -----------------------------
+
+def test_subagent_tools_are_clamped_to_the_ceiling(monkeypatch):
+    monkeypatch.delenv("META_HARNESS_AGENT_BASH", raising=False)
+    config = AgentConfig(agents={"v": {"prompt": "check", "tools": ["Read", "Bash", "WebFetch"]}})
+    # --allowed-tools governs the main session only; without clamping, a candidate could hand
+    # itself Bash through a subagent definition.
+    assert config.bounded_agents()["v"]["tools"] == ["Read"]
+
+
+def test_subagent_without_tools_gets_read_only_defaults(monkeypatch):
+    monkeypatch.delenv("META_HARNESS_AGENT_BASH", raising=False)
+    assert AgentConfig(agents={"v": "just a prompt"}).bounded_agents()["v"]["tools"] == [
+        "Glob", "Grep", "Read"]
+
+
+def test_subagent_may_have_bash_only_when_the_run_enables_it(monkeypatch):
+    monkeypatch.setenv("META_HARNESS_AGENT_BASH", "1")
+    assert AgentConfig(agents={"v": {"tools": ["Bash"]}}).bounded_agents()["v"]["tools"] == ["Bash"]
+
+
+def test_invocation_sends_bounded_agents(monkeypatch, tmp_path: Path):
+    monkeypatch.delenv("META_HARNESS_AGENT_BASH", raising=False)
+    calls = []
+    _fake_run(monkeypatch, _stream(_result_row()), capture=calls)
+    ws = prepare_workspace(TASK, tmp_path)
+    config = AgentConfig(agents={"v": {"prompt": "p", "tools": ["Bash"]}})
+    with TraceRecorder(tmp_path / "t.jsonl") as trace:
+        run_claude_code(ws, config, TASK, trace)
+    argv = calls[0][0]
+    sent = json.loads(argv[argv.index("--agents") + 1])
+    assert sent["v"]["tools"] == ["Read"]
+
+
+def test_candidate_skills_are_loaded_as_a_plugin(monkeypatch, tmp_path: Path):
+    calls = []
+    _fake_run(monkeypatch, _stream(_result_row()), capture=calls)
+    ws = prepare_workspace(TASK, tmp_path)
+    with TraceRecorder(tmp_path / "t.jsonl") as trace:
+        run_claude_code(ws, AgentConfig(skills={"read-first": "Read before editing."}), TASK, trace)
+    argv = calls[0][0]
+    plugin = Path(argv[argv.index("--plugin-dir") + 1])
+    assert (plugin / "skills" / "read-first" / "SKILL.md").is_file()
+
+
+# --- accounting across delegated sessions ----------------------------------
+
+def test_turns_and_cost_span_subagent_results(monkeypatch, tmp_path: Path):
+    # A delegating session emits one result event per subagent plus its own. Taking the last
+    # reported the subagent's turn count as the whole session's.
+    stdout = _stream(
+        {"type": "result", "subtype": "success", "is_error": False, "num_turns": 9,
+         "usage": {"input_tokens": 100, "cache_read_input_tokens": 900}, "total_cost_usd": 0.05},
+        {"type": "result", "subtype": "success", "is_error": False, "num_turns": 1,
+         "usage": {"input_tokens": 10, "cache_read_input_tokens": 90}, "total_cost_usd": 0.01},
+    )
+    _fake_run(monkeypatch, stdout)
+    ws = prepare_workspace(TASK, tmp_path)
+    with TraceRecorder(tmp_path / "t.jsonl") as trace:
+        run = run_claude_code(ws, AgentConfig(), TASK, trace)
+    assert run.turns == 9
+    assert run.input_tokens == 1100
+    assert round(run.cost_usd, 4) == 0.06
+    assert run.subagent_results == 1

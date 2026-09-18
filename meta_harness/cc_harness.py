@@ -71,11 +71,33 @@ class AgentConfig:
             files="\n".join(sorted(p.name for p in workspace.iterdir() if p.is_file())),
         )
 
-    def tools(self) -> list[str]:
-        ceiling = set(TOOL_CEILING)
+    @staticmethod
+    def ceiling() -> set[str]:
+        allowed = set(TOOL_CEILING)
         if os.environ.get(BASH_ENV) == "1":
-            ceiling.add("Bash")
-        return [tool for tool in self.allowed_tools if tool in ceiling] or ["Read"]
+            allowed.add("Bash")
+        return allowed
+
+    def tools(self) -> list[str]:
+        return [tool for tool in self.allowed_tools if tool in self.ceiling()] or ["Read"]
+
+    def bounded_agents(self) -> dict[str, Any]:
+        """Subagent definitions with their tool lists clamped to the same ceiling.
+
+        --allowed-tools governs the main session only: a subagent carries its own tool list, so
+        without this a candidate could hand itself Bash through an agent definition.
+        """
+        allowed = self.ceiling()
+        bounded: dict[str, Any] = {}
+        for name, spec in dict(self.agents or {}).items():
+            entry = dict(spec) if isinstance(spec, Mapping) else {"prompt": str(spec)}
+            requested = entry.get("tools")
+            if requested:
+                entry["tools"] = [t for t in requested if t in allowed] or ["Read"]
+            else:
+                entry["tools"] = sorted(allowed & {"Read", "Glob", "Grep"})
+            bounded[str(name)] = entry
+        return bounded
 
 
 @dataclass
@@ -87,6 +109,7 @@ class AgentRun:
     cost_usd: float = 0.0
     completed: bool = False
     error: str | None = None
+    subagent_results: int = 0
 
 
 def prepare_workspace(task: Mapping[str, Any], root: Path | None = None) -> Path:
@@ -172,7 +195,7 @@ def run_claude_code(workspace: Path, config: AgentConfig, task: Mapping[str, Any
     if config.append_system_prompt:
         argv += ["--append-system-prompt", config.append_system_prompt]
     if config.agents:
-        argv += ["--agents", json.dumps(dict(config.agents))]
+        argv += ["--agents", json.dumps(config.bounded_agents())]
     if config.skills:
         plugin = write_candidate_plugin(config.skills, workspace.parent)
         argv += ["--plugin-dir", str(plugin)]
@@ -217,16 +240,22 @@ def run_claude_code(workspace: Path, config: AgentConfig, task: Mapping[str, Any
             rows.append(value)
 
     run = AgentRun(transcript=rows, workspace=workspace)
-    for row in rows:
-        if row.get("type") == "result":
-            usage = row.get("usage") or {}
-            run.turns = int(row.get("num_turns", 0) or 0)
-            run.input_tokens = int(usage.get("input_tokens", 0) or 0) + \
-                int(usage.get("cache_read_input_tokens", 0) or 0)
-            run.cost_usd = float(row.get("total_cost_usd", 0.0) or 0.0)
-            run.completed = not row.get("is_error")
-            if row.get("is_error"):
-                run.error = f"{row.get('subtype')}: {str(row.get('result'))[:300]}"
+    results = [row for row in rows if row.get("type") == "result"]
+    # A session that delegates emits a result event per subagent as well as its own. Taking the
+    # last one reported a subagent's turn count as the whole session's; summing tokens and cost
+    # and keeping the largest turn count keeps both objectives honest.
+    for row in results:
+        usage = row.get("usage") or {}
+        run.turns = max(run.turns, int(row.get("num_turns", 0) or 0))
+        run.input_tokens += int(usage.get("input_tokens", 0) or 0) + \
+            int(usage.get("cache_read_input_tokens", 0) or 0)
+        run.cost_usd += float(row.get("total_cost_usd", 0.0) or 0.0)
+    if results:
+        main = results[-1]
+        run.completed = not main.get("is_error")
+        if main.get("is_error"):
+            run.error = f"{main.get('subtype')}: {str(main.get('result'))[:300]}"
+    run.subagent_results = max(0, len(results) - 1)
     if not rows:
         run.error = (completed.stderr or "agent produced no events")[:400]
 
@@ -235,7 +264,7 @@ def run_claude_code(workspace: Path, config: AgentConfig, task: Mapping[str, Any
         trace.event("agent_step", event)
     trace.event("agent_end", {"turns": run.turns, "input_tokens": run.input_tokens,
                               "cost_usd": run.cost_usd, "completed": run.completed,
-                              "error": run.error,
+                              "subagent_results": run.subagent_results, "error": run.error,
                               "elapsed_seconds": round(time.perf_counter() - started, 1)})
     trace.add_context_cost(run.input_tokens)
     return run
