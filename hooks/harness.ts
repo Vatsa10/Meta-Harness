@@ -6,6 +6,7 @@
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
+import { evaluateRule, loadRules, type Rule, type SessionState } from './rules.ts';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -134,7 +135,39 @@ export function registerObserver(on: On): void {
   }));
 }
 
+/**
+ * Enforces installed `rule` artifacts at tool.check: the layer that costs no standing tokens
+ * and cannot be talked around, because it runs before the tool call, not as prose in a prompt.
+ *
+ * Registers two independent `tool.call`/`tool.check` handlers alongside registerObserver's own
+ * `tool.call` handler above. Each handler here calls `next` unconditionally (the read-tracking
+ * one always; the tool.check one on every path that does not deny), so the two compose in
+ * either registration order: a handler that always forwards never depends on what ran before it.
+ */
+export function registerRules(on: On): void {
+  const state: SessionState = { readPaths: new Set<string>() };
+  let rules: Rule[] | null = null;
+
+  on('tool.call', safely('tool.call:read-tracking', async (dollar, event: any, next) => {
+    if (event?.tool === 'Read') {
+      const path = String(event?.input?.file_path ?? '');
+      if (path) state.readPaths.add(path);
+    }
+    return next(event);
+  }));
+
+  on('tool.check', safely('tool.check', async (dollar, event: any, next) => {
+    if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
+    for (const rule of rules) {
+      const verdict = evaluateRule(rule, event, state);
+      if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
+    }
+    return next(event);
+  }));
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
   registerObserver(on);
+  registerRules(on);
 };
