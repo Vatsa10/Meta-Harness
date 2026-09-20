@@ -27,6 +27,18 @@ hand-tuning stalls; the skills need nothing installed.
 See [docs/plugin.md](docs/plugin.md) for the skill list, the baseline testing behind it, and why
 Haiku 4.5 is the default harness model.
 
+### Learning from failures
+
+```bash
+python -m meta_harness learn            # failure -> artifact -> replay-scored -> staged
+python -m meta_harness learn --status
+python -m meta_harness learn --accept <id>
+```
+
+Each artifact is kept only if it fixes the failure it was born from without regressing the task
+set, and nothing installs itself. See
+[the design](docs/superpowers/specs/2026-09-20-learning-harness-design.md).
+
 ## Install
 
 ```bash
