@@ -166,8 +166,67 @@ export function registerRules(on: On): void {
   }));
 }
 
+type Injection = { artifactId: string; triggers: string[]; text: string };
+
+/** Installed `injection` artifacts only: a `rule`, `skill` or `doctrine` row is never surfaced here. */
+async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
+  const registry = `${home}/installed.json`;
+  if (!(await dollar.fs.exists(registry))) return [];
+  let entries: Array<{ id: string; type: string }> = [];
+  try {
+    entries = JSON.parse(await dollar.fs.read(registry));
+  } catch {
+    return [];
+  }
+  const out: Injection[] = [];
+  for (const entry of entries) {
+    if (entry.type !== 'injection') continue;
+    const path = `${home}/artifacts/${entry.id}/artifact.json`;
+    if (!(await dollar.fs.exists(path))) continue;
+    try {
+      const artifact = JSON.parse(await dollar.fs.read(path));
+      out.push({
+        artifactId: artifact.id,
+        triggers: artifact.origin?.triggers ?? [],
+        text: String(artifact.payload ?? ''),
+      });
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
+
+/**
+ * Injects installed `injection` artifacts into the prompt: the layer below `rule`, paid in
+ * standing tokens only on the turns where it actually fires. Returning `{text: null}` (rather
+ * than omitting the field) leaves the section out entirely, so an irrelevant turn pays nothing.
+ * The hook itself knows what it placed, so use is recorded by construction via `observe`
+ * instead of asking the model to self-report a retrieval it might forget.
+ */
+export function registerInjection(on: On): void {
+  let injections: Injection[] | null = null;
+
+  on('prompt.section', safely('prompt.section', async (dollar, event: any, next) => {
+    if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
+    if (injections.length === 0) return next(event);
+
+    const haystack = JSON.stringify(event ?? {}).toLowerCase();
+    const matched = injections.filter((injection) =>
+      injection.triggers.some((trigger) => haystack.includes(String(trigger).toLowerCase())));
+    if (matched.length === 0) return { text: null };
+
+    const sessionId = await currentSessionId(dollar);
+    for (const injection of matched) {
+      await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
+    }
+    return { text: matched.map((injection) => injection.text).join('\n\n') };
+  }));
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
   registerObserver(on);
   registerRules(on);
+  registerInjection(on);
 };
