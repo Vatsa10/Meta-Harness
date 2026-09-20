@@ -24,4 +24,5 @@ def test_every_hook_is_wrapped_so_it_fails_open():
 
 def test_plugin_declares_the_hooks_directory():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    assert manifest.get("hooks", "./hooks/hooks.json").endswith("hooks.json")
+    assert "hooks" in manifest
+    assert manifest["hooks"] == "./hooks/hooks.json"
