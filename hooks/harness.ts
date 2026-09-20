@@ -6,7 +6,7 @@
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
-import { evaluateRule, loadRules, type Rule, type SessionState } from './rules.ts';
+import { evaluateRule, loadRules, type Rule, type SessionState } from './rules.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 

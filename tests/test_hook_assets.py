@@ -78,6 +78,7 @@ def test_observer_behaviour_via_node():
 
     result = subprocess.run(
         [node, "--experimental-strip-types", "--no-warnings",
+         "--import", (ROOT / "hooks" / "loaders" / "preload.mjs").as_uri(),
          str(ROOT / "hooks" / "harness.observer.test.mts")],
         capture_output=True,
         text=True,

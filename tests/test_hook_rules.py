@@ -45,6 +45,7 @@ def test_rules_behaviour_via_node():
 
     result = subprocess.run(
         [node, "--experimental-strip-types", "--no-warnings",
+         "--import", (ROOT / "hooks" / "loaders" / "preload.mjs").as_uri(),
          str(ROOT / "hooks" / "harness.rules.test.mts")],
         capture_output=True,
         text=True,
