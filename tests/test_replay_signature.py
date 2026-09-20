@@ -34,3 +34,18 @@ def test_correction_signature_is_session_scoped():
 
 def test_missing_tools_still_yields_a_signature():
     assert episode_signature(_episode(tools=())) == "tool_error:unknown:other"
+
+
+def test_charmap_encode_error_is_not_swallowed_by_decode_pattern():
+    episode = _episode(assistant_text="UnicodeEncodeError: 'charmap' codec can't encode character '✓'")
+    assert episode_signature(episode) == "tool_error:Bash:unicode-encode"
+
+
+def test_charmap_decode_error_still_classifies_as_decode():
+    episode = _episode(assistant_text="UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d")
+    assert episode_signature(episode) == "tool_error:Bash:unicode-decode"
+
+
+def test_bare_cp1252_mention_still_classifies_as_decode():
+    episode = _episode(assistant_text="failed with cp1252")
+    assert episode_signature(episode) == "tool_error:Bash:unicode-decode"

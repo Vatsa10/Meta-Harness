@@ -16,8 +16,8 @@ from .cc_history import FailureEpisode
 # Matched against the error text of a failed tool result, most specific first. The slug is what
 # makes two instances of one fault share a signature; without it dedupe never fires.
 ERROR_PATTERNS: tuple[tuple[str, str], ...] = (
-    (r"UnicodeDecodeError|charmap|cp1252", "unicode-decode"),
     (r"UnicodeEncodeError", "unicode-encode"),
+    (r"UnicodeDecodeError|charmap|cp1252", "unicode-decode"),
     (r"No such file or directory|cannot find the (file|path)", "missing-path"),
     (r"Permission denied|EACCES", "permission"),
     (r"command not found|is not recognized as", "missing-command"),
