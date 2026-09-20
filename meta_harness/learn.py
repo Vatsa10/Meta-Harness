@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -12,8 +13,8 @@ from typing import Any, Callable, Mapping, Sequence
 from .cc_harness import AgentConfig, ClaudeCodeHarness, prepare_workspace, run_claude_code
 from .cc_history import FailureEpisode, Session, failure_episodes
 from .core import TraceRecorder
-from .harness_store import ARTIFACT_TYPES, Artifact, HarnessStore
-from .replay import build_replay, episode_signature, load_agent_steps, verify_expectation  # noqa: F401  (re-exported for the CLI)
+from .harness_store import ARTIFACT_TYPES, Artifact, HarnessStore, harness_home
+from .replay import _cause, build_replay, episode_signature, load_agent_steps, verify_expectation  # noqa: F401  (re-exported for the CLI)
 
 PROMPT_PATH = Path(__file__).resolve().parent / "learn_prompt.md"
 
@@ -44,10 +45,67 @@ def rank_failures(sessions: Sequence[Session]) -> list[FailureClass]:
     return sorted(grouped.values(), key=lambda f: (-f.count, f.signature))
 
 
-def select_target(sessions: Sequence[Session], store: HarnessStore) -> FailureClass | None:
-    """The most frequent failure not already covered by an installed artifact or a tombstone."""
+def observed_failures(home: Path | None = None) -> list[FailureClass]:
+    """Failure classes the hook recorded live, fresher evidence than mined transcripts.
+
+    Task 10's observer writes one file per session (`observed-<sessionId>.jsonl`), not a single
+    shared log: the hook filesystem capability has no append or lock primitive, so per-session
+    files avoid a read-modify-write race between concurrent sessions. This reads every such file
+    under the harness home and merges them into one namespace of signatures, in the same
+    `tool_error:<tool>:<cause>` / `thrash:<tool>` format `episode_signature` produces for mined
+    history, so `HarnessStore.covered()` can dedupe across both sources.
+
+    Fails open: a missing directory, a missing/corrupt file, or a half-written trailing line (a
+    session may still be writing while this reads) degrades to "no evidence for that line", never
+    an exception.
+    """
+    base = Path(home or harness_home())
+    grouped: dict[str, FailureClass] = {}
+    try:
+        paths = sorted(base.glob("observed-*.jsonl"))
+    except OSError:
+        return []
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                # Either a corrupt line, or the trailing line of a file still being written.
+                continue
+            if not isinstance(record, dict):
+                continue
+            tool = str(record.get("tool", "unknown"))
+            kind = record.get("kind")
+            if kind == "repeat":
+                signature, klass = f"thrash:{tool}", "thrash"
+            elif kind == "tool_error":
+                cause = record.get("cause") or _cause(str(record.get("text", "")))
+                signature = f"tool_error:{tool}:{cause}"
+                klass = "tool_error"
+            else:
+                continue
+            entry = grouped.setdefault(
+                signature, FailureClass(signature=signature, kind=klass, tool=tool))
+            entry.count += 1
+    return sorted(grouped.values(), key=lambda f: (-f.count, f.signature))
+
+
+def select_target(sessions: Sequence[Session], store: HarnessStore,
+                  home: Path | None = None) -> FailureClass | None:
+    """The most frequent failure not already covered by an installed artifact or a tombstone.
+
+    Live observations (what the hook actually saw this session) are considered before mined
+    history (past transcripts), since they are fresher evidence of what is currently failing.
+    """
     covered = store.covered()
-    for failure in rank_failures(sessions):
+    for failure in list(observed_failures(home)) + rank_failures(sessions):
         if failure.signature not in covered:
             return failure
     return None
@@ -167,6 +225,6 @@ def run_replay(artifact: Artifact, workspace_root: Path, binary: str = "claude",
                    "workspace": str(workspace), "trace": str(trace_path)}
 
 
-__all__ = ["FailureClass", "rank_failures", "select_target",
+__all__ = ["FailureClass", "rank_failures", "observed_failures", "select_target",
            "build_proposal_prompt", "parse_proposal", "propose_artifact",
            "config_with", "decide_retention", "replace_config", "run_replay"]
