@@ -336,7 +336,9 @@ def _command_learn(args) -> int:
     # --root argument, so that check is always false and confusing. Use a plain default.
     workspace_root = Path(".meta-harness-workspaces")
     workspace_root.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("META_HARNESS_WORKSPACE_ROOT", str(workspace_root.resolve()))
+    # workspace_root is passed explicitly to run_replay below, which passes it explicitly to
+    # prepare_workspace; nothing on this path reads it from the environment, so it is not set
+    # here. Do not reintroduce an os.environ[...] assignment for it.
     fixed, detail = run_replay(artifact, workspace_root)
     artifact.scores = {"origin_fixed": fixed, **detail}
     store.stage(artifact)

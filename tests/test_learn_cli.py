@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 
 from meta_harness import __main__ as cli
@@ -43,3 +44,11 @@ def test_accepting_an_unknown_id_reports_an_error(tmp_path: Path, monkeypatch, c
     monkeypatch.setenv("META_HARNESS_HOME", str(tmp_path))
     assert cli.main(["learn", "--accept", "nope"]) == 1
     assert "nope" in capsys.readouterr().out
+
+
+def test_learn_does_not_set_workspace_root_env_var(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("META_HARNESS_HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "load_sessions", lambda **kw: [])
+    monkeypatch.delenv("META_HARNESS_WORKSPACE_ROOT", raising=False)
+    assert cli.main(["learn", "--dry-run"]) == 0
+    assert "META_HARNESS_WORKSPACE_ROOT" not in os.environ
