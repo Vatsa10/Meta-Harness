@@ -11,11 +11,34 @@ export type Rule = {
   kind: string;
   tools: string[];
   reason: string;
+  threshold?: number;
 };
 
 export type SessionState = {
   readPaths: Set<string>;
+  /** How many times each exact tool+input call has already been allowed this session. */
+  callCounts: Map<string, number>;
 };
+
+/** The identity of one tool call, for counting exact repeats. Input order is whatever the
+ * engine sends; the same call in the same session serializes the same way, which is all the
+ * repeat counter needs. */
+export function callKey(event: { tool?: string; input?: Record<string, unknown> }): string {
+  let input = '';
+  try {
+    input = JSON.stringify(event.input ?? {});
+  } catch {
+    input = String(event.input ?? '');
+  }
+  return `${String(event.tool ?? '')}:${input.slice(0, 400)}`;
+}
+
+/**
+ * Default repeat count at which a `repeat-call` rule denies. Mirrors
+ * meta_harness.replay.THRASH_THRESHOLD, so the rule that enforces a thrash fix and the replay
+ * expectation that verifies it are talking about the same number.
+ */
+export const DEFAULT_REPEAT_THRESHOLD = 4;
 
 export const BUILT_IN_RULES: Rule[] = [
   {
@@ -70,9 +93,14 @@ export async function loadRules(dollar: any, home: string): Promise<Rule[]> {
   for (const artifact of artifacts) {
     rules.push({
       artifactId: String(artifact.id),
-      kind: (artifact.origin as any)?.kind ?? 'custom',
+      // `origin.rule_kind` is what meta_harness.learn.propose_artifact emits for the matcher to
+      // dispatch on; `origin.kind` is the EPISODE kind ('tool_error'/'thrash'), kept for
+      // provenance and never a matcher name. Falling back to it keeps a hand-written artifact
+      // working, and an unknown kind simply never denies.
+      kind: (artifact.origin as any)?.rule_kind ?? (artifact.origin as any)?.kind ?? 'custom',
       tools: (artifact.origin as any)?.tools ?? [],
       reason: String(artifact.payload ?? '').slice(0, 400),
+      threshold: Number((artifact.origin as any)?.threshold) || undefined,
     });
   }
   return rules;
@@ -86,6 +114,21 @@ export function evaluateRule(
 ): { deny: boolean; reason?: string } {
   const tool = String(event.tool ?? '');
   if (!rule.tools.includes(tool)) return { deny: false };
+
+  if (rule.kind === 'repeat-call') {
+    // The only condition a learned rule can decide from the call and the session state alone:
+    // this exact call has already been made enough times to be the thrash the artifact was born
+    // from. A first attempt is never blocked, so the rule cannot break work that is going fine.
+    const threshold = rule.threshold && rule.threshold > 1 ? rule.threshold : DEFAULT_REPEAT_THRESHOLD;
+    const seen = state.callCounts.get(callKey(event)) ?? 0;
+    if (seen >= threshold - 1) {
+      return {
+        deny: true,
+        reason: `${rule.reason} [${rule.artifactId}] (identical ${tool} call already made ${seen} times this session)`,
+      };
+    }
+    return { deny: false };
+  }
 
   if (rule.kind === 'read-before-edit') {
     const path = String((event.input as any)?.file_path ?? '');
