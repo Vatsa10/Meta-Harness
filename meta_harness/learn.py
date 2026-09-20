@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -81,7 +82,10 @@ def parse_proposal(text: str) -> tuple[str, str]:
     if len(body) != 2 or not body[1].strip():
         raise ValueError("no payload in proposal")
     payload = body[1].strip()
-    fenced = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", payload, re.DOTALL)
+    # Greedy match anchored to the LAST closing fence (end of payload), not the first one:
+    # a doctrine/skill payload is prose and may itself contain a nested code fence, and a
+    # non-greedy match would truncate the payload there with no error.
+    fenced = re.match(r"```[a-zA-Z]*\s*\n(.*)```\s*$", payload, re.DOTALL)
     if fenced:
         payload = fenced.group(1)
     return artifact_type, payload.strip()
@@ -93,8 +97,12 @@ def propose_artifact(failure: FailureClass, replay: Mapping[str, Any],
         build_proposal_prompt(failure, replay, installed)))
     origin = dict(replay.get("_origin") or {})
     origin.setdefault("signature", failure.signature)
+    prefix = re.sub(r"[^A-Za-z0-9]+", "-", failure.signature).strip("-") or "artifact"
+    digest = hashlib.sha256(
+        f"{failure.signature}|{origin.get('session', '')}|{origin.get('turn', '')}"
+        .encode("utf-8")).hexdigest()[:8]
     return Artifact(
-        id=f"{failure.signature.replace(':', '-')}-{origin.get('session', 'x')[:8]}",
+        id=f"{prefix}-{digest}",
         type=artifact_type,
         origin=origin,
         payload=payload,
