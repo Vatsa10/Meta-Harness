@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,8 +25,9 @@ def test_skill_names_the_staging_gate():
     text = SKILL.read_text(encoding="utf-8")
     # The safety property itself: nothing installs on a score alone.
     assert "Nothing is adopted on a score alone." in text
-    # How a human actually does it: --accept installs.
-    assert "learn --accept <id>          # install it" in text
+    # How a human actually does it: --accept installs. Pinned as the claim, not as column
+    # alignment: reformatting the code block must not break this, but deleting the statement must.
+    assert re.search(r"learn --accept <id>\s+#\s*install it", text)
     assert "Never accept without reading the payload." in text
 
 
