@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .cc_harness import AgentConfig, ClaudeCodeHarness, prepare_workspace, run_claude_code
 from .cc_history import FailureEpisode, Session, failure_episodes
+from .core import TraceRecorder
 from .harness_store import ARTIFACT_TYPES, Artifact, HarnessStore
-from .replay import build_replay, episode_signature  # noqa: F401  (re-exported for the CLI)
+from .replay import build_replay, episode_signature, load_agent_steps, verify_expectation  # noqa: F401  (re-exported for the CLI)
 
 PROMPT_PATH = Path(__file__).resolve().parent / "learn_prompt.md"
 
@@ -111,5 +113,60 @@ def propose_artifact(failure: FailureClass, replay: Mapping[str, Any],
     )
 
 
+def config_with(artifact: Artifact, base: AgentConfig | None = None) -> AgentConfig:
+    """Apply one artifact to an agent configuration.
+
+    A `rule` acts through tool.check and therefore changes nothing here; it is scored by
+    running the replay with the rule installed in the hook layer.
+    """
+    config = base or AgentConfig()
+    if artifact.type == "doctrine":
+        joined = "\n\n".join(part for part in (config.append_system_prompt, artifact.payload) if part)
+        return replace_config(config, append_system_prompt=joined)
+    if artifact.type == "skill":
+        skills = dict(config.skills or {})
+        skills[artifact.id] = artifact.payload
+        return replace_config(config, skills=skills)
+    if artifact.type == "injection":
+        return replace_config(config, prompt_template=config.prompt_template + "\n\n" + artifact.payload)
+    return config
+
+
+def replace_config(config: AgentConfig, **changes: Any) -> AgentConfig:
+    from dataclasses import replace
+
+    return replace(config, **changes)
+
+
+def decide_retention(origin_fixed: bool, candidate_score: float, baseline_score: float,
+                     candidate_context: float, baseline_context: float) -> dict[str, Any]:
+    """Keep an artifact only if it fixes what it was born from and regresses nothing."""
+    context_delta = round(candidate_context - baseline_context, 2)
+    if not origin_fixed:
+        return {"kept": False, "reason": "origin replay still fails", "context_delta": context_delta}
+    if candidate_score < baseline_score:
+        return {"kept": False,
+                "reason": f"regressed the task set ({candidate_score:.3f} < {baseline_score:.3f})",
+                "context_delta": context_delta}
+    return {"kept": True, "reason": "origin fixed, no regression", "context_delta": context_delta}
+
+
+def run_replay(artifact: Artifact, workspace_root: Path, binary: str = "claude",
+               timeout: float = 900.0) -> tuple[bool, dict[str, Any]]:
+    """Run the artifact's replay and report whether the original failure recurred."""
+    replay = artifact.replay or {}
+    task = {"instruction": replay.get("instruction", ""), "files": replay.get("files", {})}
+    workspace = prepare_workspace(task, workspace_root)
+    trace_path = Path(workspace_root) / f"{artifact.id}-replay.jsonl"
+    with TraceRecorder(trace_path) as trace:
+        run = run_claude_code(workspace, config_with(artifact), task, trace,
+                              binary=binary, timeout=timeout)
+    steps = load_agent_steps(trace_path)
+    fixed = verify_expectation(replay.get("expect") or {}, steps)
+    return fixed, {"turns": run.turns, "input_tokens": run.input_tokens,
+                   "workspace": str(workspace), "trace": str(trace_path)}
+
+
 __all__ = ["FailureClass", "rank_failures", "select_target",
-           "build_proposal_prompt", "parse_proposal", "propose_artifact"]
+           "build_proposal_prompt", "parse_proposal", "propose_artifact",
+           "config_with", "decide_retention", "replace_config", "run_replay"]
