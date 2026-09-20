@@ -26,32 +26,54 @@ export const BUILT_IN_RULES: Rule[] = [
   },
 ];
 
-/** Installed rule artifacts, plus the built-ins. Missing or malformed files are ignored. */
-export async function loadRules(dollar: any, home: string): Promise<Rule[]> {
-  const rules = [...BUILT_IN_RULES];
+export type InstalledArtifact = {
+  id: string;
+  type: string;
+  origin?: Record<string, unknown>;
+  payload?: unknown;
+};
+
+/**
+ * Reads `installed.json`, keeps only the rows of the given `type`, and loads each one's
+ * `artifact.json`. The single reader every layer (`rule`, `injection`, and whichever of
+ * `skill`/`doctrine` follows) shares, so the fail-open semantics live in exactly one place: a
+ * missing or corrupt registry, or a missing/malformed artifact.json, yields fewer rows rather
+ * than throwing, and every caller gets that behaviour identically instead of re-deriving it.
+ */
+export async function loadInstalled(dollar: any, home: string, type: string): Promise<InstalledArtifact[]> {
   const registry = `${home}/installed.json`;
-  if (!(await dollar.fs.exists(registry))) return rules;
+  if (!(await dollar.fs.exists(registry))) return [];
   let entries: Array<{ id: string; type: string }> = [];
   try {
     entries = JSON.parse(await dollar.fs.read(registry));
   } catch {
-    return rules;
+    return [];
   }
+  const out: InstalledArtifact[] = [];
   for (const entry of entries) {
-    if (entry.type !== 'rule') continue;
+    if (entry.type !== type) continue;
     const path = `${home}/artifacts/${entry.id}/artifact.json`;
     if (!(await dollar.fs.exists(path))) continue;
     try {
-      const artifact = JSON.parse(await dollar.fs.read(path));
-      rules.push({
-        artifactId: artifact.id,
-        kind: artifact.origin?.kind ?? 'custom',
-        tools: artifact.origin?.tools ?? [],
-        reason: String(artifact.payload ?? '').slice(0, 400),
-      });
+      out.push(JSON.parse(await dollar.fs.read(path)));
     } catch {
       continue;
     }
+  }
+  return out;
+}
+
+/** Installed rule artifacts, plus the built-ins. Missing or malformed files are ignored. */
+export async function loadRules(dollar: any, home: string): Promise<Rule[]> {
+  const rules = [...BUILT_IN_RULES];
+  const artifacts = await loadInstalled(dollar, home, 'rule');
+  for (const artifact of artifacts) {
+    rules.push({
+      artifactId: String(artifact.id),
+      kind: (artifact.origin as any)?.kind ?? 'custom',
+      tools: (artifact.origin as any)?.tools ?? [],
+      reason: String(artifact.payload ?? '').slice(0, 400),
+    });
   }
   return rules;
 }

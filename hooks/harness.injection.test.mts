@@ -133,6 +133,68 @@ async function main() {
     assert.equal(result.text, 'still works', 'a corrupt registry must fail open, not break the turn');
   }
 
+  // --- a single over-long payload is truncated to the per-artifact cap, visibly ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const longPayload = 'x'.repeat(2000);
+    files.set(
+      'C:/fake-harness-home/installed.json',
+      JSON.stringify([{ id: 'verbose-tip', type: 'injection', signature: 'sig', accepted: '2026-01-01' }]),
+    );
+    files.set(
+      'C:/fake-harness-home/artifacts/verbose-tip/artifact.json',
+      JSON.stringify({
+        id: 'verbose-tip',
+        type: 'injection',
+        origin: { triggers: ['verbose'] },
+        payload: longPayload,
+        replay: {},
+      }),
+    );
+
+    const { on, handlers } = makeOn();
+    registerInjection(on as any);
+    const next = async () => ({ text: null });
+    const result = await handlers['prompt.section'](dollar, { prompt: 'go verbose please' }, next);
+    // An injection is paid in standing tokens every turn it fires, unlike a rule, so a single
+    // artifact's text must never reach the prompt uncapped: a 2000-char payload must come back
+    // far shorter than it went in, and the cut must be visible, not silent.
+    assert.ok(result.text.length < 500, `expected the payload to be capped well under its 2000-char source, got ${result.text.length}`);
+    assert.ok(result.text.includes('truncated'), 'a truncated injection must say so, not cut silently');
+  }
+
+  // --- many installed injections together stay under a total bound, not just each individually ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    files.set(
+      'C:/fake-harness-home/installed.json',
+      JSON.stringify(ids.map((id) => ({ id, type: 'injection', signature: 'sig', accepted: '2026-01-01' }))),
+    );
+    for (const id of ids) {
+      files.set(
+        `C:/fake-harness-home/artifacts/${id}/artifact.json`,
+        JSON.stringify({
+          id,
+          type: 'injection',
+          origin: { triggers: ['broad'] },
+          payload: 'y'.repeat(300),
+          replay: {},
+        }),
+      );
+    }
+
+    const { on, handlers } = makeOn();
+    registerInjection(on as any);
+    const next = async () => ({ text: null });
+    const result = await handlers['prompt.section'](dollar, { prompt: 'this is a broad match' }, next);
+    // 8 artifacts x 300 chars each would be 2400+ chars uncapped; the joined total must stay
+    // bounded regardless of how many injections are installed, not just each one individually.
+    assert.ok(result.text.length < 1500, `expected the joined total to stay bounded, got ${result.text.length}`);
+  }
+
   console.log('hooks/harness.injection.test.mts: all assertions passed');
 }
 

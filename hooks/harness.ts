@@ -6,7 +6,7 @@
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
-import { evaluateRule, loadRules, type Rule, type SessionState } from './rules.js';
+import { evaluateRule, loadInstalled, loadRules, type Rule, type SessionState } from './rules.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -168,33 +168,37 @@ export function registerRules(on: On): void {
 
 type Injection = { artifactId: string; triggers: string[]; text: string };
 
+/**
+ * Per-artifact injected-text cap, matching the `reason` cap the rules layer already applies
+ * (rules.ts:~50). An `injection` is paid in standing tokens on every turn it fires, unlike a
+ * `rule`, which is exactly why it sits below `rule` in the layer ordering — an uncapped
+ * injection would out-cost the stronger, free layer above it.
+ */
+const INJECTION_TEXT_CAP = 400;
+
+/**
+ * Cap on the joined text of ALL matched injections for one turn, so N installed injections
+ * cannot add up past a bound even though each is individually capped. Set to three artifacts'
+ * worth of INJECTION_TEXT_CAP: enough for a few unrelated matches to coexist, not enough for an
+ * unbounded number of installs to dominate the prompt.
+ */
+const INJECTION_TOTAL_CAP = INJECTION_TEXT_CAP * 3;
+
+const TRUNCATION_MARKER = '… [truncated]';
+
+/** Truncates visibly rather than silently, so a capped injection cannot be mistaken for a short one. */
+function truncate(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit)}${TRUNCATION_MARKER}`;
+}
+
 /** Installed `injection` artifacts only: a `rule`, `skill` or `doctrine` row is never surfaced here. */
 async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
-  const registry = `${home}/installed.json`;
-  if (!(await dollar.fs.exists(registry))) return [];
-  let entries: Array<{ id: string; type: string }> = [];
-  try {
-    entries = JSON.parse(await dollar.fs.read(registry));
-  } catch {
-    return [];
-  }
-  const out: Injection[] = [];
-  for (const entry of entries) {
-    if (entry.type !== 'injection') continue;
-    const path = `${home}/artifacts/${entry.id}/artifact.json`;
-    if (!(await dollar.fs.exists(path))) continue;
-    try {
-      const artifact = JSON.parse(await dollar.fs.read(path));
-      out.push({
-        artifactId: artifact.id,
-        triggers: artifact.origin?.triggers ?? [],
-        text: String(artifact.payload ?? ''),
-      });
-    } catch {
-      continue;
-    }
-  }
-  return out;
+  const artifacts = await loadInstalled(dollar, home, 'injection');
+  return artifacts.map((artifact) => ({
+    artifactId: String(artifact.id),
+    triggers: (artifact.origin as any)?.triggers ?? [],
+    text: truncate(String(artifact.payload ?? ''), INJECTION_TEXT_CAP),
+  }));
 }
 
 /**
@@ -220,7 +224,8 @@ export function registerInjection(on: On): void {
     for (const injection of matched) {
       await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
-    return { text: matched.map((injection) => injection.text).join('\n\n') };
+    const joined = matched.map((injection) => injection.text).join('\n\n');
+    return { text: truncate(joined, INJECTION_TOTAL_CAP) };
   }));
 }
 

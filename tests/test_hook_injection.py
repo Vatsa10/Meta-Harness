@@ -28,8 +28,29 @@ def test_injection_records_what_it_injected():
 
 
 def test_injection_never_injects_non_injection_artifact_types():
+    harness_source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    rules_source = (ROOT / "hooks" / "rules.ts").read_text(encoding="utf-8")
+    # The type filter lives once, in the shared loadInstalled() reader (rules.ts), and
+    # harness.ts asks it for 'injection' rows specifically rather than re-filtering itself.
+    assert "entry.type !== type" in rules_source
+    assert "loadInstalled(dollar, home, 'injection')" in harness_source
+
+
+def test_injection_reuses_the_shared_registry_reader():
+    harness_source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    rules_source = (ROOT / "hooks" / "rules.ts").read_text(encoding="utf-8")
+    # A second, divergent installed.json reader in harness.ts would drift from rules.ts's
+    # fail-open semantics on the next edit to either; both layers must call the one reader.
+    assert "export async function loadInstalled" in rules_source
+    assert "loadInstalled" in harness_source
+    assert "JSON.parse(await dollar.fs.read(registry))" not in harness_source
+
+
+def test_injection_text_is_capped_per_artifact_and_in_total():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    assert "entry.type !== 'injection'" in source
+    assert "INJECTION_TEXT_CAP" in source
+    assert "INJECTION_TOTAL_CAP" in source
+    assert "truncate(" in source
 
 
 def test_injection_behaviour_via_node():
