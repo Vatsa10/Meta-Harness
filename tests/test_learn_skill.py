@@ -22,8 +22,11 @@ def test_description_states_triggers_not_workflow():
 
 def test_skill_names_the_staging_gate():
     text = SKILL.read_text(encoding="utf-8")
-    assert "--accept" in text
-    assert "never" in text.lower()
+    # The safety property itself: nothing installs on a score alone.
+    assert "Nothing is adopted on a score alone." in text
+    # How a human actually does it: --accept installs.
+    assert "learn --accept <id>          # install it" in text
+    assert "Never accept without reading the payload." in text
 
 
 def test_plugin_version_bumped():
