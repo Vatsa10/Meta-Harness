@@ -17,7 +17,9 @@ from .cc_history import (compare_reports, draft_tasks, harness_report, load_sess
                          project_slug, sessions_between, write_history_view)
 from .demo import run as run_demo
 from .harness_store import Artifact, HarnessStore, harness_home
-from .learn import propose_artifact, run_replay, select_target
+from .cc_harness import AgentConfig
+from .learn import (config_with, decide_retention, propose_artifact, run_replay, score_task_set,
+                    select_target)
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
 from .replay import build_replay
@@ -125,6 +127,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="with --reject: tombstone the signature so it is never re-proposed")
     learn.add_argument("--limit", type=int, default=60, help="sessions of history to read")
     learn.add_argument("--dry-run", action="store_true", help="select a target, propose nothing")
+    learn.add_argument("--tasks", metavar="PATH",
+                       help="JSON task set the artifact must not regress; without it, only the "
+                            "origin replay gates retention")
     learn.add_argument("--model", default="opus", help="model for the proposer")
     learn.add_argument("--provider", default="claude-cli")
     return parser
@@ -340,10 +345,43 @@ def _command_learn(args) -> int:
     # prepare_workspace; nothing on this path reads it from the environment, so it is not set
     # here. Do not reintroduce an os.environ[...] assignment for it.
     fixed, detail = run_replay(artifact, workspace_root)
-    artifact.scores = {"origin_fixed": fixed, **detail}
-    store.stage(artifact)
-    print(json.dumps({"staged": artifact.id, "type": artifact.type,
-                      "origin_fixed": fixed, "detail": detail}, indent=2))
+
+    # The spec's retention gate (section 5.4) is BOTH halves: the origin replay must be fixed and
+    # the task set must not regress, with context cost as the tiebreak. The task set is optional
+    # because most repositories have none; when it is absent the second half is reported as not
+    # run rather than quietly passed, so nothing here claims more than it measured.
+    tasks: list[dict] = []
+    if args.tasks:
+        try:
+            loaded = json.loads(Path(args.tasks).read_text(encoding="utf-8"))
+            tasks = [t for t in loaded if isinstance(t, dict)] if isinstance(loaded, list) else []
+        except (OSError, ValueError) as error:
+            print(f"cannot read task set {args.tasks}: {error}")
+            return 1
+    if tasks:
+        baseline_score, baseline_context = score_task_set(AgentConfig(), tasks, workspace_root)
+        candidate_score, candidate_context = score_task_set(
+            config_with(artifact), tasks, workspace_root)
+    else:
+        baseline_score = candidate_score = 0.0
+        baseline_context = candidate_context = 0.0
+
+    verdict = decide_retention(fixed, candidate_score, baseline_score,
+                               candidate_context, baseline_context)
+    verdict["task_set"] = f"{len(tasks)} tasks" if tasks else "none supplied - not checked"
+    artifact.scores = {"origin_fixed": fixed, "retention": verdict,
+                       "task_set_score": {"baseline": baseline_score,
+                                          "candidate": candidate_score} if tasks else None,
+                       **detail}
+
+    staged = store.stage(artifact)
+    if not verdict["kept"]:
+        store.reject(artifact.id)
+        print(json.dumps({"rejected": artifact.id, "type": artifact.type,
+                          "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
+        return 0
+    print(json.dumps({"staged": artifact.id, "type": artifact.type, "path": str(staged),
+                      "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
     return 0
 
 

@@ -11,7 +11,9 @@ Every failure Claude Code produces is evidence. A learn cycle turns one of them 
 artifact, scores it against the failure that produced it, and stages it for review.
 
 **Core principle:** An artifact earns its place by stopping the specific failure it was born
-from, without regressing anything else. Nothing is adopted on a score alone.
+from. An artifact whose origin replay still fails is archived, not staged. Pass `--tasks <path>`
+to also require that it does not regress a task set; without one, that half of the gate does not
+run and the verdict says so. Nothing is adopted on a score alone.
 
 ## When to Use
 
@@ -46,6 +48,11 @@ python -m meta_harness learn --accept <id>          # install it
 python -m meta_harness learn --reject <id>          # archive it
 python -m meta_harness learn --reject <id> --wrong  # archive and never propose it again
 ```
+
+Accepting records the artifact in `installed.json`. Only `rule` and `injection` artifacts are
+enforced from there today, by the `tool.check` and `prompt.section` hooks; an accepted `skill` or
+`doctrine` artifact is recorded and scored but has no automatic enforcement path yet, so treat it
+as a note to apply by hand.
 
 **Never accept without reading the payload.** An installed artifact changes every future session
 in every repository; the score justifies proposing it, never adopting it unseen. Check that a

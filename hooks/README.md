@@ -7,7 +7,12 @@ Observe failures and enforce learned artifacts, in-process.
 | `tool.call` | Append failures (error results, repeated identical calls) to the observation log |
 | `tool.check` | Apply installed `rule` artifacts; deny with the reason and the artifact id |
 | `prompt.section` | Inject installed `injection` artifacts relevant to this turn |
-| `turn.complete` | Count turns since the last learn cycle |
+
+Only `rule` and `injection` artifacts are enforced here; `skill` and `doctrine` artifacts are
+scored and recorded, but no hook installs them into a session.
+
+The design also sketches a `turn.complete` counter; it is not implemented, and nothing here
+depends on it.
 
 Function hooks are early access. Enable them before loading the plugin:
 
