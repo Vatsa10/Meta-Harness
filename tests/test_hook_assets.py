@@ -1,5 +1,11 @@
 import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
+
+from meta_harness.replay import ERROR_PATTERNS
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,12 +36,56 @@ def test_plugin_declares_the_hooks_directory():
 
 def test_observer_writes_one_line_per_failure():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    assert "observed.jsonl" in source
+    # One file per session (not a single shared file): $.fs has no append/lock primitive, so a
+    # shared file would need a non-atomic exists/read/write cycle that concurrent sessions race.
+    assert "observed-" in source and ".jsonl" in source
     assert "'tool.call'" in source
-    # Observation must be append-only: a rewrite loses concurrent sessions' records.
-    assert "append" in source.lower()
 
 
 def test_observer_records_repeats_as_well_as_errors():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     assert "tool_error" in source and "repeat" in source
+
+
+def test_ts_cause_patterns_match_python_error_patterns():
+    """The interface promises {ts, tool, kind, cause, input}; `cause` must be the same slug
+    meta_harness.replay._cause() would compute from the same text, in the same pattern order
+    (UnicodeEncodeError before the decode/charmap/cp1252 pattern is load-bearing), or dedupe
+    between hook-observed and replay-mined episodes silently breaks.
+    """
+    import re
+
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    match = re.search(r"CAUSE_PATTERNS[^=]*=\s*\[(.*?)\];", source, re.DOTALL)
+    assert match, "CAUSE_PATTERNS array not found in hooks/harness.ts"
+    pairs = re.findall(
+        r"\[\s*'((?:[^'\\]|\\.)*)'\s*,\s*'((?:[^'\\]|\\.)*)'\s*\]", match.group(1)
+    )
+    assert pairs, "CAUSE_PATTERNS array parsed empty"
+    ts_patterns = [(pattern.replace("\\'", "'"), slug) for pattern, slug in pairs]
+    assert ts_patterns == list(ERROR_PATTERNS)
+
+
+def test_observer_behaviour_via_node():
+    """Substring greps over the source cannot prove observe() ever performs a real write: a
+    reviewer commented out the dollar.fs.write call inside observe() and every grep-based test
+    in this file still passed. hooks/harness.observer.test.mts drives registerObserver() with a
+    fake `$` whose fs methods record calls, and asserts on the actual JSON line written.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not on PATH; cannot run the hooks/harness.ts behavioural test")
+
+    result = subprocess.run(
+        [node, "--experimental-strip-types", "--no-warnings",
+         str(ROOT / "hooks" / "harness.observer.test.mts")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, (
+        f"hooks/harness.observer.test.mts failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "all assertions passed" in result.stdout
