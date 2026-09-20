@@ -18,6 +18,7 @@ from .cc_harness import AgentConfig, ClaudeCodeHarness
 from .cc_history import harness_report, load_sessions, project_slug, write_history_view
 from .claude_cli import ClaudeCliError, ClaudeCliModel
 from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
+from .harness_store import Artifact, HarnessStore, harness_home
 from .metrics import METRICS, estimate_tokens, exact_match, math_equivalence, normalize_answer, terminal_metric
 from .retrieval import BM25Index, TfidfIndex, reciprocal_rank_fusion
 from .harnesses import (
@@ -51,6 +52,7 @@ __all__ = [
     "ClaudeCliError", "ClaudeCliModel",
     "AgentConfig", "ClaudeCodeHarness",
     "harness_report", "load_sessions", "project_slug", "write_history_view",
+    "Artifact", "HarnessStore", "harness_home",
     "classification_tasks", "math_tasks", "read_records", "split_tasks", "terminal_tasks",
     "METRICS", "estimate_tokens", "exact_match", "math_equivalence", "normalize_answer",
     "terminal_metric",

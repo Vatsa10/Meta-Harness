@@ -63,6 +63,12 @@ class AgentConfig:
     # skills, subagents and their doctrine reach a real session.
     skills: Mapping[str, str] | None = None
     settings: Mapping[str, Any] | None = None
+    # Extra plugin directories to load, and environment overrides for the session. The learn
+    # cycle uses both to score a `rule` artifact: a rule acts through this repository's own
+    # function hooks, so scoring it means running the replay with the plugin loaded and
+    # META_HARNESS_HOME pointed at a throwaway home that has the rule installed.
+    plugin_dirs: Sequence[str] = ()
+    extra_env: Mapping[str, str] | None = None
 
     def render(self, task: Mapping[str, Any], workspace: Path) -> str:
         return self.prompt_template.format(
@@ -199,6 +205,8 @@ def run_claude_code(workspace: Path, config: AgentConfig, task: Mapping[str, Any
     if config.skills:
         plugin = write_candidate_plugin(config.skills, workspace.parent)
         argv += ["--plugin-dir", str(plugin)]
+    for directory in config.plugin_dirs:
+        argv += ["--plugin-dir", str(directory)]
     if config.settings:
         settings_path = workspace.parent / f"{workspace.name}-settings.json"
         settings_path.write_text(json.dumps(dict(config.settings)), encoding="utf-8")
@@ -208,6 +216,7 @@ def run_claude_code(workspace: Path, config: AgentConfig, task: Mapping[str, Any
     for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY",
                  "CLAUDE_PLUGIN_ROOT"):
         environment.pop(name, None)
+    environment.update({str(k): str(v) for k, v in dict(config.extra_env or {}).items()})
 
     trace.event("agent_start", {"workspace": str(workspace), "model": config.model,
                                 "max_turns": config.max_turns, "tools": config.tools(),
