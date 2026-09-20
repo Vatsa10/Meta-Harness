@@ -97,15 +97,53 @@ def observed_failures(home: Path | None = None) -> list[FailureClass]:
     return sorted(grouped.values(), key=lambda f: (-f.count, f.signature))
 
 
+def merge_failures(observed: Sequence[FailureClass],
+                   mined: Sequence[FailureClass]) -> list[FailureClass]:
+    """Combine live and mined evidence into one ranking, keyed by signature.
+
+    Both sources write signatures in the same `tool_error:<tool>:<cause>` / `thrash:<tool>`
+    namespace, so a signature seen in both is one failure, not two: its counts are summed, and it
+    outranks either source alone. Live evidence is not preferred by source order — a single noisy
+    observation must not preempt a mined signature seen fifty times; it only adds weight to
+    whichever bucket its signature falls into.
+
+    `episodes` (and the `kind`/`tool` they imply) come only from the mined side: an observed
+    record has no `FailureEpisode`, so it cannot seed a replay on its own. A signature that is
+    mined keeps its episodes regardless of how many times it was also observed live; a
+    signature that is *only* observed carries no episodes, exactly as it did before this merge,
+    and `_command_learn` already handles "no replayable episode for this failure class" for that
+    case.
+
+    The tie-break (`-count`, then `signature`) is unchanged from the single-source ranking, so
+    equal-count signatures order the same way on every run.
+    """
+    grouped: dict[str, FailureClass] = {}
+    for failure in mined:
+        grouped[failure.signature] = FailureClass(
+            signature=failure.signature, kind=failure.kind, tool=failure.tool,
+            count=failure.count, episodes=list(failure.episodes))
+    for failure in observed:
+        entry = grouped.get(failure.signature)
+        if entry is None:
+            grouped[failure.signature] = FailureClass(
+                signature=failure.signature, kind=failure.kind, tool=failure.tool,
+                count=failure.count)
+        else:
+            entry.count += failure.count
+    return sorted(grouped.values(), key=lambda f: (-f.count, f.signature))
+
+
 def select_target(sessions: Sequence[Session], store: HarnessStore,
                   home: Path | None = None) -> FailureClass | None:
     """The most frequent failure not already covered by an installed artifact or a tombstone.
 
-    Live observations (what the hook actually saw this session) are considered before mined
-    history (past transcripts), since they are fresher evidence of what is currently failing.
+    Live observations (what the hook actually saw this session) and mined history (past
+    transcripts) are merged into one ranking by signature before selection, so a failure seen in
+    both outranks either source alone, and a high-count mined signature is not starved by a
+    single noisy live observation.
     """
     covered = store.covered()
-    for failure in list(observed_failures(home)) + rank_failures(sessions):
+    for failure in merge_failures(observed_failures(home), rank_failures(sessions)):
         if failure.signature not in covered:
             return failure
     return None
@@ -225,6 +263,6 @@ def run_replay(artifact: Artifact, workspace_root: Path, binary: str = "claude",
                    "workspace": str(workspace), "trace": str(trace_path)}
 
 
-__all__ = ["FailureClass", "rank_failures", "observed_failures", "select_target",
+__all__ = ["FailureClass", "rank_failures", "observed_failures", "merge_failures", "select_target",
            "build_proposal_prompt", "parse_proposal", "propose_artifact",
            "config_with", "decide_retention", "replace_config", "run_replay"]
