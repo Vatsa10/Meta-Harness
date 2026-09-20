@@ -26,3 +26,16 @@ def test_plugin_declares_the_hooks_directory():
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert "hooks" in manifest
     assert manifest["hooks"] == "./hooks/hooks.json"
+
+
+def test_observer_writes_one_line_per_failure():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    assert "observed.jsonl" in source
+    assert "'tool.call'" in source
+    # Observation must be append-only: a rewrite loses concurrent sessions' records.
+    assert "append" in source.lower()
+
+
+def test_observer_records_repeats_as_well_as_errors():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    assert "tool_error" in source and "repeat" in source
