@@ -126,6 +126,71 @@ async function main() {
     assert.ok(kinds.includes('repeat'), `expected a repeat record, got: ${kinds}`);
   }
 
+  // --- an observer that throws must NOT re-run the tool ---
+  {
+    // The whole point of `afterCall`: this handler's work happens after the tool has already
+    // executed, so recovering by calling next() again would repeat a Bash command or a Write.
+    const dollar = {
+      env: { get: (key: string) => (key === 'META_HARNESS_HOME' ? 'C:/fake-harness-home' : undefined) },
+      session: { id: async () => 'sess-abc123' },
+      ui: { log: () => {} },
+      fs: {
+        exists: async () => false,
+        read: async () => '',
+        write: async () => {
+          throw new Error('ENOSPC: no space left on device');
+        },
+      },
+    };
+    let handler: any;
+    registerObserver((event: string, h: any) => {
+      if (event === 'tool.call') handler = h;
+    });
+
+    let calls = 0;
+    const next = async () => {
+      calls += 1;
+      return { result: 'Error: No such file or directory: missing.txt' };
+    };
+    const outcome = await handler(dollar, { tool: 'Bash', input: { command: 'rm -rf build' } }, next);
+    assert.equal(calls, 1, 'a failing observer must never run the tool a second time');
+    assert.deepEqual(outcome, { result: 'Error: No such file or directory: missing.txt' },
+      'the real outcome must still be returned when observation fails');
+  }
+
+  // --- isError does not fire on a successful result that merely CONTAINS error text ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    let handler: any;
+    registerObserver((event: string, h: any) => {
+      if (event === 'tool.call') handler = h;
+    });
+
+    // A successful Grep for the literal "error:" is not a failure; counting it as one inflates
+    // the ranking the learn cycle selects from.
+    const grepNext = async () => ({
+      result: 'src/app.ts:12:  console.log("error: something happened");',
+    });
+    await handler(dollar, { tool: 'Grep', input: { pattern: 'error:' } }, grepNext);
+    assert.equal(files.size, 0, 'a successful search for error text must not be recorded as a failure');
+
+    // The engine's own structured verdict is authoritative in both directions.
+    const flagged = async () => ({ result: { is_error: true, content: 'nothing suspicious here' } });
+    await handler(dollar, { tool: 'Bash', input: { command: 'false' } }, flagged);
+    assert.equal(files.size, 1, 'an is_error result must be recorded even with innocuous text');
+
+    const files2 = new Map<string, string>();
+    const dollar2 = makeFakeDollar(files2);
+    let handler2: any;
+    registerObserver((event: string, h: any) => {
+      if (event === 'tool.call') handler2 = h;
+    });
+    const notFlagged = async () => ({ result: { is_error: false, content: 'Error: in a quoted log line' } });
+    await handler2(dollar2, { tool: 'Bash', input: { command: 'cat log' } }, notFlagged);
+    assert.equal(files2.size, 0, 'is_error:false must win over error-looking text');
+  }
+
   console.log('hooks/harness.observer.test.mts: all assertions passed');
 }
 

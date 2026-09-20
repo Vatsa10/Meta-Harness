@@ -6,7 +6,7 @@
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
-import { evaluateRule, loadInstalled, loadRules, type Rule, type SessionState } from './rules.js';
+import { callKey, evaluateRule, loadInstalled, loadRules, type Rule, type SessionState } from './rules.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -25,6 +25,36 @@ export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E,
       }
       return next(event);
     }
+  };
+}
+
+/**
+ * Wrap a handler whose work happens AFTER the tool has already run.
+ *
+ * `safely` recovers by calling `next(event)`, which is correct only for a handler that calls
+ * `next` last: for a post-`next` handler that would run the tool a SECOND time, duplicating the
+ * side effect of a Bash or Write. Here `next` is called exactly once, up front, and the fallible
+ * work is what gets swallowed — so an observer that throws costs an observation, never a repeated
+ * command.
+ */
+export function afterCall<E, R>(
+  name: string,
+  handler: (dollar: any, event: E, outcome: R) => Promise<void>,
+): Fallible<E, R> {
+  return async (dollar, event, next) => {
+    const outcome = await next(event);
+    try {
+      await handler(dollar, event, outcome);
+    } catch (error) {
+      try {
+        dollar.ui.log(
+          `meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`,
+        );
+      } catch {
+        // logging must never be the thing that breaks the turn either
+      }
+    }
+    return outcome;
   };
 }
 
@@ -100,16 +130,36 @@ function resultText(result: unknown): string {
   return typeof result === 'string' ? result : JSON.stringify(result ?? '');
 }
 
+/**
+ * Unambiguous tool-error phrases: strings a tool emits when it refuses, which do not plausibly
+ * appear as the FIRST thing in a successful result. Anything weaker (a bare `error:` anywhere in
+ * the text) matched a successful `Grep` for the word "error:" and recorded it as a failure;
+ * those counts feed selection ranking, so the noise became the thing the learn loop chased.
+ */
+const ERROR_PHRASES =
+  /has not been read yet|String to replace not found|is not recognized as an internal or external command|No such file or directory/i;
+
+/** True when the tool call actually failed. */
 function isError(result: unknown): boolean {
-  return /is_error|error:|Traceback|not recognized|No such file/i.test(resultText(result));
+  if (result && typeof result === 'object') {
+    const flag = (result as any).is_error ?? (result as any).isError;
+    // The engine's own verdict is authoritative; never second-guess it by grepping the text.
+    if (typeof flag === 'boolean') return flag;
+  }
+  const text = resultText(result);
+  // Otherwise only an error ANNOUNCED at the start of the result counts, plus a short list of
+  // phrases a tool only ever emits when it refused.
+  return /^\s*"?(error|[A-Za-z.]*Error:|Traceback \(most recent call last\))/i.test(text)
+    || ERROR_PHRASES.test(text);
 }
 
 /** Observes tool.call outcomes: records errors and repeated identical calls to observed-<session>.jsonl. */
 export function registerObserver(on: On): void {
   const recent: Recent[] = [];
 
-  on('tool.call', safely('tool.call', async (dollar, event: any, next) => {
-    const outcome = await next(event);
+  // afterCall, not safely: this handler's work runs after the tool has already executed, so a
+  // recovery that re-entered next() would run the tool twice.
+  on('tool.call', afterCall('tool.call', async (dollar, event: any, outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
     const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
 
@@ -131,7 +181,6 @@ export function registerObserver(on: On): void {
         text: text.slice(0, 400),
       });
     }
-    return outcome;
   }));
 }
 
@@ -145,7 +194,7 @@ export function registerObserver(on: On): void {
  * either registration order: a handler that always forwards never depends on what ran before it.
  */
 export function registerRules(on: On): void {
-  const state: SessionState = { readPaths: new Set<string>() };
+  const state: SessionState = { readPaths: new Set<string>(), callCounts: new Map<string, number>() };
   let rules: Rule[] | null = null;
 
   on('tool.call', safely('tool.call:read-tracking', async (dollar, event: any, next) => {
@@ -162,6 +211,11 @@ export function registerRules(on: On): void {
       const verdict = evaluateRule(rule, event, state);
       if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
     }
+    // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this
+    // exact call has already been allowed. Counting at tool.check rather than after the result
+    // keeps the observer the only post-`next` handler on this path.
+    const key = callKey(event);
+    state.callCounts.set(key, (state.callCounts.get(key) ?? 0) + 1);
     return next(event);
   }));
 }
