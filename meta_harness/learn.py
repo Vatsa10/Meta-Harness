@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
 
 from .cc_history import FailureEpisode, Session, failure_episodes
-from .harness_store import HarnessStore
-from .replay import episode_signature
+from .harness_store import ARTIFACT_TYPES, Artifact, HarnessStore
+from .replay import build_replay, episode_signature  # noqa: F401  (re-exported for the CLI)
+
+PROMPT_PATH = Path(__file__).resolve().parent / "learn_prompt.md"
 
 
 @dataclass
@@ -46,4 +50,58 @@ def select_target(sessions: Sequence[Session], store: HarnessStore) -> FailureCl
     return None
 
 
-__all__ = ["FailureClass", "rank_failures", "select_target"]
+def build_proposal_prompt(failure: FailureClass, replay: Mapping[str, Any],
+                          installed: Sequence[str]) -> str:
+    sample = failure.episodes[0] if failure.episodes else None
+    evidence = (sample.assistant_text or sample.detail or "") if sample else ""
+    parts = [PROMPT_PATH.read_text(encoding="utf-8"),
+             "\n## The failure\n",
+             f"signature: {failure.signature}",
+             f"kind: {failure.kind}   tool: {failure.tool}",
+             f"observed {failure.count} times",
+             f"error text: {evidence[:400]}" if evidence else "",
+             "\n## The replay it must fix\n",
+             f"instruction: {str(replay.get('instruction', ''))[:400]}",
+             f"files: {sorted((replay.get('files') or {}))}",
+             f"expectation: {replay.get('expect')}"]
+    if installed:
+        parts.append("\n## Already installed - do not duplicate\n" + "\n".join(
+            f"- {name}" for name in installed))
+    return "\n".join(part for part in parts if part)
+
+
+def parse_proposal(text: str) -> tuple[str, str]:
+    match = re.search(r"TYPE:\s*([a-z]+)", text, re.IGNORECASE)
+    if not match:
+        raise ValueError("no TYPE in proposal")
+    artifact_type = match.group(1).lower()
+    if artifact_type not in ARTIFACT_TYPES:
+        raise ValueError(f"unknown artifact type: {artifact_type}")
+    body = text.split("PAYLOAD:", 1)
+    if len(body) != 2 or not body[1].strip():
+        raise ValueError("no payload in proposal")
+    payload = body[1].strip()
+    fenced = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", payload, re.DOTALL)
+    if fenced:
+        payload = fenced.group(1)
+    return artifact_type, payload.strip()
+
+
+def propose_artifact(failure: FailureClass, replay: Mapping[str, Any],
+                     installed: Sequence[str], model: Callable[..., str]) -> Artifact:
+    artifact_type, payload = parse_proposal(model(
+        build_proposal_prompt(failure, replay, installed)))
+    origin = dict(replay.get("_origin") or {})
+    origin.setdefault("signature", failure.signature)
+    return Artifact(
+        id=f"{failure.signature.replace(':', '-')}-{origin.get('session', 'x')[:8]}",
+        type=artifact_type,
+        origin=origin,
+        payload=payload,
+        replay=dict(replay),
+        sources=[f"{origin.get('session', '')}#{origin.get('turn', '')}"],
+    )
+
+
+__all__ = ["FailureClass", "rank_failures", "select_target",
+           "build_proposal_prompt", "parse_proposal", "propose_artifact"]

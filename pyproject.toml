@@ -19,4 +19,4 @@ meta-harness = "meta_harness.__main__:main"
 include = ["meta_harness*"]
 
 [tool.setuptools.package-data]
-meta_harness = ["skill/*.md"]
+meta_harness = ["skill/*.md", "learn_prompt.md"]
