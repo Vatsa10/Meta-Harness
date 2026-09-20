@@ -31,6 +31,7 @@ superpowers loads TDD. You do not type a slash command.
 | `building-eval-sets` | There is no way to score whether a change helped |
 | `reading-execution-traces` | A variant regressed and the reason is unclear |
 | `running-harness-search` | Hand-tuning stalled past several candidates |
+| `learning-from-failures` | The same failure keeps recurring, or someone asks whether the harness can learn from what went wrong |
 
 One agent: `meta-harness:harness-analyst` — read-only, reports what a finished search found and
 whether the win survives the noise.
