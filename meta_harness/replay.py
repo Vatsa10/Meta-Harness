@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .cc_history import FailureEpisode
+from .cc_history import FailureEpisode, Session, read_file_history
 
 # Matched against the error text of a failed tool result, most specific first. The slug is what
 # makes two instances of one fault share a signature; without it dedupe never fires.
@@ -125,5 +125,42 @@ def verify_expectation(expectation: Mapping[str, Any],
     return True
 
 
-__all__ = ["ERROR_PATTERNS", "THRASH_THRESHOLD", "THRASH_WINDOW",
-           "episode_signature", "expectation_for", "load_agent_steps", "verify_expectation"]
+MAX_REPLAY_FILE_CHARS = 8000
+
+
+def _request_before(session: Session, turn_index: int) -> str:
+    asks = [turn.text for turn in session.turns
+            if turn.role == "user" and turn.text and turn.index < turn_index]
+    return asks[-1] if asks else ""
+
+
+def build_replay(episode: FailureEpisode, session: Session, home: Path | None = None,
+                 max_files: int = 4) -> dict[str, Any] | None:
+    """The smallest run that shows whether this failure recurs, or None if it cannot be built."""
+    expectation = expectation_for(episode)
+    if not expectation:
+        return None
+    instruction = _request_before(session, episode.turn_index)
+    if not instruction:
+        return None
+
+    seeded: dict[str, str] = {}
+    for version in read_file_history(session.session_id, home):
+        if version.previous_content is None or not version.tracking_path:
+            continue
+        seeded.setdefault(version.tracking_path, version.previous_content)
+    smallest = sorted(seeded.items(), key=lambda kv: len(kv[1]))[:max_files]
+
+    return {
+        "instruction": instruction,
+        "files": {path.replace("\\", "/"): body[:MAX_REPLAY_FILE_CHARS]
+                  for path, body in smallest},
+        "expect": expectation,
+        "_origin": {"kind": episode.kind, "session": session.session_id,
+                    "turn": episode.turn_index, "signature": episode_signature(episode)},
+    }
+
+
+__all__ = ["ERROR_PATTERNS", "MAX_REPLAY_FILE_CHARS", "THRASH_THRESHOLD", "THRASH_WINDOW",
+           "build_replay", "episode_signature", "expectation_for", "load_agent_steps",
+           "verify_expectation"]
