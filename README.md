@@ -12,8 +12,9 @@ the proposer never sees.
 
 ## Use it from Claude Code
 
-The repository is also a Claude Code plugin. Not a wrapper around the CLI — four model-invoked
-skills that change how Claude works on prompts, agent scaffolds and retrieval:
+The repository is also a Claude Code plugin. Not a wrapper around the CLI — model-invoked
+skills that change how Claude works on prompts, agent scaffolds and retrieval, plus a hook layer
+that observes failures and enforces what has been learned from them:
 
 ```bash
 claude --plugin-dir .
@@ -21,8 +22,9 @@ claude --plugin-dir .
 
 `optimizing-harnesses` carries the discipline (one change per candidate, every candidate kept, no
 score without a trace, held-out split read once). `building-eval-sets`, `reading-execution-traces`
-and `running-harness-search` handle the pieces. The engine below is the escalation path when
-hand-tuning stalls; the skills need nothing installed.
+and `running-harness-search` handle the pieces, `optimizing-claude-code` points the search at
+Claude Code's own scaffold, and `learning-from-failures` drives the loop below. The engine is the
+escalation path when hand-tuning stalls; the skills need nothing installed.
 
 See [docs/plugin.md](docs/plugin.md) for the skill list, the baseline testing behind it, and why
 Haiku 4.5 is the default harness model.
@@ -36,11 +38,32 @@ python -m meta_harness learn --status
 python -m meta_harness learn --accept <id>
 ```
 
+Three layers. **Observe:** a `tool.call` hook records tool errors and repeated calls to a
+per-session log. **Learn:** the CLI above ranks those failures together with ones mined from past
+transcripts, proposes one artifact at the strongest layer that can carry it, and replays it.
+**Enforce:** a `tool.check` hook applies accepted rules and a `prompt.section` hook injects
+accepted context.
+
 An artifact is staged only if it fixes the failure it was born from; one whose origin replay
 still fails is archived with the verdict that killed it. With `--tasks`, it must also score no
 worse than the baseline on that task set, with context cost as the tiebreak; without `--tasks`,
-that check does not run and the recorded verdict says so. Nothing installs itself. See
-[the design](docs/superpowers/specs/2026-09-20-learning-harness-design.md).
+that check does not run and the recorded verdict says so. Nothing installs itself.
+
+Artifacts sit at four layers, strongest first: `rule` (a `tool.check`, costing no standing
+tokens and not ignorable) > `injection` (a prompt section, paid every turn) > `skill` >
+`doctrine`. Only `rule` and `injection` are enforced by the hooks today. That ordering is an
+argued design claim, not a measured one — `tools/prose_vs_rule.py` is the experiment that would
+test it, and it has not been run here.
+
+The hooks need Claude Code's function-hook surface, which is early access:
+
+```bash
+export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1   # PowerShell: $env:CLAUDE_CODE_ENABLE_FUNCTION_HOOKS="1"
+claude --plugin-dir .
+```
+
+See [hooks/README.md](hooks/README.md) for the hook layer and
+[the design](docs/superpowers/specs/2026-09-20-learning-harness-design.md) for the rest.
 
 ## Install
 
@@ -169,6 +192,11 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
 - `meta_harness/agent_proposer.py` — the coding-agent proposer and the view ablation.
 - `meta_harness/cache.py` — disk cache so `--repeats` and re-runs do not re-bill.
 - `tools/llm_proposer.py` — proposer that needs only an API key, no coding-agent CLI.
+- `meta_harness/replay.py` — failure signatures, and the replay a proposed artifact is scored on.
+- `meta_harness/learn.py` — ranking, proposal, and the retention decision.
+- `meta_harness/harness_store.py` — staged and installed artifacts, and the accept/reject gate.
+- `hooks/` — the function-hook layer: observe, enforce, inject. Fails open by construction.
+- `tools/prose_vs_rule.py` — the prose-versus-mechanism experiment (built, not yet run).
 - `docs/plugin.md` — the Claude Code plugin: skills, agent, install, Haiku defaults.
 - `docs/using-with-coding-agents.md` — Claude Code as proposer, optimizing agent harnesses,
   and shipping a discovered harness back into your own agent.
@@ -178,7 +206,8 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
 ## Tests
 
 ```bash
-python -m pytest tests -q
+python -m pytest -q
 ```
 
-78 tests, no network calls.
+252 tests, no network calls. The hook layer is covered by Node tests under `hooks/` that the
+Python suite shells out to; they are skipped, with the reason stated, when `node` is absent.
