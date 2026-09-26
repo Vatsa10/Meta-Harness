@@ -196,3 +196,104 @@ def test_paths_reject_git_sha_ranges_and_url_fragments(tmp_path):
     assert "src/a.py" in stretch.paths
     assert not any(".." in p for p in stretch.paths)
     assert not any("://" in p or p.startswith("//") for p in stretch.paths)
+
+
+# --- fix round 2: the correction detector is precision-tuned against a gold set, not intuition -
+
+IDE_OPENED_FILE = "<ide_opened_file>\nThe user opened src/a.py in the IDE.\n</ide_opened_file>"
+
+# Synthetic fixtures below, shaped like the reviewer's three false-positive patterns, but
+# invented text, never a real transcript's message.
+
+PASTED_REPORT_THEN_NEW_REQUEST = (
+    "<pasted_content>Summary: this was wrong, we should revert and instead do it the other "
+    "way.</pasted_content> Also please add a dark mode toggle to the settings page."
+)
+
+OPERATIONAL_STOP_SERVER = "stop the dev server, then start it again on port 4000"
+OPERATIONAL_STOP_AGENTS = "please stop all the background agents now"
+
+# The trigger word is many sentences past the opening - ordinary steering deep in a longer
+# message, not a leading objection.
+BURIED_TRIGGER = (
+    "Let's add a new export button to the dashboard. It should download a CSV. Put it next to "
+    "the filter row. Users have been asking for this for a while. Actually, on second thought, "
+    "maybe a menu item instead of a button would be cleaner here, up to you."
+)
+
+LEADING_REVERT_DEEP_IN_A_LONG_MESSAGE = (
+    "Please revert the last change - it broke the build. " + ("padding text. " * 200)
+)
+
+REVERT_MENTIONED_ONLY_FAR_INTO_A_VERY_LONG_MESSAGE = (
+    ("unrelated filler text. " * 500) + "by the way somewhere a changelog mentions a revert"
+)
+
+
+def test_ide_opened_file_marker_does_not_end_a_stretch(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"})),
+        user(IDE_OPENED_FILE),
+        assistant(("Bash", {"command": "pytest"})),
+        user("thanks"),
+    ])
+    stretches = list(iter_stretches(path, min_calls=3))
+    assert len(stretches) == 1
+    assert stretches[0].calls == ["Read", "Edit", "Bash"]
+
+
+def test_pasted_report_ahead_of_a_new_request_is_not_a_correction(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"}),
+                  ("Bash", {"command": "pytest"})),
+        user(PASTED_REPORT_THEN_NEW_REQUEST),
+    ])
+    stretch = next(iter_stretches(path, min_calls=3))
+    assert stretch.ended_by == "user"
+
+
+def test_operational_stop_instructions_are_not_corrections(tmp_path):
+    for text in (OPERATIONAL_STOP_SERVER, OPERATIONAL_STOP_AGENTS):
+        path = write_transcript(tmp_path, [
+            user("go"),
+            assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"}),
+                      ("Bash", {"command": "pytest"})),
+            user(text),
+        ])
+        stretch = next(iter_stretches(path, min_calls=3))
+        assert stretch.ended_by == "user", text
+
+
+def test_a_trigger_word_buried_deep_in_a_longer_message_is_not_a_correction(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"}),
+                  ("Bash", {"command": "pytest"})),
+        user(BURIED_TRIGGER),
+    ])
+    stretch = next(iter_stretches(path, min_calls=3))
+    assert stretch.ended_by == "user"
+
+
+def test_revert_deep_in_a_long_message_still_counts_as_a_correction(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"}),
+                  ("Bash", {"command": "pytest"})),
+        user(LEADING_REVERT_DEEP_IN_A_LONG_MESSAGE),
+    ])
+    stretch = next(iter_stretches(path, min_calls=3))
+    assert stretch.ended_by == "correction"
+
+
+def test_revert_far_beyond_the_fulltext_scan_cap_is_not_a_correction(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"}),
+                  ("Bash", {"command": "pytest"})),
+        user(REVERT_MENTIONED_ONLY_FAR_INTO_A_VERY_LONG_MESSAGE),
+    ])
+    stretch = next(iter_stretches(path, min_calls=3))
+    assert stretch.ended_by == "user"

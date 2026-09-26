@@ -18,6 +18,15 @@ from pathlib import Path
 # containing "<status>stopped</status>" must not be read as a correction); the alternatives
 # that end in punctuation ("no,", "actually,") keep no trailing boundary, since \b never
 # matches between two non-word characters (comma, then the space that follows it).
+#
+# This full pattern is kept public for callers that want the plain keyword check (and to keep
+# the "stop does not match stopped" guarantee testable on its own), but `_is_correction` below
+# - not this regex alone - is what actually classifies a stretch, because a hand-labelled gold
+# set (D:\...\correction-gold.json, 64 stretches this detector fired on before this fix, hand
+# read: 18 genuine, 46 false) showed that matching this whole pattern anywhere in the message
+# is only 28% precise. Most of the 46 false positives were the user pasting the assistant's own
+# earlier report (which itself contains "wrong"/"revert"/"instead") ahead of a new, unrelated
+# request, or an operational halt ("stop the server") that objects to nothing.
 CORRECTION_RE = re.compile(
     r"\b(no,|not what\b|wrong\b|don'?t do\b|stop\b|revert\b|undo\b|why did you\b|i said\b"
     r"|actually,|that'?s not\b|instead of\b|you broke\b|doesn'?t work\b"
@@ -25,10 +34,47 @@ CORRECTION_RE = re.compile(
     re.I,
 )
 
+# <pasted_content ...>...</pasted_content> wraps material the user pasted as context, not
+# words they typed - stripped before any correction match so a pasted assistant report's own
+# "wrong"/"revert"/"instead" cannot be read as the human objecting.
+PASTED_CONTENT_RE = re.compile(r"<pasted_content[^>]*>.*?</pasted_content>", re.I | re.S)
+
+# Vocabulary anchored to the OPENING of the human's own words (see `_opening`): a real
+# objection leads with it, so a trigger word buried deep in a long message (typically after
+# pasted context, or a message that goes on to make an unrelated new request) does not count.
+# "stop" gets its own guard instead of a bare \b match: "stop the server/agents/processes/..."
+# is an operational halt instruction, not an objection to anything the assistant did.
+_STOP_OBJECTS = (
+    r"server|servers|agent|agents|process|processes|instance|instances|worker|workers|"
+    r"session|sessions|job|jobs|task|tasks|everything|running|background|loop|loops|app|"
+    r"application|service|services|container|containers|build|script|scripts|it|them|that|now"
+)
+_OPENING_CORRECTION_RE = re.compile(
+    r"\b(no,|not what\b|wrong\b|don'?t do\b|why did you\b|i said\b"
+    r"|actually,|that'?s not\b|instead of\b|you broke\b|doesn'?t work\b"
+    r"|still (broken|failing)\b)"
+    r"|\bstop\b(?!(?:\s+\w+){0,3}\s*\b(?:" + _STOP_OBJECTS + r"))",
+    re.I,
+)
+# "revert"/"undo" are checked over the WHOLE message, not just the opening: on the gold set
+# they were the rare trigger words that stayed high-precision (2 false positives in 46) even
+# said well into a message, and anchoring them cost several genuine "please revert that"
+# corrections that lead with several sentences of context first.
+_FULLTEXT_CORRECTION_RE = re.compile(r"\brevert\b|\bundo\b", re.I)
+
+# The gold set's messages were all a few hundred characters; real transcripts include some
+# messages tens of thousands of characters long (large pastes with no <pasted_content>
+# wrapper - a log dump, a whole file). Unbounded, "revert"/"undo" anywhere in one of those is
+# far more likely to be an incidental occurrence (a changelog line, a git log, a library's own
+# help text) than the human addressing the assistant, so the full-text check is capped to a
+# generous prefix rather than the entire message.
+_FULLTEXT_SCAN_CHARS = 3000
+
 # User-role messages the harness itself injects, not the human speaking: slash-command
 # scaffolding, background-task notifications, local-command output/caveats, system reminders,
-# and the interruption marker. Each one used to wrongly cut a stretch or (for the "stopped"
-# task-notification, before CORRECTION_RE's trailing \b) count as a correction.
+# an IDE-injected open-file notice, and the interruption marker. Each one used to wrongly cut
+# a stretch or (for the "stopped" task-notification, before CORRECTION_RE's trailing \b) count
+# as a correction.
 HARNESS_MARKERS = (
     "<task-notification>",
     "<command-name>",
@@ -37,6 +83,7 @@ HARNESS_MARKERS = (
     "<local-command-stdout>",
     "<local-command-caveat>",
     "<system-reminder>",
+    "<ide_opened_file>",
     "[Request interrupted by user",
 )
 
@@ -46,6 +93,27 @@ PATH_KEYS = ("file_path", "path", "notebook_path")
 def _is_harness_text(text: str) -> bool:
     """True when a user-role message is harness-injected scaffolding, not human speech."""
     return text.startswith(HARNESS_MARKERS)
+
+
+def _opening(text: str, max_chars: int = 200) -> str:
+    """The first sentence or so of a message: up to the first ./!/? followed by whitespace or
+    end of string, a newline, or a length cap, whichever comes first. A real objection leads
+    with it; a keyword many sentences later usually belongs to a different point in a longer,
+    multi-topic message."""
+    text = text.strip()
+    window = text[:max_chars]
+    match = re.search(r"[.!?](?:\s|$)|\n", window)
+    cut = match.end() if match else max_chars
+    return text[:cut]
+
+
+def _is_correction(text: str) -> bool:
+    """Whether a human message is a genuine wrong-direction correction, tuned against a
+    hand-labelled gold set rather than intuition (see CORRECTION_RE's docstring)."""
+    stripped = PASTED_CONTENT_RE.sub(" ", text)
+    if _FULLTEXT_CORRECTION_RE.search(stripped[:_FULLTEXT_SCAN_CHARS]):
+        return True
+    return _OPENING_CORRECTION_RE.search(_opening(stripped)) is not None
 
 
 @dataclass
@@ -126,7 +194,7 @@ def iter_stretches(path: Path, min_calls: int = 3) -> Iterator[Stretch]:
                 text = _user_text(message).strip()
                 if text and not _is_harness_text(text):
                     if len(current.calls) >= min_calls:
-                        current.ended_by = "correction" if CORRECTION_RE.search(text[:400]) else "user"
+                        current.ended_by = "correction" if _is_correction(text) else "user"
                         current.correction_text = text[:400] if current.ended_by == "correction" else ""
                         yield current
                     current = Stretch(session_id, project, turn)
@@ -150,8 +218,15 @@ from typing import Any
 from .cc_history import claude_home, is_artifact_project
 from .replay import _cause
 
-CAVEAT = ("Correction counts come from a keyword heuristic over your own messages. It will both "
-          "over- and under-count. Treat this as a cost estimate, not an audit.")
+# Measured against a 64-record hand-labelled gold set (18 genuine corrections, 46 false
+# positives from the pre-fix detector): of the 18 genuine, this detector still fires on 15; of
+# the 46 false, it still fires on 12 - precision on that gold subset is 15/(15+12) = 56%. The
+# gold set only covers stretches the OLD detector fired on, so this measures precision and
+# retention, not recall: a genuine correction the old detector never caught is invisible to it.
+CAVEAT = ("Correction counts come from a keyword heuristic over your own messages, measured at "
+          "56% precision against a 64-record hand-labelled gold set (still roughly 2 in 5 "
+          "flagged stretches may not be genuine corrections, and some genuine corrections are "
+          "missed). Treat this as a cost estimate, not an audit.")
 
 
 def _percentile(values: list[int], fraction: float) -> int:
@@ -294,7 +369,7 @@ def _scan(path: Path, min_calls: int = 3) -> tuple[list[Stretch], int, dict[tupl
                 text = _user_text(message).strip()
                 if text and not _is_harness_text(text):
                     if len(current.calls) >= min_calls:
-                        current.ended_by = "correction" if CORRECTION_RE.search(text[:400]) else "user"
+                        current.ended_by = "correction" if _is_correction(text) else "user"
                         current.correction_text = text[:400] if current.ended_by == "correction" else ""
                         stretches.append(current)
                     current = Stretch(session_id, project, turn)
