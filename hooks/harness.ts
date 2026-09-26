@@ -352,9 +352,50 @@ export function registerInjection(on: On): void {
   }));
 }
 
+/**
+ * Says once, on the first `prompt.section` after install, what wrong-direction work has cost so
+ * far, then never again: `<harnessHome>/bootstrap.json` is the marker. Presence of that file
+ * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
+ * every session after the first, not just within the process that happened to write it.
+ *
+ * The numbers come from a report `meta-harness waste --json` writes to
+ * `<harnessHome>/waste.json`; this hook never runs that command itself; on a machine with no
+ * such report yet (or a corrupt one) it writes the marker and says nothing, so the question is
+ * not asked again on a machine with no history to report.
+ */
+export function registerBootstrap(on: On): void {
+  on('prompt.section', safely('prompt.section:bootstrap', async (dollar, event: any, next) => {
+    void event;
+    const home = harnessHome(dollar);
+    const bootstrapPath = `${home}/bootstrap.json`;
+    if (await dollar.fs.exists(bootstrapPath)) return { text: null };
+
+    // Write the marker before anything that could throw, so a corrupt or missing waste.json
+    // still leaves this machine marked as having seen its first run.
+    await dollar.fs.write(bootstrapPath, JSON.stringify({ shown: new Date().toISOString() }));
+
+    const wastePath = `${home}/waste.json`;
+    if (!(await dollar.fs.exists(wastePath))) return { text: null };
+
+    // Deliberately not locally try/caught: a bad read or a corrupt waste.json must propagate to
+    // the outer `safely` wrapper, whose catch recovers via next(), rather than being swallowed
+    // here and returning {text: null} without ever calling next.
+    const waste: any = JSON.parse(await dollar.fs.read(wastePath));
+    const sessions = waste?.sessions;
+    const callsBurned = waste?.calls_burned;
+    if (sessions == null || callsBurned == null) return { text: null };
+
+    return {
+      text: `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
+        + '`/harness waste` for the breakdown.',
+    };
+  }));
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
   registerObserver(on);
   registerRules(on);
   registerInjection(on);
+  registerBootstrap(on);
 };
