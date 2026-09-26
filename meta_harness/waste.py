@@ -13,14 +13,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 # A human saying the work went the wrong way. A keyword heuristic: it will both over- and
-# under-count, which every report built on it has to say out loud.
+# under-count, which every report built on it has to say out loud. Trailing \b on the
+# word-final alternatives so "stop" does not match inside "stopped" (a subagent notice
+# containing "<status>stopped</status>" must not be read as a correction); the alternatives
+# that end in punctuation ("no,", "actually,") keep no trailing boundary, since \b never
+# matches between two non-word characters (comma, then the space that follows it).
 CORRECTION_RE = re.compile(
-    r"\b(no,|not what|wrong|don'?t do|stop|revert|undo|why did you|i said|actually,"
-    r"|that'?s not|instead of|you broke|doesn'?t work|still (broken|failing))",
+    r"\b(no,|not what\b|wrong\b|don'?t do\b|stop\b|revert\b|undo\b|why did you\b|i said\b"
+    r"|actually,|that'?s not\b|instead of\b|you broke\b|doesn'?t work\b"
+    r"|still (broken|failing)\b)",
     re.I,
 )
 
+# User-role messages the harness itself injects, not the human speaking: slash-command
+# scaffolding, background-task notifications, local-command output/caveats, system reminders,
+# and the interruption marker. Each one used to wrongly cut a stretch or (for the "stopped"
+# task-notification, before CORRECTION_RE's trailing \b) count as a correction.
+HARNESS_MARKERS = (
+    "<task-notification>",
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<system-reminder>",
+    "[Request interrupted by user",
+)
+
 PATH_KEYS = ("file_path", "path", "notebook_path")
+
+
+def _is_harness_text(text: str) -> bool:
+    """True when a user-role message is harness-injected scaffolding, not human speech."""
+    return text.startswith(HARNESS_MARKERS)
 
 
 @dataclass
@@ -46,13 +71,25 @@ def _user_text(message: dict) -> str:
     return ""
 
 
+def _looks_like_a_path(token: str) -> bool:
+    """Reject the noise `_paths_in`'s command regex also matches: git SHA ranges
+    (`145181b..HEAD`), URL fragments (`//github.com/...`), and bare hex runs (a commit SHA
+    with no path-like structure around it)."""
+    if ".." in token or "://" in token or token.startswith("//"):
+        return False
+    if re.fullmatch(r"[0-9a-fA-F]+", token):
+        return False
+    return True
+
+
 def _paths_in(tool_input: object) -> list[str]:
     if not isinstance(tool_input, dict):
         return []
     found = [str(tool_input[key]) for key in PATH_KEYS if tool_input.get(key)]
     command = tool_input.get("command")
     if isinstance(command, str):
-        found.extend(re.findall(r"[\w./\\-]+\.[A-Za-z]{1,4}\b", command)[:4])
+        candidates = re.findall(r"[\w./\\-]+\.[A-Za-z]{1,4}\b", command)[:4]
+        found.extend(token for token in candidates if _looks_like_a_path(token))
     return found
 
 
@@ -87,7 +124,7 @@ def iter_stretches(path: Path, min_calls: int = 3) -> Iterator[Stretch]:
 
             if role == "user":
                 text = _user_text(message).strip()
-                if text:
+                if text and not _is_harness_text(text):
                     if len(current.calls) >= min_calls:
                         current.ended_by = "correction" if CORRECTION_RE.search(text[:400]) else "user"
                         current.correction_text = text[:400] if current.ended_by == "correction" else ""
@@ -162,16 +199,17 @@ def waste_report(home: Path | None = None, project: str | None = None,
     stretches = 0
 
     for path in paths:
-        seen: collections.Counter[tuple[str, str]] = collections.Counter()
-        for stretch in iter_stretches(path):
+        scanned_stretches, tool_call_count, signatures = _scan(path)
+        calls += tool_call_count
+        for stretch in scanned_stretches:
             stretches += 1
-            calls += len(stretch.calls)
             if stretch.ended_by == "correction":
                 lags.append(len(stretch.calls))
                 bucket = per_project[stretch.project]
                 bucket["corrections"] += 1
                 bucket["calls_burned"] += len(stretch.calls)
-        for key, count in _repeat_signatures(path).items():
+        seen: collections.Counter[tuple[str, str]] = collections.Counter()
+        for key, count in signatures.items():
             if count > 1:
                 seen[key] += count - 1
         if seen:
@@ -204,33 +242,87 @@ def waste_report(home: Path | None = None, project: str | None = None,
     }
 
 
-def _repeat_signatures(path: Path) -> dict[tuple[str, str], int]:
-    """(tool, cause) -> occurrences, for error results in one transcript."""
-    counts: collections.Counter[tuple[str, str]] = collections.Counter()
+def _normalize_error(text: str) -> str:
+    """Collapse an unclassified ("other") error to a signature two occurrences of the SAME
+    error share, while two different unclassified errors still land on different keys.
+    Strips paths, hex ids/SHAs and digits (which vary run to run), collapses whitespace, and
+    truncates - "identical" has to mean identical, not merely "both unclassified"."""
+    text = re.sub(r"[\\/][\w./-]+", " ", text)
+    text = re.sub(r"\b[0-9a-fA-F]{6,}\b", " ", text)
+    text = re.sub(r"\d+", "0", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:100]
+
+
+def _scan(path: Path, min_calls: int = 3) -> tuple[list[Stretch], int, dict[tuple[str, str], int]]:
+    """One read of a transcript, producing everything waste_report needs from it: the stretches
+    (grouped exactly as `iter_stretches` groups them), the total count of every tool_use block
+    regardless of stretch length, and (tool, cause) occurrence counts for error tool_results.
+
+    Kept separate from `iter_stretches` (whose public signature and per-file streaming behaviour
+    other callers rely on) so that `waste_report` reads each transcript exactly once instead of
+    once for stretches and again for repeat signatures - on this machine's store that halved the
+    report's running time.
+    """
+    path = Path(path)
+    session_id = path.stem
+    project = path.parent.name
+    stretches: list[Stretch] = []
+    current = Stretch(session_id, project, 0)
+    turn = 0
+    total_calls = 0
     names: dict[str, str] = {}
+    signatures: collections.Counter[tuple[str, str]] = collections.Counter()
     try:
         handle = path.open(encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return stretches, total_calls, dict(signatures)
     with handle:
         for line in handle:
             try:
                 record = json.loads(line)
             except ValueError:
                 continue
-            content = (record.get("message") or {}).get("content")
-            if not isinstance(content, list):
+            message = record.get("message")
+            if not isinstance(message, dict):
                 continue
-            for block in content:
-                if not isinstance(block, dict):
+            turn += 1
+            role = message.get("role")
+            content = message.get("content")
+
+            if role == "user":
+                text = _user_text(message).strip()
+                if text and not _is_harness_text(text):
+                    if len(current.calls) >= min_calls:
+                        current.ended_by = "correction" if CORRECTION_RE.search(text[:400]) else "user"
+                        current.correction_text = text[:400] if current.ended_by == "correction" else ""
+                        stretches.append(current)
+                    current = Stretch(session_id, project, turn)
                     continue
-                if block.get("type") == "tool_use":
-                    names[str(block.get("id"))] = str(block.get("name", "?"))
-                elif block.get("type") == "tool_result" and block.get("is_error"):
-                    body = block.get("content")
-                    if isinstance(body, list):
-                        body = " ".join(part.get("text", "") for part in body
-                                        if isinstance(part, dict))
-                    tool = names.get(str(block.get("tool_use_id")), "?")
-                    counts[(tool, _cause(str(body)))] += 1
-    return dict(counts)
+
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "tool_use":
+                        total_calls += 1
+                        names[str(block.get("id"))] = str(block.get("name", "?"))
+                        if not current.calls:
+                            current.start_turn = turn
+                        current.calls.append(str(block.get("name", "?")))
+                        current.paths.extend(_paths_in(block.get("input")))
+                    elif btype == "tool_result" and block.get("is_error"):
+                        body = block.get("content")
+                        if isinstance(body, list):
+                            body = " ".join(part.get("text", "") for part in body
+                                            if isinstance(part, dict))
+                        tool = names.get(str(block.get("tool_use_id")), "?")
+                        body_text = str(body)
+                        cause = _cause(body_text)
+                        key = (tool, cause) if cause != "other" else (tool, _normalize_error(body_text))
+                        signatures[key] += 1
+
+    if len(current.calls) >= min_calls:
+        stretches.append(current)
+    return stretches, total_calls, dict(signatures)

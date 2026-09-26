@@ -405,6 +405,14 @@ def _command_waste(args: argparse.Namespace) -> int:
     home = Path(args.home) if args.home else None
     report = waste_report(home=home, project=project, limit=args.limit, since=args.since)
 
+    if args.this_project and report["sessions"] == 0:
+        # A slug with no matches is silent failure dressed up as "nothing to report" -
+        # loud on stderr so --json's stdout stays the report, verbatim, for callers that parse it.
+        print(f"no sessions found for project slug {project!r} under "
+              f"{home or 'the default transcript store'}; this can happen from a git worktree, "
+              f"whose slug does not match its main checkout. Try running without --this-project.",
+              file=sys.stderr)
+
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
