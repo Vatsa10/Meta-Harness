@@ -357,30 +357,36 @@ async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
 }
 
 /**
- * Injects installed `injection` artifacts into the prompt: the layer below `rule`, paid in
- * standing tokens only on the turns where it actually fires. Returning `{text: null}` (rather
- * than omitting the field) leaves the section out entirely, so an irrelevant turn pays nothing.
- * The hook itself knows what it placed, so use is recorded by construction via `observe`
- * instead of asking the model to self-report a retrieval it might forget.
+ * Injects installed `injection` artifacts as model-only context on `prompt.submit`: the layer
+ * below `rule`, paid in standing tokens only on the turns where it actually fires.
+ *
+ * This used to live on `prompt.section` and return `{ text }` to replace a system-prompt
+ * section — with no section-name filter, that both matched triggers against the WRONG text (the
+ * system prompt's own section content, not the human's turn) and, the moment one injection
+ * artifact was ever installed, deleted or overwrote every other section of the system prompt on
+ * every turn it didn't match. `prompt.submit` fixes both: triggers match `e.text` (the human's
+ * actual words) and a match is ATTACHED via `next({ ...e, context: [...] })`, never a
+ * replacement. The hook itself knows what it attached, so use is recorded by construction via
+ * `observe` instead of asking the model to self-report a retrieval it might forget.
  */
 export function registerInjection(on: On): void {
   let injections: Injection[] | null = null;
 
-  on('prompt.section', safely('prompt.section', async (dollar, event: any, next) => {
+  on('prompt.submit', safely('prompt.submit:injection', async (dollar, event: any, next) => {
     if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
     if (injections.length === 0) return next(event);
 
-    const haystack = JSON.stringify(event ?? {}).toLowerCase();
+    const haystack = String(event?.text ?? '').toLowerCase();
     const matched = injections.filter((injection) =>
       injection.triggers.some((trigger) => haystack.includes(String(trigger).toLowerCase())));
-    if (matched.length === 0) return { text: null };
+    if (matched.length === 0) return next(event);
 
     const sessionId = await currentSessionId(dollar);
     for (const injection of matched) {
       await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
-    const joined = matched.map((injection) => injection.text).join('\n\n');
-    return { text: truncate(joined, INJECTION_TOTAL_CAP) };
+    const joined = truncate(matched.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
+    return next({ ...event, context: [...(event?.context ?? []), joined] });
   }));
 }
 
