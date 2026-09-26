@@ -215,17 +215,23 @@ from typing import Any
 from .cc_history import claude_home, is_artifact_project
 from .replay import _cause
 
-# Fix round 3, measured against the full 88-record hand-labelled gold set
-# (D:\...\correction-gold.json) over ALL current firings of this detector on the real transcript
-# store: 11 of 21 flagged stretches were genuine corrections in a hand-labelled audit (52.4%
-# precision). The gold set covers every stretch the detector fires on as of that audit, so this
-# measures precision, not recall: a genuine correction this detector never fires on at all is
-# invisible to this figure, and recall is unmeasured.
-CAVEAT = ("Correction counts come from a keyword heuristic over your own messages. In a "
-          "hand-labelled audit, 11 of 21 flagged stretches were genuine corrections (52.4% "
-          "precision) - roughly half of what's flagged may not be a genuine correction, and "
-          "recall (genuine corrections this misses entirely) is unmeasured. Treat this as a "
-          "cost estimate, not an audit.")
+# Measured once, by hand: at audit time this detector flagged 22 stretches on the real transcript
+# store, 21 of which are in the hand-labelled gold set (D:\...\correction-gold.json); 11 of those
+# 21 were genuine corrections (52.4% precision). One flagged stretch was never audited, so the
+# gold set does NOT cover every firing. This measures precision only: a genuine correction the
+# detector never fires on is invisible here, and recall is unmeasured. The audited figures are
+# fixed history; the flagged count in the caveat is computed per report.
+AUDIT_AUDITED = 21
+AUDIT_GENUINE = 11
+
+
+def caveat(flagged: int) -> str:
+    """The report's own caveat, naming the count THIS report flagged beside the audit figures."""
+    return (f"Correction counts come from a keyword heuristic over your own messages. This report "
+            f"flags {flagged}. In a hand-labelled audit, {AUDIT_GENUINE} of the {AUDIT_AUDITED} "
+            f"flagged stretches that were audited were genuine corrections - roughly half of what's "
+            f"flagged may not be one. Recall (genuine corrections this misses entirely) is "
+            f"unmeasured. Treat this as a cost estimate, not an audit.")
 
 
 def _percentile(values: list[int], fraction: float) -> int:
@@ -312,7 +318,7 @@ def waste_report(home: Path | None = None, project: str | None = None,
         "by_project": sorted(
             ({"project": name, **counts} for name, counts in per_project.items()),
             key=lambda row: row["calls_burned"], reverse=True),
-        "caveat": CAVEAT,
+        "caveat": caveat(len(lags)),
     }
 
 
