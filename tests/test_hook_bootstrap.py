@@ -28,6 +28,7 @@ def test_bootstrap_calls_next_exactly_once_on_every_path():
     # time, which is exactly the double-submission bug fix round 2 found (a failed marker write,
     # or next() itself rejecting, both used to reach `safely`'s catch and call next() again).
     assert "safely(" not in bootstrap_source
+    assert "guardBefore(" not in bootstrap_source
     assert "await next(outboundEvent)" in bootstrap_source
 
 

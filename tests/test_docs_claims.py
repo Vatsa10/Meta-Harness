@@ -91,7 +91,7 @@ def test_hook_source_registers_no_prompt_section_listener():
 def test_hooks_readme_does_not_claim_every_handler_uses_safely():
     text = (ROOT / "hooks" / "README.md").read_text(encoding="utf-8")
     assert not re.search(r"every handler is wrapped in `safely`", text, re.I)
-    for wrapper in ("`safely`", "`afterCall`", "`afterCallMap`"):
+    for wrapper in ("`guardBefore`", "`guardAfter`", "`guardAfterMap`"):
         assert wrapper in text
 
 

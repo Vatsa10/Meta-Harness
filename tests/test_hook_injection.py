@@ -12,7 +12,7 @@ def test_injection_is_registered_on_prompt_submit_not_prompt_section():
     # prompt.section has no event.text/event.prompt at all, and returning {text} from it
     # REPLACES that system-prompt section; registerInjection moved to prompt.submit so it can
     # match the user's actual turn and ATTACH via context instead (see the module doc comment).
-    assert "safely('prompt.submit:injection'" in source
+    assert "guardBefore('prompt.submit:injection'" in source
 
 
 def test_injection_attaches_context_rather_than_replacing_text():

@@ -43,14 +43,21 @@ scored and recorded, but no hook installs them into a session.
 
 No handler may break a turn or submit it twice, but they get there differently:
 
-- `safely` wraps handlers that call `next` themselves (`tool.check`, and the `prompt.submit`
+Every `on(...)` passes a function literal written in the call, because Claude Code's loader
+rejects the whole module otherwise ("the hook is not a function literal or the name of one"):
+`on('tool.call', afterCall(...))` loads in the unit fakes but not in Claude Code.
+`tests/test_hook_literals.py` checks this against the source. Each literal calls a guard:
+
+- `guardBefore` runs handlers that call `next` themselves (`tool.check`, and the `prompt.submit`
   handlers for injection, session rules and the drift reset). A throw BEFORE `next` falls
   through to `next(event)`; `next` is never called a second time.
-- `afterCall` wraps observers that run after the tool (`tool.call` observation and read /
+- `guardAfter` runs observers that work after the tool (`tool.call` observation and read /
   rejection tracking). `next` is called once, up front; a throw costs the observation, never a
   re-run of the tool.
-- `afterCallMap` is `afterCall` for a handler that returns a replacement outcome (the drift note
+- `guardAfterMap` is `guardAfter` for a handler that returns a replacement outcome (the drift note
   appended to a copy of the tool result). On a throw, core's outcome is returned untouched.
+- `safely`, `afterCall` and `afterCallMap` are the same guards as hook-returning wrappers, kept
+  for the unit tests; never pass them to `on`.
 - The first-run handler does its own fail-open handling, because it does fallible work (the
   marker write) after `next`: `next` is called exactly once, and a failed write is swallowed.
 

@@ -1,7 +1,7 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler fails open: most are wrapped in `safely`, `afterCall` or `afterCallMap`, all of which swallow a
+ * Every handler fails open: most run inside `guardBefore`, `guardAfter` or `guardAfterMap`, all of which swallow a
  * throw and fall through to `next` rather than break the turn — and none ever calls `next` a
  * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
  * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
@@ -43,79 +43,116 @@ function logSkip(dollar: any, name: string, error: unknown): void {
   }
 }
 
-/** Wrap a handler so a throw becomes a pass-through instead of a broken turn. */
-export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    // `next` is the rest of the chain (for prompt.submit, the human's prompt reaching core; for
-    // tool.check, the tool running). Recovering a throw by calling it again is only safe if the
-    // handler never reached it: once it has, a second call submits the prompt twice or runs the
-    // tool twice. So once `next` has been called, its own outcome stands on every path.
-    let called = false;
-    let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
-    const once = async (e: E): Promise<R> => {
-      called = true;
-      try {
-        const value = await next(e);
-        settled = { ok: true, value };
-        return value;
-      } catch (error) {
-        settled = { ok: false, error };
-        throw error;
-      }
-    };
+/**
+ * Why the guards below take `(name, dollar, event, next, handler)` and are CALLED from inside a
+ * function literal instead of returning a hook: Claude Code's hooks loader rejects any `on(...)`
+ * whose hook argument is not a function literal (or the name of one) written in the call — a
+ * wrapper call such as `on('tool.call', afterCall(...))` fails the whole module, so no hook runs.
+ * Every registration is therefore `on('<event>', async ($, e, next) => guardX(..., $, e, next, ...))`;
+ * tests/test_hook_literals.py enforces that statically.
+ */
+
+/**
+ * Runs a handler that may call `next` itself, so a throw becomes a pass-through instead of a
+ * broken turn. `next` is the rest of the chain (for prompt.submit, the human's prompt reaching
+ * core; for tool.check, the tool running). Recovering a throw by calling it again is only safe if
+ * the handler never reached it: once it has, a second call submits the prompt twice or runs the
+ * tool twice. So once `next` has been called, its own outcome stands on every path.
+ */
+export async function guardBefore<E, R>(
+  name: string,
+  dollar: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (next: (e: E) => Promise<R>) => Promise<R>,
+): Promise<R> {
+  let called = false;
+  let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
+  const once = async (e: E): Promise<R> => {
+    called = true;
     try {
-      return await handler(dollar, event, once);
+      const value = await next(e);
+      settled = { ok: true, value };
+      return value;
     } catch (error) {
-      logSkip(dollar, name, error);
-      if (!called) return next(event);
-      const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
-      if (outcome?.ok) return outcome.value;
-      throw outcome ? outcome.error : error;
+      settled = { ok: false, error };
+      throw error;
     }
   };
+  try {
+    return await handler(once);
+  } catch (error) {
+    logSkip(dollar, name, error);
+    if (!called) return next(event);
+    const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
+    if (outcome?.ok) return outcome.value;
+    throw outcome ? outcome.error : error;
+  }
 }
 
 /**
- * Wrap a handler whose work happens AFTER the tool has already run.
- *
- * `safely` recovers a throw that happened before `next` by calling `next(event)`: for a post-`next` handler that would run the tool a SECOND time, duplicating the
- * side effect of a Bash or Write. Here `next` is called exactly once, up front, and the fallible
- * work is what gets swallowed — so an observer that throws costs an observation, never a repeated
- * command.
+ * Runs a handler whose work happens AFTER the tool has already run. `guardBefore` recovers a
+ * throw that happened before `next` by calling `next(event)`: for a post-`next` handler that
+ * would run the tool a SECOND time, duplicating the side effect of a Bash or Write. Here `next` is
+ * called exactly once, up front (a rejection propagates once, untouched), and the fallible work is
+ * what gets swallowed — so an observer that throws costs an observation, never a repeated command.
  */
+export async function guardAfter<E, R>(
+  name: string,
+  dollar: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<void>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    await handler(outcome);
+  } catch (error) {
+    logSkip(dollar, name, error);
+  }
+  return outcome;
+}
+
+/**
+ * Like `guardAfter`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
+ * something appended). `next` is called exactly once, up front; if the handler throws, core's
+ * outcome is returned as it came, never a second call to `next`.
+ */
+export async function guardAfterMap<E, R>(
+  name: string,
+  dollar: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<R>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    return await handler(outcome);
+  } catch (error) {
+    logSkip(dollar, name, error);
+    return outcome;
+  }
+}
+
+/** `guardBefore` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
+export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
+  return (dollar, event, next) => guardBefore(name, dollar, event, next, (once) => handler(dollar, event, once));
+}
+
+/** `guardAfter` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCall<E, R>(
   name: string,
   handler: (dollar: any, event: E, outcome: R) => Promise<void>,
 ): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    const outcome = await next(event);
-    try {
-      await handler(dollar, event, outcome);
-    } catch (error) {
-      logSkip(dollar, name, error);
-    }
-    return outcome;
-  };
+  return (dollar, event, next) => guardAfter(name, dollar, event, next, (outcome) => handler(dollar, event, outcome));
 }
 
-/**
- * Like `afterCall`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
- * something appended). `next` is called exactly once, up front; if the handler throws, core's
- * outcome is returned as it came, never a second call to `next`.
- */
+/** `guardAfterMap` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCallMap<E, R>(
   name: string,
   handler: (dollar: any, event: E, outcome: R) => Promise<R>,
 ): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    const outcome = await next(event);
-    try {
-      return await handler(dollar, event, outcome);
-    } catch (error) {
-      logSkip(dollar, name, error);
-      return outcome;
-    }
-  };
+  return (dollar, event, next) => guardAfterMap(name, dollar, event, next, (outcome) => handler(dollar, event, outcome));
 }
 
 const REPEAT_WINDOW = 6;
@@ -284,9 +321,9 @@ function isError(result: unknown): boolean {
 export function registerObserver(on: On): void {
   const recent: Recent[] = [];
 
-  // afterCall, not safely: this handler's work runs after the tool has already executed, so a
+  // guardAfter, not guardBefore: this handler's work runs after the tool has already executed, so a
   // recovery that re-entered next() would run the tool twice.
-  on('tool.call', afterCall('tool.call', async (dollar, event: any, outcome: any) => {
+  on('tool.call', async (dollar: any, event: any, next: any) => guardAfter('tool.call', dollar, event, next, async (outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
     const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
 
@@ -338,13 +375,13 @@ export function registerRules(on: On): void {
   };
   let rules: Rule[] | null = null;
 
-  // afterCall, not safely: rejection detection reads the outcome, which only exists AFTER the
-  // tool has already run (or been denied), so a `safely` recovery re-entering next() would run
+  // guardAfter, not guardBefore: rejection detection reads the outcome, which only exists AFTER the
+  // tool has already run (or been denied), so a `guardBefore` recovery re-entering next() would run
   // the tool a second time. `next` resolves before this handler's own body runs at all — both
   // the read-tracking and the rejection check below run AFTER the call, not "first"; read-tracking
   // simply doesn't care about the outcome, so its ordering relative to `next` has no effect either
   // way.
-  on('tool.call', afterCall('tool.call:read-tracking', async (dollar, event: any, outcome: any) => {
+  on('tool.call', async (dollar: any, event: any, next: any) => guardAfter('tool.call:read-tracking', dollar, event, next, async (outcome: any) => {
     if (event?.tool === 'Read') {
       const path = String(event?.input?.file_path ?? '');
       if (path) state.readPaths.add(path);
@@ -358,7 +395,7 @@ export function registerRules(on: On): void {
   // prompt.submit, not prompt.section: only prompt.submit's event carries the human's actual
   // words (`e.text`). This handler mutates session state only (never the model-visible prompt),
   // so it always passes `event` through to `next` unchanged.
-  on('prompt.submit', safely('prompt.submit:nlrules', async (dollar, event: any, next) => {
+  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:nlrules', dollar, event, next, async (next) => {
     const text = String(event?.text ?? '');
     // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
     // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
@@ -380,7 +417,7 @@ export function registerRules(on: On): void {
     return next(event);
   }));
 
-  on('tool.check', safely('tool.check', async (dollar, event: any, next) => {
+  on('tool.check', async (dollar: any, event: any, next: any) => guardBefore('tool.check', dollar, event, next, async (next) => {
     const tool = String(event?.tool ?? '');
     if (wasRejected(state, tool, event?.input)) {
       return {
@@ -514,7 +551,7 @@ async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
 export function registerInjection(on: On): void {
   let injections: Injection[] | null = null;
 
-  on('prompt.submit', safely('prompt.submit:injection', async (dollar, event: any, next) => {
+  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:injection', dollar, event, next, async (next) => {
     if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
     if (injections.length === 0) return next(event);
 
@@ -541,14 +578,14 @@ export function registerInjection(on: On): void {
  * Disabled unless `<harnessHome>/drift.json` explicitly enables it (see `hooks/drift.ts`); the
  * ship gate refused every judge, so by default this counts calls and says nothing.
  *
- * `tool.call` uses `afterCallMap`: `next` is called exactly once, up front, and the note is
+ * `tool.call` uses `guardAfterMap`: `next` is called exactly once, up front, and the note is
  * appended to a COPY of the answered outcome; a throw anywhere after `next` returns core's
  * outcome untouched, never re-running the tool. A `{ deny }` outcome is never given context (its
  * type forbids it): past the threshold the note waits for the next answered call. The latch is
  * set only once the note is actually attached.
  *
  * `prompt.submit` only resets the stretch when the user speaks (see `userSpoke`); it attaches
- * nothing and passes the event through unchanged, under `safely`, which calls `next` once.
+ * nothing and passes the event through unchanged, under `guardBefore`, which calls `next` once.
  * Nothing here listens on `prompt.section`, whose return replaces a system-prompt section.
  */
 export function registerDrift(on: On): void {
@@ -556,7 +593,7 @@ export function registerDrift(on: On): void {
   let warned = false;
   let config: DriftConfig | null | undefined;
 
-  on('tool.call', afterCallMap('tool.call:drift', async (dollar, _event: any, outcome: any) => {
+  on('tool.call', async (dollar: any, event: any, next: any) => guardAfterMap('tool.call:drift', dollar, event, next, async (outcome: any) => {
     count += 1;
     if (warned) return outcome;
     if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
@@ -567,7 +604,7 @@ export function registerDrift(on: On): void {
     return { ...outcome, context: [...context, driftNote(count)] };
   }));
 
-  on('prompt.submit', safely('prompt.submit:drift', async (_dollar, event: any, next) => {
+  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:drift', dollar, event, next, async (next) => {
     if (userSpoke(event)) {
       count = 0;
       warned = false;

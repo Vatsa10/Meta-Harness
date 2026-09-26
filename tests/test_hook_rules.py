@@ -29,7 +29,7 @@ def test_deny_carries_a_reason_and_the_artifact_id():
 def test_tool_check_is_registered_and_wrapped():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     assert "'tool.check'" in source
-    assert "safely('tool.check'" in source
+    assert "guardBefore('tool.check'" in source
 
 
 def test_rules_behaviour_via_node():
