@@ -360,7 +360,10 @@ export function registerRules(on: On): void {
   // so it always passes `event` through to `next` unchanged.
   on('prompt.submit', safely('prompt.submit:nlrules', async (dollar, event: any, next) => {
     const text = String(event?.text ?? '');
-    const instruction = parseStopInstruction(text);
+    // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
+    // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
+    // note uses to decide who spoke (`userSpoke`, hooks/drift.ts).
+    const instruction = userSpoke(event) ? parseStopInstruction(text) : null;
     if (instruction) {
       addSessionRule(state, instruction);
       const path = `${harnessHome(dollar)}/pending-session-rules.json`;

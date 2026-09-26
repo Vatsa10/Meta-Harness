@@ -337,6 +337,33 @@ async function main() {
     assert.equal(written[0].pattern, 'pytest');
   }
 
+  // --- final fix wave: only a human's prompt creates a session rule ---
+  for (const [origin, expectRule] of [
+    [{ kind: 'plugin', name: 'some-plugin' }, false],
+    [{ kind: 'peer' }, false],
+    [{ kind: 'scheduled-trigger' }, false],
+    [{ kind: 'task-notification' }, false],
+    [{ kind: 'composer' }, true],
+  ] as const) {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit("don't run pytest", { origin }), async (e: any) => e);
+    const decision = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest tests/' } }, async () => ({ decision: 'allow' }),
+    );
+    const path = 'C:/fake-harness-home/pending-session-rules.json';
+    if (expectRule) {
+      assert.equal(decision.decision, 'deny', `a ${origin.kind}-origin "don't run pytest" must create a denying rule`);
+      assert.ok(files.has(path), `a ${origin.kind}-origin rule must be recorded`);
+    } else {
+      assert.equal(decision.decision, 'allow', `a ${origin.kind}-origin prompt must NOT create a denying rule`);
+      assert.equal(files.has(path), false, `a ${origin.kind}-origin prompt must record no rule`);
+    }
+  }
+
   // --- direct addSessionRule/evaluator sanity, independent of the parser ---
   {
     const state: any = { readPaths: new Set(), callCounts: new Map(), rejected: new Map(), sessionRules: [] };
