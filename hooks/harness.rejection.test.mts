@@ -56,7 +56,10 @@ async function runToolCall(handlers: Record<string, any[]>, dollar: any, event: 
 }
 
 async function main() {
-  const rejectedResult = { result: "The user doesn't want to proceed with this tool use." };
+  // A rejection surfacing through `result`/`text` is only ever announced on the ERROR outcome
+  // core produces for a declined call — a successful result never carries `isError: true` — so
+  // every fixture below that means "the human rejected this" sets it explicitly.
+  const rejectedResult = { result: "The user doesn't want to proceed with this tool use.", isError: true };
   const okResult = { result: 'ok' };
 
   // --- 1. a call rejected once, then re-proposed identically, is denied naming the rejection ---
@@ -169,21 +172,47 @@ async function main() {
     assert.equal(result.decision, 'deny', 'a rejection carried only on `deny` must still be remembered');
   }
 
-  // --- the rejection can be announced via `text` alone (the model-facing joined text) ---
+  // --- the rejection can be announced via `text` alone, but ONLY when isError is true (the
+  //      model-facing joined text is present on every answered call, error or not) ---
   {
     const files = new Map<string, string>();
     const dollar = makeFakeDollar(files);
     const { on, handlers } = makeOn();
     registerRules(on as any);
 
-    // Shaped exactly as ToolCallResult's answered branch, with the rejection surfaced only in
-    // `text` (the model-facing joined text), not `result`.
-    const textOutcome = { result: { ok: true }, text: 'Tool use was rejected by the user.' };
+    // Shaped exactly as ToolCallResult's answered, ERRORED branch: `text` carries the
+    // rejection, `isError` says this call did not succeed.
+    const textOutcome = { result: { ok: true }, text: 'Tool use was rejected by the user.', isError: true };
     const event = { tool: 'Bash', input: { command: 'rm -rf build' } };
     await runToolCall(handlers, dollar, event, async () => textOutcome);
 
     const result = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
-    assert.equal(result.decision, 'deny', 'a rejection carried only on `text` must still be remembered');
+    assert.equal(result.decision, 'deny', 'a rejection carried only on `text` (with isError: true) must still be remembered');
+  }
+
+  // --- finding 5: a SUCCESSFUL Read whose file merely CONTAINS the rejection phrase must NOT be
+  //      recorded as a rejection — text/result only count when isError is true, never on a
+  //      successful outcome, no matter what the file's own content says ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    // A real file's contents (this very source file, notionally) containing the exact phrase,
+    // returned as a SUCCESSFUL result: no `deny`, no `isError: true`.
+    const successfulReadContainingPhrase = {
+      result: "REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;",
+      text: "REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;",
+    };
+    const event = { tool: 'Read', input: { file_path: 'hooks/harness.ts' } };
+    await runToolCall(handlers, dollar, event, async () => successfulReadContainingPhrase);
+
+    const result = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
+    assert.equal(
+      result.decision, 'allow',
+      'a successful Read of a file that merely CONTAINS the rejection phrase must never be denied',
+    );
   }
 
   // --- a real PromptSubmitInput-shaped event (text/wait/origin/context) drives the same handler ---
@@ -196,18 +225,23 @@ async function main() {
     const event = { tool: 'Bash', input: { command: 'rm -rf build' } };
     await runToolCall(handlers, dollar, event, async () => rejectedResult);
 
+    // Finding 3: a FULLY populated PromptSubmitInput, not just text/wait/origin — attachments
+    // and turnId included — must reach `next` with EVERY field intact, since this handler never
+    // has anything of its own to attach.
     const realShapedPromptSubmit = {
       text: 'go ahead and run rm -rf build again please',
       wait: false,
       origin: { user: {} },
       context: ['some earlier context'],
+      attachments: [{ type: 'image', mediaType: 'image/png', filename: 'shot.png' }],
+      turnId: 'turn-7',
     };
     let forwarded: any = null;
     await handlers['prompt.submit'][0](dollar, realShapedPromptSubmit, async (e: any) => {
       forwarded = e;
       return { text: e.text, context: e.context, origin: e.origin };
     });
-    assert.deepEqual(forwarded, realShapedPromptSubmit, 'a handler with nothing to add must pass the real event through unchanged');
+    assert.deepEqual(forwarded, realShapedPromptSubmit, 'a handler with nothing to add must pass the fully-populated event through unchanged, field for field');
 
     const allowed = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
     assert.equal(allowed.decision, 'allow', 'the real-shaped mention must still clear the rejection');

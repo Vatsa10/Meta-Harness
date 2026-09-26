@@ -152,15 +152,21 @@ function resultText(result: unknown): string {
 }
 
 /**
- * All the text a real `tool.call` outcome (ToolCallResult) can carry, across every shape it can
- * take: `deny` (the refusal string, present only on the deny branch), `text` (the model-facing
- * joined text core sets) and `result` (the tool's own record). A human's rejection can be
- * announced in any of the three depending on where in the chain it was decided — checking
- * `result` alone (as an earlier version here did) missed a rejection that surfaced as `deny` or
- * `text` instead.
+ * The text of a real `tool.call` outcome (ToolCallResult) worth checking for a rejection
+ * announcement — and ONLY when the outcome actually says the call was refused or errored.
+ *
+ * The `deny` branch's `deny` string always counts: a hook or core only sets it on an actual
+ * refusal. The answered branch's `text`/`result` count ONLY when `isError` is true — `text` and
+ * `result` are present on every SUCCESSFUL call too (a normal Read's file contents are `result`,
+ * and its `text` is the same content joined for the model), so checking them unconditionally
+ * means a Read of any file that happens to CONTAIN the phrase "tool use was rejected" — this very
+ * file, for one — gets recorded as a rejection and denied for the rest of the session. Gating on
+ * `isError`/`deny` is what keeps a successful result's mere text out of consideration entirely.
  */
-function outcomeText(outcome: any): string {
-  const parts = [outcome?.deny, outcome?.text, resultText(outcome?.result)];
+function rejectionAnnouncement(outcome: any): string {
+  if (typeof outcome?.deny === 'string' && outcome.deny.length > 0) return outcome.deny;
+  if (outcome?.isError !== true) return '';
+  const parts = [outcome?.text, resultText(outcome?.result)];
   return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
 }
 
@@ -256,8 +262,8 @@ export function registerRules(on: On): void {
       const path = String(event?.input?.file_path ?? '');
       if (path) state.readPaths.add(path);
     }
-    const text = outcomeText(outcome);
-    if (REJECTION_PATTERN.test(text)) {
+    const text = rejectionAnnouncement(outcome);
+    if (text && REJECTION_PATTERN.test(text)) {
       rememberRejection(state, String(event?.tool ?? ''), event?.input);
     }
   }));
@@ -295,17 +301,23 @@ export function registerRules(on: On): void {
     for (const rule of state.sessionRules ?? []) {
       if (rule.tool !== tool) continue;
       const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
-      if (haystack.includes(rule.pattern.toLowerCase())) {
-        return {
-          decision: 'deny',
-          // Says exactly what was blocked: the rule denies any call whose input contains this
-          // one token, nothing narrower — a qualifier the human's own phrasing carried (like
-          // "without -q") could not be represented, so the rule is honest about denying the
-          // command in every form rather than pretending to be more precise than it is.
-          reason: `Session rule from this conversation: this blocks any ${tool} call whose input `
+      if (!haystack.includes(rule.pattern.toLowerCase())) continue;
+      // A "without <flag>" qualifier IS representable: the rule allows the call when that flag
+      // is present, so "stop running pytest without -q" denies `pytest tests/` but ALLOWS
+      // `pytest -q` — the exact command the human asked to keep, not the command they asked to
+      // stop.
+      if (rule.requires && haystack.includes(String(rule.requires).toLowerCase())) continue;
+      return {
+        decision: 'deny',
+        reason: rule.requires
+          // Says exactly what is (and is not) blocked: only the qualified form is allowed.
+          ? `Session rule from this conversation: this blocks any ${tool} call containing `
+            + `"${rule.pattern}" UNLESS it also contains "${rule.requires}" [session-rule]`
+          // No representable qualifier: says so, honestly denying the token in every form
+          // rather than pretending to be more precise than it is.
+          : `Session rule from this conversation: this blocks any ${tool} call whose input `
             + `contains "${rule.pattern}", in any form [session-rule]`,
-        };
-      }
+      };
     }
     if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
     for (const rule of rules) {

@@ -28,11 +28,19 @@ def test_mention_clearing_reads_prompt_submit_not_prompt_section():
 
 def test_rejection_text_is_read_from_every_outcome_field():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    # A real ToolCallResult carries the rejection on `deny`, `text` or `result` depending on
-    # where in the chain it was decided; checking `result` alone missed the other two.
-    assert "function outcomeText" in source
+    # A real ToolCallResult carries the rejection on `deny`, or on `text`/`result` when
+    # `isError` is true; checking `result` alone missed the other two.
+    assert "function rejectionAnnouncement" in source
     assert "outcome?.deny" in source
     assert "outcome?.text" in source
+
+
+def test_rejection_never_fires_on_a_successful_result():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # A successful Read whose file merely CONTAINS the rejection phrase (this file, for one)
+    # must never be recorded as a rejection: only `deny`, or `text`/`result` when `isError` is
+    # true, may be checked — never a successful result's own content.
+    assert "outcome?.isError !== true" in source
 
 
 def test_rejection_behaviour_via_node():
