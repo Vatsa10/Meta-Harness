@@ -23,10 +23,41 @@
  *    single-slot fake other test files here originally used, which is what let an earlier draft
  *    quietly break composition without any test catching it) and asserts every handler runs and
  *    the tool itself runs exactly once.
+ *
+ * 3. Case 1 repeated across every file state the handlers branch on: bootstrap.json present or
+ *    absent, waste.json present or absent, and an installed injection whose trigger appears IN
+ *    the section text, both before and after a prompt.submit turn has run. A handler that
+ *    deleted a section only once bootstrap.json exists (the original CRITICAL 1 shape) passes
+ *    case 1, which only ever runs with an empty harness home; it fails here.
+ *
+ * 4. A fully populated PromptSubmitInput (text, attachments, origin, turnId, wait, and a
+ *    pre-existing context entry) sent through EVERY prompt.submit handler reaches core with
+ *    every field unchanged and the prior context entry ahead of anything added.
+ *
+ * 5. `next` is called at most once: a core that rejects is never re-entered by a fail-open
+ *    wrapper, through the full prompt.submit chain or through `safely` directly.
  */
 
 import assert from 'node:assert/strict';
-import { register } from './harness.ts';
+import { register, safely } from './harness.ts';
+
+const HOME = 'C:/fake-harness-home';
+const WASTE = JSON.stringify({ sessions: 12, corrections: { calls_burned: 340 } });
+
+function installInjection(files: Map<string, string>, triggers: string[]) {
+  files.set(`${HOME}/installed.json`, JSON.stringify([
+    { id: 'timeout-tip', type: 'injection', signature: 'sig', accepted: '2026-01-01' },
+  ]));
+  files.set(`${HOME}/artifacts/timeout-tip/artifact.json`, JSON.stringify({
+    id: 'timeout-tip',
+    type: 'injection',
+    origin: { triggers },
+    payload: 'Long-running commands should pass an explicit timeout.',
+    replay: {},
+  }));
+}
+
+const PROMPT_FIELDS = ['text', 'attachments', 'origin', 'turnId', 'wait'] as const;
 
 function makeFakeDollar(files: Map<string, string>) {
   return {
@@ -123,6 +154,148 @@ async function main() {
 
     assert.equal(toolRuns, 1, 'the tool itself must run exactly once, regardless of how many handlers observe the call');
     assert.deepEqual(outcome, { result: 'ok', text: 'ok' }, 'the outcome each handler forwards must reach the caller unchanged');
+  }
+
+  // --- 3. prompt.section unchanged across bootstrap.json x waste.json x a matching injection ---
+  {
+    const sections = [
+      { name: 'env_info_simple', text: 'env: the default timeout is 120s' },
+      { name: 'memory', text: 'remember the timeout flag' },
+      { name: 'tool_use', text: 'ORIGINAL' },
+    ];
+    for (const hasBootstrap of [false, true]) {
+      for (const hasWaste of [false, true]) {
+        for (const afterTurn of [false, true]) {
+          const files = new Map<string, string>();
+          installInjection(files, ['timeout', 'env', 'original']);
+          if (hasBootstrap) files.set(`${HOME}/bootstrap.json`, '{"shown":"2026-01-01"}');
+          if (hasWaste) files.set(`${HOME}/waste.json`, WASTE);
+          const dollar = makeFakeDollar(files);
+          const { on, fire } = makeChainingOn();
+          register(on as any, {} as any);
+          if (afterTurn) {
+            await fire(dollar, 'prompt.submit', { text: 'why the timeout', wait: false, origin: { kind: 'composer' } },
+              async (e: any) => ({ text: e.text, context: e.context }));
+          }
+          for (const section of sections) {
+            const result = await fire(dollar, 'prompt.section', { ...section }, async (e: any) => ({ text: e.text }));
+            assert.equal(
+              result?.text, section.text,
+              `section ${section.name} changed with bootstrap.json=${hasBootstrap} waste.json=${hasWaste} `
+                + `afterTurn=${afterTurn}: got ${JSON.stringify(result)}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // --- 4. a fully populated PromptSubmitInput survives every prompt.submit handler ---
+  {
+    const files = new Map<string, string>();
+    files.set(`${HOME}/waste.json`, WASTE);
+    installInjection(files, ['timeout']);
+    const dollar = makeFakeDollar(files);
+    const { on, fire, handlers } = makeChainingOn();
+    register(on as any, {} as any);
+    assert.ok((handlers['prompt.submit']?.length ?? 0) >= 3, 'expected nlrules, injection and bootstrap on prompt.submit');
+
+    const full = {
+      text: 'the build hit a timeout again',
+      attachments: [{ type: 'image', mediaType: 'image/png', filename: 'shot.png' }],
+      origin: { kind: 'composer' },
+      turnId: 'turn-42',
+      wait: true,
+      context: ['an earlier context entry'],
+    };
+    const snapshot = JSON.parse(JSON.stringify(full));
+    let atCore: any = null;
+    let coreCalls = 0;
+    await fire(dollar, 'prompt.submit', full, async (e: any) => {
+      coreCalls += 1;
+      atCore = e;
+      return { text: e.text, context: e.context };
+    });
+    assert.equal(coreCalls, 1, 'core must see the prompt exactly once');
+    for (const field of PROMPT_FIELDS) {
+      assert.deepEqual(atCore[field], snapshot[field], `${field} must reach core unchanged, got ${JSON.stringify(atCore[field])}`);
+    }
+    assert.equal(atCore.context[0], 'an earlier context entry', `prior context must survive, first: ${JSON.stringify(atCore.context)}`);
+    assert.equal(atCore.context.length, 3, `expected prior entry + injection + bootstrap line, got ${JSON.stringify(atCore.context)}`);
+    assert.ok(atCore.context.some((c: string) => c.includes('explicit timeout')), 'the injection must be attached');
+    assert.ok(atCore.context.some((c: string) => c.includes('340')), 'the bootstrap line must be attached');
+    assert.deepEqual(full, snapshot, "the caller's event object must not be mutated");
+
+    // Each handler on its own too, in a state where it adds something: none may drop a field or
+    // replace the prior entry.
+    for (const handler of handlers['prompt.submit']) {
+      const fresh = new Map<string, string>();
+      fresh.set(`${HOME}/waste.json`, WASTE);
+      installInjection(fresh, ['timeout']);
+      let seen: any = null;
+      await handler(makeFakeDollar(fresh), JSON.parse(JSON.stringify(snapshot)), async (e: any) => {
+        seen = e;
+        return { text: e.text, context: e.context };
+      });
+      for (const field of PROMPT_FIELDS) {
+        assert.deepEqual(seen[field], snapshot[field], `a single prompt.submit handler dropped or changed ${field}`);
+      }
+      assert.equal(seen.context?.[0], 'an earlier context entry', `a single handler replaced prior context: ${JSON.stringify(seen.context)}`);
+    }
+  }
+
+  // --- 5. a rejecting core is called exactly once, never retried by a fail-open wrapper ---
+  {
+    for (const hasWaste of [false, true]) {
+      for (const hasInjection of [false, true]) {
+        const files = new Map<string, string>();
+        if (hasWaste) files.set(`${HOME}/waste.json`, WASTE);
+        if (hasInjection) installInjection(files, ['timeout']);
+        const dollar = makeFakeDollar(files);
+        const { on, fire } = makeChainingOn();
+        register(on as any, {} as any);
+        let coreCalls = 0;
+        await assert.rejects(() => fire(
+          dollar, 'prompt.submit', { text: 'a timeout again', wait: false, origin: { kind: 'composer' } },
+          async () => {
+            coreCalls += 1;
+            throw new Error('core refused');
+          },
+        ));
+        assert.equal(coreCalls, 1, `core called ${coreCalls} times (waste.json=${hasWaste} injection=${hasInjection})`);
+      }
+    }
+
+    const quiet = { ui: { log() {} } };
+    let calls = 0;
+    const passThrough = safely('t', async (_d: any, e: any, next: any) => next(e));
+    await assert.rejects(() => passThrough(quiet, {}, async () => {
+      calls += 1;
+      throw new Error('x');
+    }));
+    assert.equal(calls, 1, 'safely must not re-enter a next that already rejected');
+
+    calls = 0;
+    const throwsAfter = safely('t', async (_d: any, e: any, next: any) => {
+      await next(e);
+      throw new Error('after');
+    });
+    const kept = await throwsAfter(quiet, {}, async () => {
+      calls += 1;
+      return 'core-result';
+    });
+    assert.equal(calls, 1, 'safely must not call next again after a post-next throw');
+    assert.equal(kept, 'core-result', 'the result core already produced must be returned');
+
+    calls = 0;
+    const throwsBefore = safely('t', async () => {
+      throw new Error('before');
+    });
+    await throwsBefore(quiet, {}, async () => {
+      calls += 1;
+      return 'ok';
+    });
+    assert.equal(calls, 1, 'a throw before next must still fall through to next exactly once');
   }
 
   console.log('hooks/harness.contract.test.mts: all assertions passed');

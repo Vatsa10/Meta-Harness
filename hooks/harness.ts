@@ -1,9 +1,11 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler is wrapped in `safely` or `afterCall`, both of which swallow a throw and fall
- * through to `next` rather than break the turn. A learning system that can break a session is
- * worse than no learning system.
+ * Every handler fails open: most are wrapped in `safely` or `afterCall`, both of which swallow a
+ * throw and fall through to `next` rather than break the turn — and neither ever calls `next` a
+ * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
+ * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
+ * human's prompt twice, is worse than no learning system.
  *
  * Per-turn features (rejection memory, session rules, injections, the first-run message) live on
  * `prompt.submit`, never `prompt.section`. `prompt.section` fires once per NAMED SECTION of the
@@ -31,20 +33,43 @@ import {
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
+/** Log a skip the same way everywhere, without ever risking a second throw of its own. */
+function logSkip(dollar: any, name: string, error: unknown): void {
+  try {
+    dollar.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
+  } catch {
+    // logging must never be the thing that breaks the turn either
+  }
+}
+
 /** Wrap a handler so a throw becomes a pass-through instead of a broken turn. */
 export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
   return async (dollar, event, next) => {
-    try {
-      return await handler(dollar, event, next);
-    } catch (error) {
+    // `next` is the rest of the chain (for prompt.submit, the human's prompt reaching core; for
+    // tool.check, the tool running). Recovering a throw by calling it again is only safe if the
+    // handler never reached it: once it has, a second call submits the prompt twice or runs the
+    // tool twice. So once `next` has been called, its own outcome stands on every path.
+    let called = false;
+    let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
+    const once = async (e: E): Promise<R> => {
+      called = true;
       try {
-        dollar.ui.log(
-          `meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`,
-        );
-      } catch {
-        // logging must never be the thing that breaks the turn either
+        const value = await next(e);
+        settled = { ok: true, value };
+        return value;
+      } catch (error) {
+        settled = { ok: false, error };
+        throw error;
       }
-      return next(event);
+    };
+    try {
+      return await handler(dollar, event, once);
+    } catch (error) {
+      logSkip(dollar, name, error);
+      if (!called) return next(event);
+      const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
+      if (outcome?.ok) return outcome.value;
+      throw outcome ? outcome.error : error;
     }
   };
 }
@@ -52,8 +77,7 @@ export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E,
 /**
  * Wrap a handler whose work happens AFTER the tool has already run.
  *
- * `safely` recovers by calling `next(event)`, which is correct only for a handler that calls
- * `next` last: for a post-`next` handler that would run the tool a SECOND time, duplicating the
+ * `safely` recovers a throw that happened before `next` by calling `next(event)`: for a post-`next` handler that would run the tool a SECOND time, duplicating the
  * side effect of a Bash or Write. Here `next` is called exactly once, up front, and the fallible
  * work is what gets swallowed — so an observer that throws costs an observation, never a repeated
  * command.
@@ -67,13 +91,7 @@ export function afterCall<E, R>(
     try {
       await handler(dollar, event, outcome);
     } catch (error) {
-      try {
-        dollar.ui.log(
-          `meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`,
-        );
-      } catch {
-        // logging must never be the thing that breaks the turn either
-      }
+      logSkip(dollar, name, error);
     }
     return outcome;
   };
@@ -412,41 +430,65 @@ export function registerInjection(on: On): void {
  * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
  * `meta_harness/waste.py`'s `waste_report()`); this hook never runs that command itself.
  *
- * The marker is written ONLY after the line has actually been attached via `next(...)`: a
- * missing `waste.json` means "no report yet, try again next turn", not "never again", and a
- * transient read/parse failure propagates to the outer `safely` wrapper rather than being
- * swallowed here — either way nothing is marked done, so the question keeps being asked (at
- * most once per turn, which costs nothing on a turn with no report to show) until it can
- * actually be answered once.
+ * Handles its own failures rather than relying on `safely`: this handler calls `next` in the
+ * MIDDLE, then does one more fallible thing afterward (writing the marker). Under the old
+ * `safely`, a marker write that threw, or `next(...)` itself rejecting, reached a catch that
+ * called `next` a SECOND time — submitting the human's prompt twice, the second time with no
+ * line attached (every turn, on a read-only harness home). `safely` no longer does that either,
+ * but here the rule is explicit: `next` is called exactly once on every path, a failure before
+ * it falls back to the unmodified event, and a failed marker write is swallowed locally.
+ *
+ * The marker is written ONLY after the line has actually been attached via `next(...)` and that
+ * call has resolved: a missing `waste.json` means "no report yet, try again next turn", not
+ * "never again", and a transient read/parse failure before `next` is swallowed locally (falling
+ * back to the unmodified event) rather than suppressing the line for good — either way nothing
+ * is marked done, so the question keeps being asked (at most once per turn, which costs nothing
+ * on a turn with no report to show) until it can actually be answered once.
  */
 export function registerBootstrap(on: On): void {
-  on('prompt.submit', safely('prompt.submit:bootstrap', async (dollar, event: any, next) => {
-    const home = harnessHome(dollar);
-    const bootstrapPath = `${home}/bootstrap.json`;
-    if (await dollar.fs.exists(bootstrapPath)) return next(event);
+  on('prompt.submit', async (dollar: any, event: any, next: any) => {
+    let outboundEvent = event;
+    let markDone = false;
 
-    const wastePath = `${home}/waste.json`;
-    if (!(await dollar.fs.exists(wastePath))) return next(event);
+    try {
+      const home = harnessHome(dollar);
+      const bootstrapPath = `${home}/bootstrap.json`;
+      if (!(await dollar.fs.exists(bootstrapPath))) {
+        const wastePath = `${home}/waste.json`;
+        if (await dollar.fs.exists(wastePath)) {
+          const waste: any = JSON.parse(await dollar.fs.read(wastePath));
+          const sessions = waste?.sessions;
+          const callsBurned = waste?.corrections?.calls_burned;
+          if (sessions != null && callsBurned != null) {
+            const line = `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
+              + '`/harness waste` for the breakdown.';
+            outboundEvent = { ...event, context: [...(event?.context ?? []), line] };
+            markDone = true;
+          }
+        }
+      }
+    } catch (error) {
+      logSkip(dollar, 'prompt.submit:bootstrap', error);
+      outboundEvent = event; // fail open: send the turn through exactly as it arrived
+      markDone = false;
+    }
 
-    // Deliberately not locally try/caught: a bad read or a corrupt waste.json must propagate to
-    // the outer `safely` wrapper, whose catch recovers via next(event) WITHOUT writing the
-    // marker below — a transient failure means "try again next turn", never "suppressed for
-    // good".
-    const waste: any = JSON.parse(await dollar.fs.read(wastePath));
-    const sessions = waste?.sessions;
-    const callsBurned = waste?.corrections?.calls_burned;
-    if (sessions == null || callsBurned == null) return next(event);
+    // Called exactly once, unconditionally, on every path above — the one and only next() call
+    // this handler ever makes.
+    const result = await next(outboundEvent);
 
-    const line = `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
-      + '`/harness waste` for the breakdown.';
-    const result = await next({ ...event, context: [...(event?.context ?? []), line] });
-
-    // Marked done only now that the line has actually reached `next` and resolved — a throw
-    // above never reaches this line, so it never marks a turn "done" that didn't actually say
-    // anything.
-    await dollar.fs.write(bootstrapPath, JSON.stringify({ shown: new Date().toISOString() }));
+    if (markDone) {
+      try {
+        await dollar.fs.write(`${harnessHome(dollar)}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
+      } catch (error) {
+        // Swallowed locally, never recovered by calling next() again: a failed marker write
+        // just means the question is asked again next turn, not that the turn breaks or the
+        // prompt is submitted twice.
+        logSkip(dollar, 'prompt.submit:bootstrap', error);
+      }
+    }
     return result;
-  }));
+  });
 }
 
 export const register: Register = (on: On, options: PluginOptions) => {

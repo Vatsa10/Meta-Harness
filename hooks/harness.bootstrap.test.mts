@@ -4,11 +4,14 @@
  * (see tests/test_hook_bootstrap.py, which shells out to it).
  *
  * This exists because a grep over the source cannot prove registerBootstrap() actually gates on
- * bootstrap.json, reads the real waste.json schema, attaches (rather than replaces) the line, or
- * fails open on a throw without marking itself done: a reviewer could make it always attach the
- * line, never write the marker, mark itself done before the line is ever attached, or drop the
- * `safely` wrapper, and every substring-based test would still pass. This test drives the real
- * registerBootstrap() handler with a fake `$` and asserts on the actual returned event and the
+ * bootstrap.json, reads the real waste.json schema, attaches (rather than replaces) the line
+ * while preserving every other field, calls `next` at most once no matter what fails, or marks
+ * itself done only once the line has genuinely reached core: a reviewer could make it always
+ * attach the line, never write the marker, mark itself done before the line is ever attached,
+ * rebuild the outgoing event from scratch (dropping fields or replacing prior context), or wrap
+ * itself in something that retries `next` on a failure, and every substring-based test would
+ * still pass. This test drives the real registerBootstrap() handler with a fake `$` and asserts
+ * on the actual returned event, how many times core (`next`) was actually called, and the
  * marker file it writes.
  *
  * registerBootstrap fires on `prompt.submit`, not `prompt.section`: `prompt.section` has no
@@ -18,9 +21,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { registerBootstrap, safely } from './harness.ts';
-
-void safely;
+import { registerBootstrap } from './harness.ts';
 
 function makeFakeDollar(files: Map<string, string>, overrides: Partial<Record<string, any>> = {}) {
   return {
@@ -56,6 +57,11 @@ function promptSubmit(extra: Record<string, unknown> = {}) {
   return { text: 'hi', wait: false, origin: { user: {} }, ...extra };
 }
 
+/** A `next` that resolves with the real PromptSubmitResult shape core would produce. */
+async function forwardingNext(event: any) {
+  return { text: event.text, context: event.context, origin: event.origin };
+}
+
 /** The real waste.json schema, per meta_harness/waste.py's waste_report(): `calls_burned` lives
  * under `corrections`, not at the top level. */
 function wasteReport(sessions: number, callsBurned: number) {
@@ -75,9 +81,7 @@ async function main() {
     const { on, handlers } = makeOn();
     registerBootstrap(on as any);
 
-    const event = promptSubmit();
-    const next = async (e: any) => ({ text: e.text, context: e.context, origin: e.origin });
-    const result = await handlers['prompt.submit'](dollar, event, next);
+    const result = await handlers['prompt.submit'](dollar, promptSubmit(), forwardingNext);
 
     assert.equal(result.text, 'hi', 'the prompt text itself must pass through unchanged');
     assert.ok(Array.isArray(result.context) && result.context.length === 1, 'expected one attached context entry');
@@ -94,8 +98,7 @@ async function main() {
     const { on, handlers } = makeOn();
     registerBootstrap(on as any);
 
-    const next = async (e: any) => ({ text: e.text, context: e.context, origin: e.origin });
-    await handlers['prompt.submit'](dollar, promptSubmit(), next);
+    await handlers['prompt.submit'](dollar, promptSubmit(), forwardingNext);
     assert.ok(files.has(bootstrapPath), 'expected bootstrap.json to be written');
   }
 
@@ -113,7 +116,7 @@ async function main() {
     let forwarded: any = null;
     const next = async (e: any) => {
       forwarded = e;
-      return { text: e.text, context: e.context, origin: e.origin };
+      return forwardingNext(e);
     };
     const result = await handlers['prompt.submit'](dollar, event, next);
     assert.deepEqual(forwarded, event, 'a later session must pass the event through with nothing added');
@@ -133,7 +136,7 @@ async function main() {
     let forwarded: any = null;
     const next = async (e: any) => {
       forwarded = e;
-      return { text: e.text, context: e.context, origin: e.origin };
+      return forwardingNext(e);
     };
     await handlers['prompt.submit'](dollar, event, next);
     assert.deepEqual(forwarded, event, 'no report yet must pass the event through with nothing added');
@@ -143,8 +146,8 @@ async function main() {
     );
   }
 
-  // --- 5. a throwing fs.read leaves the turn proceeding, attaches nothing, and does NOT mark
-  //        the bootstrap done — a transient failure must not suppress the line permanently ---
+  // --- 5. a throwing fs.read leaves the turn proceeding (next still called exactly once),
+  //        attaches nothing, and does NOT mark the bootstrap done ---
   {
     const files = new Map<string, string>();
     files.set(wastePath, 'irrelevant');
@@ -157,15 +160,15 @@ async function main() {
     registerBootstrap(on as any);
 
     const event = promptSubmit();
-    let nextCalled = false;
+    let nextCalls = 0;
     let forwarded: any = null;
     const next = async (e: any) => {
-      nextCalled = true;
+      nextCalls += 1;
       forwarded = e;
-      return { text: e.text, context: e.context, origin: e.origin };
+      return forwardingNext(e);
     };
     const result = await handlers['prompt.submit'](dollar, event, next);
-    assert.equal(nextCalled, true, 'the failure must be recovered via next(), not swallowed silently');
+    assert.equal(nextCalls, 1, 'a failed read must still call next() exactly once, not zero and not twice');
     assert.deepEqual(forwarded, event, 'a failed read must not attach a half-formed line');
     assert.equal(result.context, undefined, 'a failed read must attach no context');
     assert.equal(
@@ -174,8 +177,36 @@ async function main() {
     );
   }
 
-  // --- 6. the marker is written AFTER next() resolves, not before: if attaching the line itself
-  //         fails (next throws), bootstrap.json must not be written either ---
+  // --- 6. finding 1: a marker write that THROWS must not be recovered by calling next() a
+  //        second time — core must be called exactly once, and the line it already received
+  //        must still be the result returned, even though the write afterward failed ---
+  {
+    const files = new Map<string, string>();
+    files.set(wastePath, wasteReport(12, 340));
+    const dollar = makeFakeDollar(files, {
+      write: async () => {
+        throw new Error('EACCES: read-only harness home');
+      },
+    });
+    const { on, handlers } = makeOn();
+    registerBootstrap(on as any);
+
+    let coreCalls = 0;
+    const next = async (e: any) => {
+      coreCalls += 1;
+      return forwardingNext(e);
+    };
+    const result = await handlers['prompt.submit'](dollar, promptSubmit(), next);
+    assert.equal(coreCalls, 1, 'core must be called exactly once even when the marker write afterward throws');
+    assert.ok(
+      Array.isArray(result.context) && result.context.length === 1,
+      'the line must still reach the caller even though the marker write failed',
+    );
+    assert.equal(files.has(bootstrapPath), false, 'a failed write leaves the marker absent, so it is retried next turn');
+  }
+
+  // --- 7. finding 1: if `next` ITSELF rejects, core must still have been called exactly once —
+  //        never retried a second time with a plain, unmodified event ---
   {
     const files = new Map<string, string>();
     files.set(wastePath, wasteReport(12, 340));
@@ -183,19 +214,55 @@ async function main() {
     const { on, handlers } = makeOn();
     registerBootstrap(on as any);
 
-    // Throws only on the call that carries the attached line (registerBootstrap's own call);
-    // succeeds on the plain, unmodified event `safely`'s recovery calls next with, so this
-    // isolates "did the write happen despite the attach failing" from `safely`'s own recovery
-    // path throwing a second time.
-    const next = async (e: any) => {
-      if (e.context) throw new Error('downstream hook exploded');
-      return { text: e.text, context: e.context, origin: e.origin };
+    let coreCalls = 0;
+    const next = async () => {
+      coreCalls += 1;
+      throw new Error('downstream hook exploded');
     };
-    await handlers['prompt.submit'](dollar, promptSubmit(), next);
+    await assert.rejects(() => handlers['prompt.submit'](dollar, promptSubmit(), next));
+    assert.equal(coreCalls, 1, 'core must be called exactly once even when next() itself rejects');
     assert.equal(
       files.has(bootstrapPath), false,
       'the marker must only be written once next() has actually resolved with the line attached',
     );
+  }
+
+  // --- 8. finding 3: a FULLY populated PromptSubmitInput reaches core with every field intact —
+  //        attachments, origin, turnId, wait all preserved, and a PRE-EXISTING context entry
+  //        survives ahead of the newly attached line, not replaced by it ---
+  {
+    const files = new Map<string, string>();
+    files.set(wastePath, wasteReport(12, 340));
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerBootstrap(on as any);
+
+    const fullEvent = {
+      text: 'refactor the login form',
+      attachments: [{ type: 'image', mediaType: 'image/png', filename: 'shot.png' }],
+      context: ['an earlier context entry'],
+      turnId: 'turn-42',
+      wait: true,
+      origin: { user: {} },
+    };
+    let forwarded: any = null;
+    const next = async (e: any) => {
+      forwarded = e;
+      return forwardingNext(e);
+    };
+    const result = await handlers['prompt.submit'](dollar, fullEvent, next);
+
+    assert.equal(forwarded.text, fullEvent.text);
+    assert.deepEqual(forwarded.attachments, fullEvent.attachments, 'attachments must reach core unchanged');
+    assert.equal(forwarded.turnId, fullEvent.turnId, 'turnId must reach core unchanged');
+    assert.equal(forwarded.wait, fullEvent.wait, 'wait must reach core unchanged');
+    assert.deepEqual(forwarded.origin, fullEvent.origin, 'origin must reach core unchanged');
+    assert.deepEqual(
+      forwarded.context,
+      ['an earlier context entry', result.context[1]],
+      'the pre-existing context entry must survive AHEAD of the newly attached line, never replaced',
+    );
+    assert.ok(String(result.context[1]).includes('340'), 'the attached line must still be the bootstrap message');
   }
 
   console.log('hooks/harness.bootstrap.test.mts: all assertions passed');

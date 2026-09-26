@@ -7,13 +7,28 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_bootstrap_is_registered_on_prompt_submit_and_wrapped():
+def _bootstrap_body(source: str) -> str:
+    body = source.split("export function registerBootstrap")[1]
+    return body.split("export const register")[0]
+
+
+def test_bootstrap_is_registered_on_prompt_submit():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     assert "export function registerBootstrap" in source
     # prompt.section has no event.text at all and returning {text} from it replaces a
     # system-prompt section; the line is attached as prompt.submit context instead.
-    assert "safely('prompt.submit:bootstrap'" in source
+    assert "on('prompt.submit'" in _bootstrap_body(source)
     assert "registerBootstrap(on)" in source
+
+
+def test_bootstrap_calls_next_exactly_once_on_every_path():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    bootstrap_source = _bootstrap_body(source)
+    # NOT wrapped in `safely`: `safely`'s catch recovers a throw by calling next() a SECOND
+    # time, which is exactly the double-submission bug fix round 2 found (a failed marker write,
+    # or next() itself rejecting, both used to reach `safely`'s catch and call next() again).
+    assert "safely(" not in bootstrap_source
+    assert "await next(outboundEvent)" in bootstrap_source
 
 
 def test_bootstrap_reads_the_real_waste_report_schema():
