@@ -16,6 +16,11 @@ export type Rule = {
 
 export type SessionRule = {
   tool: string;
+  /** The command PREFIX the instruction names, e.g. "git push" from "stop using git push
+   * --force", or "pytest" from "don't run pytest". Matched against the START of the tokenised
+   * command string (whole tokens), never a substring of the whole JSON input — otherwise a
+   * rule for "git push" would also fire on an unrelated call that merely mentions "git push"
+   * inside a description or a file path. */
   pattern: string;
   /** The one flag/token that, if PRESENT in the call, means the rule allows it. Captures a
    * "without <flag>" qualifier ("stop running pytest without -q" denies pytest unless the call
@@ -23,6 +28,12 @@ export type SessionRule = {
    * being dropped into a blanket denial. Absent when the human's qualifier (if any) could not
    * be represented this way, in which case the rule denies its pattern unconditionally. */
   requires?: string;
+  /** The one flag/token that, if PRESENT in the call, means the rule DENIES it — the opposite
+   * polarity of `requires`. Captures a flag named directly in the instruction's object ("stop
+   * using git push --force" denies calls that start with "git push" AND carry "--force" as a
+   * whole token, but allows a plain "git push origin main"). Mutually exclusive with
+   * `requires` in practice, since an instruction supplies at most one qualifier. */
+  flag?: string;
 };
 
 export type SessionState = {
@@ -235,10 +246,21 @@ const UNREPRESENTABLE_QUALIFIER = /\s+(?:unless|except|only if|if)\b/i;
  * `pytest -q` outright, the exact command the human asked to KEEP, was the wrong call. */
 const WITHOUT_QUALIFIER = /\s+without\s+(\S+)/i;
 
-/** The rule's object: its leading token (a plausible command/flag/path only — see
- * `isPlausibleObject`), plus the flag a "without X" qualifier requires to be present, when the
- * human's phrasing carried one. Returns null when no plausible object can be found at all. */
-function parseObject(rest: string): { pattern: string; requires?: string } | null {
+/** The rule's object: the command PREFIX up to its first flag (a plausible command/path only —
+ * see `isPlausibleObject`), plus whichever one qualifier the human's phrasing carried:
+ *
+ * - a "without X" qualifier becomes `requires` (X must be PRESENT to ALLOW the call) — unchanged
+ *   from fix round 2.
+ * - a flag named directly in the object ("git push --force") becomes `flag` (X must be PRESENT
+ *   to DENY the call) — new in fix round 3, so "don't use git push --force" denies only calls
+ *   that both start with "git push" AND carry "--force", not every "git" command.
+ *
+ * When the object has no flag at all ("never run git push"), the whole object (up to any
+ * qualifier) is the prefix and the rule denies that subcommand unconditionally.
+ *
+ * Returns null when no plausible object can be found at all, or when the object is nothing but
+ * a bare flag with no leading subcommand token. */
+function parseObject(rest: string): { pattern: string; requires?: string; flag?: string } | null {
   const cleaned = rest.trim().replace(LEADING_DETERMINER, '');
 
   const withoutMatch = WITHOUT_QUALIFIER.exec(cleaned);
@@ -247,9 +269,29 @@ function parseObject(rest: string): { pattern: string; requires?: string } | nul
     ? cleaned.slice(0, withoutMatch.index)
     : (cleaned.split(UNREPRESENTABLE_QUALIFIER)[0] ?? cleaned);
 
-  const token = (beforeQualifier.trim().split(/\s+/)[0] ?? '').replace(/["'.,?!]+$/g, '');
-  if (!isPlausibleObject(token)) return null;
-  return requires ? { pattern: token, requires } : { pattern: token };
+  const rawTokens = beforeQualifier.trim().split(/\s+/).filter(Boolean);
+  if (rawTokens.length === 0) return null;
+  const tokens = rawTokens.map((token, i) =>
+    i === rawTokens.length - 1 ? token.replace(/["'.,?!]+$/g, '') : token);
+
+  if (!isPlausibleObject(tokens[0])) return null;
+
+  const prefixTokens: string[] = [];
+  let flag: string | undefined;
+  for (const token of tokens) {
+    if (token.length > 1 && token.startsWith('-')) {
+      flag = token;
+      break;
+    }
+    prefixTokens.push(token);
+  }
+  if (prefixTokens.length === 0) return null;
+
+  const pattern = prefixTokens.join(' ');
+  const result: { pattern: string; requires?: string; flag?: string } = { pattern };
+  if (requires) result.requires = requires;
+  else if (flag) result.flag = flag;
+  return result;
 }
 
 /** Parses a "stop doing X" / "don't run X again" instruction out of free text, or returns null

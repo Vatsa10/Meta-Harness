@@ -90,9 +90,12 @@ async function main() {
 
   // --- 2b. fix round 2 finding 4: the PLAIN IMPERATIVE (not just the -ing form) must also parse ---
   {
+    // Fix round 3: the pattern is the command PREFIX up to its first flag, not just the leading
+    // token — "git push --force" -> prefix "git push", not "git" (which would deny every git
+    // command, including `git status` and `git diff`, for the rest of the session).
     const mustMatch: Array<[string, string]> = [
-      ["don't use git push --force", 'git'],
-      ['never call the deploy script', 'deploy'],
+      ["don't use git push --force", 'git push'],
+      ['never call the deploy script', 'deploy script'],
       ["don't run pytest", 'pytest'],
     ];
     for (const [text, expectedPattern] of mustMatch) {
@@ -103,6 +106,26 @@ async function main() {
         `expected pattern "${expectedPattern}" from ${JSON.stringify(text)}, got: ${rule!.pattern}`,
       );
     }
+  }
+
+  // --- 2c. fix round 3: the flag named in the object is what is DENIED, and the pattern is the
+  //         prefix up to that flag, not just the leading token ---
+  {
+    const rule = parseStopInstruction("don't use git push --force");
+    assert.ok(rule);
+    assert.equal(rule!.pattern, 'git push');
+    assert.equal(rule!.flag, '--force');
+    assert.equal(rule!.requires, undefined);
+  }
+
+  // --- 2d. fix round 3: an instruction with a subcommand but no flag denies the whole
+  //         subcommand, allowing sibling subcommands and bare invocations ---
+  {
+    const rule = parseStopInstruction('never run git push');
+    assert.ok(rule);
+    assert.equal(rule!.pattern, 'git push');
+    assert.equal(rule!.flag, undefined);
+    assert.equal(rule!.requires, undefined);
   }
 
   // --- 3. a session rule added from real text denies the matching call on the next tool.check,
@@ -169,6 +192,97 @@ async function main() {
     );
     assert.equal(denied.decision, 'deny', 'an unrepresentable qualifier must still deny the pattern in every form');
     assert.ok(/in any form/i.test(denied.reason ?? ''), `reason must say so honestly, got: ${denied.reason}`);
+  }
+
+  // --- 3e. fix round 3: "don't use git push --force" denies `git push --force origin main` but
+  //         ALLOWS `git push origin main`, `git status`, and `git diff` — the defect this round
+  //         fixes was a pattern of just "git", which denied every git command for the rest of
+  //         the session ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit("don't use git push --force"), async (e: any) => e);
+
+    const cases: Array<[string, 'allow' | 'deny']> = [
+      ['git push --force origin main', 'deny'],
+      ['git push origin main', 'allow'],
+      ['git status', 'allow'],
+      ['git diff', 'allow'],
+    ];
+    for (const [command, expected] of cases) {
+      const result = await handlers['tool.check'][0](
+        dollar, { tool: 'Bash', input: { command } }, async () => ({ decision: 'allow' }),
+      );
+      assert.equal(
+        result.decision, expected,
+        `"${command}" expected ${expected}, got ${result.decision}: ${result.reason ?? ''}`,
+      );
+    }
+  }
+
+  // --- 3f. fix round 3: "never run git push" (subcommand, no flag) denies the whole
+  //         subcommand but allows sibling subcommands like `git status` ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit('never run git push'), async (e: any) => e);
+
+    const denied = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'git push origin main' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(denied.decision, 'deny', '"git push origin main" must be denied: no flag was named at all');
+
+    const allowed = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'git status' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(allowed.decision, 'allow', '"git status" must stay allowed');
+  }
+
+  // --- 3g. fix round 3: `requires` ("without -q") matches WHOLE TOKENS of the command string,
+  //         not substrings of the JSON input — `pytest --quick tests/` must still be denied
+  //         (it does not contain "-q" as a whole token), and a `-q` mentioned only inside some
+  //         other field must not satisfy the requirement either ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit('stop running pytest without -q'), async (e: any) => e);
+
+    const denied = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest --quick tests/' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(
+      denied.decision, 'deny',
+      '"pytest --quick tests/" must be denied: "-q" is not a whole token of this command',
+    );
+
+    const allowed = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest -q tests/' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(allowed.decision, 'allow', '"pytest -q tests/" must be allowed: "-q" is a whole token');
+  }
+
+  // --- 3h. fix round 3: existing "keep passing" cases through the real end-to-end path ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit("don't run pytest"), async (e: any) => e);
+
+    const denied = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest tests/' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(denied.decision, 'deny', '"don\'t run pytest" must deny pytest');
   }
 
   // --- 3d. finding 3: a FULLY populated PromptSubmitInput reaches core with every field intact ---

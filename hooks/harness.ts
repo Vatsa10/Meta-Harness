@@ -318,19 +318,59 @@ export function registerRules(on: On): void {
     }
     for (const rule of state.sessionRules ?? []) {
       if (rule.tool !== tool) continue;
-      const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
-      if (!haystack.includes(rule.pattern.toLowerCase())) continue;
+      // Bash rules match the command string, tokenised on whitespace — never a substring of the
+      // whole JSON input, or a rule for "git push" would also fire on `git status` (which merely
+      // contains the token "git") or on an unrelated call whose description happens to mention
+      // the pattern. Non-Bash rules (Edit-like verbs) have no `command` field to tokenise, so
+      // they fall back to the same JSON-substring check as before.
+      const command = tool === 'Bash' ? String((event?.input as any)?.command ?? '') : '';
+      const commandTokens = command.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
+      const patternTokens = rule.pattern.toLowerCase().split(/\s+/).filter(Boolean);
+
+      let matches: boolean;
+      if (tool === 'Bash') {
+        matches = patternTokens.length > 0
+          && patternTokens.every((t, i) => commandTokens[i] === t);
+      } else {
+        const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
+        matches = haystack.includes(rule.pattern.toLowerCase());
+      }
+      if (!matches) continue;
+
       // A "without <flag>" qualifier IS representable: the rule allows the call when that flag
       // is present, so "stop running pytest without -q" denies `pytest tests/` but ALLOWS
       // `pytest -q` — the exact command the human asked to keep, not the command they asked to
-      // stop.
-      if (rule.requires && haystack.includes(String(rule.requires).toLowerCase())) continue;
+      // stop. Matched as a whole token of the command string, not a substring of the JSON input
+      // (a substring match would let "--quick" satisfy a "-q" requirement it does not).
+      if (rule.requires) {
+        const required = String(rule.requires).toLowerCase();
+        const present = tool === 'Bash'
+          ? commandTokens.includes(required)
+          : JSON.stringify(event?.input ?? {}).toLowerCase().includes(required);
+        if (present) continue;
+      }
+
+      // The opposite polarity: a flag named directly in the object ("git push --force") means
+      // the rule denies ONLY calls that also carry that flag as a whole token — a plain
+      // "git push origin main" must stay allowed.
+      if (rule.flag) {
+        const flag = String(rule.flag).toLowerCase();
+        const present = tool === 'Bash'
+          ? commandTokens.includes(flag)
+          : JSON.stringify(event?.input ?? {}).toLowerCase().includes(flag);
+        if (!present) continue;
+      }
+
       return {
         decision: 'deny',
         reason: rule.requires
           // Says exactly what is (and is not) blocked: only the qualified form is allowed.
           ? `Session rule from this conversation: this blocks any ${tool} call containing `
             + `"${rule.pattern}" UNLESS it also contains "${rule.requires}" [session-rule]`
+          : rule.flag
+          // Says exactly what is blocked: only the pattern carrying that flag.
+          ? `Session rule from this conversation: this blocks any ${tool} call starting with `
+            + `"${rule.pattern}" when it also contains "${rule.flag}" [session-rule]`
           // No representable qualifier: says so, honestly denying the token in every form
           // rather than pretending to be more precise than it is.
           : `Session rule from this conversation: this blocks any ${tool} call whose input `
