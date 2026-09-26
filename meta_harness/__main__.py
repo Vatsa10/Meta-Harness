@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shlex
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -132,6 +133,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "origin replay gates retention")
     learn.add_argument("--model", default="opus", help="model for the proposer")
     learn.add_argument("--provider", default="claude-cli")
+
+    waste = sub.add_parser("waste", help="what wrong-direction work and repeat failure cost")
+    waste.add_argument("--this-project", action="store_true",
+                       help="only sessions whose project matches this working directory")
+    waste.add_argument("--since", default="", help="ISO date; ignore sessions older than this")
+    waste.add_argument("--limit", type=int, default=None, help="most recent N sessions")
+    waste.add_argument("--json", action="store_true", help="print the report as JSON")
+    waste.add_argument("--home", default="", help="transcript root (defaults to ~/.claude/projects)")
     return parser
 
 
@@ -385,6 +394,45 @@ def _command_learn(args) -> int:
     return 0
 
 
+def _command_waste(args: argparse.Namespace) -> int:
+    from .cc_history import project_slug
+    from .waste import waste_report
+
+    if hasattr(sys.stdout, "reconfigure"):   # a project name or error may not be cp1252-safe
+        sys.stdout.reconfigure(errors="replace")
+
+    project = project_slug(Path.cwd()) if args.this_project else None
+    home = Path(args.home) if args.home else None
+    report = waste_report(home=home, project=project, limit=args.limit, since=args.since)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+
+    corrections = report["corrections"]
+    print(f"sessions {report['sessions']}   tool calls {report['tool_calls']:,}")
+    print()
+    print("wrong-direction work")
+    print(f"  corrections                {corrections['count']}")
+    print(f"  calls burned before you spoke  median {corrections['median']}"
+          f"  p75 {corrections['p75']}  p90 {corrections['p90']}  max {corrections['max']}")
+    print(f"  total calls burned         {corrections['calls_burned']:,}")
+    print()
+    print("repeated identical failures")
+    print(f"  wasted retries             {report['repeats']['wasted_retries']:,}"
+          f"  (in {report['repeats']['sessions_affected']} sessions)")
+    for row in report["repeats"]["top"][:5]:
+        print(f"    {row['wasted']:5d}  {row['tool']}:{row['cause']}")
+    if report["by_project"]:
+        print()
+        print("worst projects by calls burned")
+        for row in report["by_project"][:5]:
+            print(f"    {row['calls_burned']:5d}  {row['project']}  ({row['corrections']} corrections)")
+    print()
+    print(report["caveat"])
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "demo":
@@ -410,6 +458,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_run(args)
     if args.command == "learn":
         return _command_learn(args)
+    if args.command == "waste":
+        return _command_waste(args)
     experience = FilesystemExperience(args.root)
     frontier_file = experience.root / "frontier.json"
     print(json.dumps({
