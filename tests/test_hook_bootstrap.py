@@ -7,11 +7,27 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_bootstrap_is_registered_and_wrapped():
+def test_bootstrap_is_registered_on_prompt_submit_and_wrapped():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     assert "export function registerBootstrap" in source
-    assert "safely('prompt.section:bootstrap'" in source
+    # prompt.section has no event.text at all and returning {text} from it replaces a
+    # system-prompt section; the line is attached as prompt.submit context instead.
+    assert "safely('prompt.submit:bootstrap'" in source
     assert "registerBootstrap(on)" in source
+
+
+def test_bootstrap_reads_the_real_waste_report_schema():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # meta_harness/waste.py's waste_report() nests calls_burned under corrections; sessions and
+    # calls_burned are NOT both top-level.
+    assert "waste?.corrections?.calls_burned" in source
+
+
+def test_bootstrap_only_marks_itself_done_after_attaching():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # The marker write must happen after next(...) resolves, not before, so a missing report or
+    # a transient failure never gets marked "done" without the line ever having been said.
+    assert "const result = await next(" in source
 
 
 def test_bootstrap_gates_on_a_marker_file_not_memory():

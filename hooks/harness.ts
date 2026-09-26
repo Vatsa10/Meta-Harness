@@ -385,42 +385,49 @@ export function registerInjection(on: On): void {
 }
 
 /**
- * Says once, on the first `prompt.section` after install, what wrong-direction work has cost so
+ * Says once, on the first `prompt.submit` after install, what wrong-direction work has cost so
  * far, then never again: `<harnessHome>/bootstrap.json` is the marker. Presence of that file
  * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
  * every session after the first, not just within the process that happened to write it.
  *
  * The numbers come from a report `meta-harness waste --json` writes to
- * `<harnessHome>/waste.json`; this hook never runs that command itself; on a machine with no
- * such report yet (or a corrupt one) it writes the marker and says nothing, so the question is
- * not asked again on a machine with no history to report.
+ * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
+ * `meta_harness/waste.py`'s `waste_report()`); this hook never runs that command itself.
+ *
+ * The marker is written ONLY after the line has actually been attached via `next(...)`: a
+ * missing `waste.json` means "no report yet, try again next turn", not "never again", and a
+ * transient read/parse failure propagates to the outer `safely` wrapper rather than being
+ * swallowed here — either way nothing is marked done, so the question keeps being asked (at
+ * most once per turn, which costs nothing on a turn with no report to show) until it can
+ * actually be answered once.
  */
 export function registerBootstrap(on: On): void {
-  on('prompt.section', safely('prompt.section:bootstrap', async (dollar, event: any, next) => {
-    void event;
+  on('prompt.submit', safely('prompt.submit:bootstrap', async (dollar, event: any, next) => {
     const home = harnessHome(dollar);
     const bootstrapPath = `${home}/bootstrap.json`;
-    if (await dollar.fs.exists(bootstrapPath)) return { text: null };
-
-    // Write the marker before anything that could throw, so a corrupt or missing waste.json
-    // still leaves this machine marked as having seen its first run.
-    await dollar.fs.write(bootstrapPath, JSON.stringify({ shown: new Date().toISOString() }));
+    if (await dollar.fs.exists(bootstrapPath)) return next(event);
 
     const wastePath = `${home}/waste.json`;
-    if (!(await dollar.fs.exists(wastePath))) return { text: null };
+    if (!(await dollar.fs.exists(wastePath))) return next(event);
 
     // Deliberately not locally try/caught: a bad read or a corrupt waste.json must propagate to
-    // the outer `safely` wrapper, whose catch recovers via next(), rather than being swallowed
-    // here and returning {text: null} without ever calling next.
+    // the outer `safely` wrapper, whose catch recovers via next(event) WITHOUT writing the
+    // marker below — a transient failure means "try again next turn", never "suppressed for
+    // good".
     const waste: any = JSON.parse(await dollar.fs.read(wastePath));
     const sessions = waste?.sessions;
-    const callsBurned = waste?.calls_burned;
-    if (sessions == null || callsBurned == null) return { text: null };
+    const callsBurned = waste?.corrections?.calls_burned;
+    if (sessions == null || callsBurned == null) return next(event);
 
-    return {
-      text: `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
-        + '`/harness waste` for the breakdown.',
-    };
+    const line = `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
+      + '`/harness waste` for the breakdown.';
+    const result = await next({ ...event, context: [...(event?.context ?? []), line] });
+
+    // Marked done only now that the line has actually reached `next` and resolved — a throw
+    // above never reaches this line, so it never marks a turn "done" that didn't actually say
+    // anything.
+    await dollar.fs.write(bootstrapPath, JSON.stringify({ shown: new Date().toISOString() }));
+    return result;
   }));
 }
 
