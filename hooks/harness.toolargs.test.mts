@@ -54,7 +54,9 @@ async function main() {
   for (const shape of ['real', 'nested'] as const) {
     // --- 1. a Read seen at tool.call lets the Edit of that file through read-before-edit ---
     {
-      const { fire } = setup();
+      const { files, fire } = setup();
+      files.set('C:/p/notes.txt', 'hello');
+      files.set('C:/p/other.txt', 'hello');
       await fire('tool.call', callEvent(shape, 'Read', { file_path: 'C:/p/notes.txt' }),
         async () => ({ result: 'hello', text: 'hello' }));
       const verdict = await fire('tool.check',
@@ -88,6 +90,16 @@ async function main() {
       const record = JSON.parse(log!.trim().split('\n')[0]);
       assert.deepEqual(record.input, { command: 'cat missing.txt' }, `${shape}: the record must carry the input`);
     }
+  }
+
+  // --- 5. read-before-edit never blocks creating a file that does not exist yet ---
+  {
+    const { files, fire } = setup();
+    const fresh = await fire('tool.check', { tool: 'Write', input: { file_path: 'C:/p/fresh.txt', content: 'hi' } }, allow);
+    assert.equal(fresh.decision, 'allow', 'a Write of a new file must be allowed');
+    files.set('C:/p/existing.txt', 'old');
+    const existing = await fire('tool.check', { tool: 'Write', input: { file_path: 'C:/p/existing.txt', content: 'hi' } }, allow);
+    assert.equal(existing.decision, 'deny', 'overwriting an existing unread file must still be denied');
   }
 
   // --- 4. the key computed at tool.call equals the key computed at tool.check for one call ---

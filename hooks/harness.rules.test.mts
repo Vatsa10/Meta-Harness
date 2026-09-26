@@ -48,6 +48,7 @@ async function main() {
   // --- built-in read-before-edit: deny before Read, allow after Read ---
   {
     const files = new Map<string, string>();
+    files.set('a.txt', 'existing'); // an existing file: a new one has nothing to read first
     const dollar = makeFakeDollar(files);
     const { on, handlers } = makeOn();
     registerRules(on as any);
@@ -150,6 +151,7 @@ async function main() {
   // --- ordering independence: tool.check registered first still sees reads tracked after it ---
   {
     const files = new Map<string, string>();
+    files.set('b.txt', 'existing');
     const dollar = makeFakeDollar(files);
     const handlers: Record<string, any> = {};
     // Register tool.check's underlying handlers via registerRules, but call the tool.call

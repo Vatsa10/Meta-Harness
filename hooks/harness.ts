@@ -518,7 +518,14 @@ export function registerRules(add: On): void {
     if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
-      if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
+      if (!verdict.deny) continue;
+      // Creating a file that does not exist yet has nothing to read first: without this, the
+      // read-before-edit rule denied every Write of a new file in a live session.
+      if (rule.kind === 'read-before-edit') {
+        const path = String((event?.input as any)?.file_path ?? '');
+        if (path && !(await io.fs.exists(path))) continue;
+      }
+      return { decision: 'deny', reason: verdict.reason };
     }
     // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this
     // exact call has already been allowed. Counting at tool.check rather than after the result
