@@ -122,6 +122,7 @@ class Stretch:
     paths: list[str] = field(default_factory=list)
     ended_by: str = "end"          # correction | user | end
     correction_text: str = ""
+    end_turn: int = -1              # the turn of the stretch's last tool call; -1 = no calls yet
 
 
 def _user_text(message: dict) -> str:
@@ -202,6 +203,7 @@ def iter_stretches(path: Path, min_calls: int = 3) -> Iterator[Stretch]:
                             current.start_turn = turn
                         current.calls.append(str(block.get("name", "?")))
                         current.paths.extend(_paths_in(block.get("input")))
+                        current.end_turn = turn
 
     if len(current.calls) >= min_calls:
         yield current
@@ -384,6 +386,7 @@ def _scan(path: Path, min_calls: int = 3) -> tuple[list[Stretch], int, dict[tupl
                             current.start_turn = turn
                         current.calls.append(str(block.get("name", "?")))
                         current.paths.extend(_paths_in(block.get("input")))
+                        current.end_turn = turn
                     elif btype == "tool_result" and block.get("is_error"):
                         body = block.get("content")
                         if isinstance(body, list):

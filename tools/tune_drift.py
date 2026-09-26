@@ -7,16 +7,19 @@ hand-labelled gold set instead (correction-gold.json: {session_id, project, star
 label, why}, label "a" = genuine correction, "c" = not a correction) and scores against that.
 
 The join is by CONTAINMENT, not exact match: a gold record's (session_id, start_turn) is joined
-to the stretch, in that same session, with the largest start_turn that is still <= the gold
-record's start_turn (stretches are contiguous and non-overlapping within a session, so that is
-the stretch whose span the gold turn falls inside). A stretch splitter fix can move a gold
-turn into an earlier, merged stretch - it does not delete it - so an exact-match join would
-silently miscount some genuine corrections as unmatched, or worse, as a false positive on the
-wrong stretch. A stretch is a ground-truth POSITIVE if ANY gold record it contains is labelled
-"a"; it is a NEGATIVE otherwise (a gold "c" only, or no gold record at all - which is the case
-for the vast majority of stretches, since gold covers only what was hand-labelled). A gold
-record whose session has no stretch starting at or before its turn fails to join at all, and is
-reported, not silently dropped.
+to the stretch, in that same session, whose span actually contains it - `stretch.start_turn <=
+gold_turn <= stretch.end_turn`. A stretch splitter fix can move a gold turn into an earlier,
+merged stretch - it does not delete it - so an exact-match join would silently miscount some
+genuine corrections as unmatched, or worse, as a false positive on the wrong stretch. Checking
+only "the largest start_turn <= gold_turn" (with no upper bound) is not enough either: a gold
+turn that falls in a GAP between stretches, or inside a stretch `iter_stretches` filtered out
+for being under its own `min_calls`, would then be misjoined to whichever earlier, unrelated
+stretch happens to start before it. `Stretch.end_turn` (meta_harness/waste.py) exists so this
+tool can tell the difference. A stretch is a ground-truth POSITIVE if ANY gold record it
+contains is labelled "a"; it is a NEGATIVE otherwise (a gold "c" only, or no gold record at all -
+which is the case for the vast majority of stretches, since gold covers only what was
+hand-labelled). A gold turn contained in no stretch at all fails to join, and is reported with a
+reason, never silently dropped or misattributed.
 """
 from __future__ import annotations
 
@@ -98,11 +101,16 @@ def _all_stretches(paths: list[Path]) -> list:
 
 
 def _join_gold_by_containment(gold: list[dict[str, Any]], stretches: list) -> dict[str, Any]:
-    """Join each gold record to the stretch, in the same session, that contains its start_turn:
-    the stretch with the largest start_turn <= the gold record's start_turn. Returns the set of
-    stretch identities that are ground-truth positive, plus join accounting: how many gold
-    records joined, how many joined to a DIFFERENT start_turn than their own (moved by a
-    splitter change), and the records that failed to join at all.
+    """Join each gold record to the stretch, in the same session, whose span actually CONTAINS
+    its start_turn: `stretch.start_turn <= gold_turn <= stretch.end_turn`. A gold turn that sits
+    in a gap between stretches - or inside a stretch short enough that `iter_stretches` filtered
+    it out entirely - joins to nothing: it is reported as FAILED, with a reason, never silently
+    attributed to the nearest unrelated stretch that merely starts before it.
+
+    Returns the set of stretch identities that are ground-truth positive, plus join accounting:
+    how many gold records joined, how many joined to a DIFFERENT start_turn than their own
+    (moved by a splitter change that merged stretches), and the records (with reasons) that
+    failed to join at all.
     """
     by_session: dict[str, list] = collections.defaultdict(list)
     for s in stretches:
@@ -115,17 +123,19 @@ def _join_gold_by_containment(gold: list[dict[str, Any]], stretches: list) -> di
     failed: list[dict[str, Any]] = []
 
     for record in gold:
+        turn = record["start_turn"]
         candidates = by_session.get(record["session_id"], [])
-        containing = None
-        for s in candidates:
-            if s.start_turn <= record["start_turn"]:
-                containing = s
-            else:
-                break
+        containing = next(
+            (s for s in candidates if s.start_turn <= turn <= s.end_turn), None)
         if containing is None:
-            failed.append(record)
+            failed.append({
+                **record,
+                "reason": ("no stretch on disk contains turn " + str(turn) + " for this "
+                           "session - it falls in a gap between stretches, or inside a stretch "
+                           "iter_stretches filtered out for being under min_calls"),
+            })
             continue
-        if containing.start_turn != record["start_turn"]:
+        if containing.start_turn != turn:
             moved += 1
         contained_labels[id(containing)].append(record["label"])
 
@@ -213,6 +223,7 @@ def evaluate(judge_name: str, home: Path | None = None, limit: int | None = None
         "gold_matched": join["matched"],
         "gold_moved": join["moved"],
         "gold_failed": len(join["failed"]),
+        "gold_failed_records": join["failed"],
     }
 
 
@@ -246,6 +257,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\ngold records: {row['gold_total']}, joined: {row['gold_matched']} "
               f"(moved to a different stretch than their own start_turn: {row['gold_moved']}), "
               f"failed to join: {row['gold_failed']}")
+        for record in row["gold_failed_records"]:
+            print(f"  failed: session={record['session_id']} start_turn={record['start_turn']} "
+                  f"label={record['label']} - {record['reason']}")
 
     return 0
 
