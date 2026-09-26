@@ -18,6 +18,9 @@ export type SessionState = {
   readPaths: Set<string>;
   /** How many times each exact tool+input call has already been allowed this session. */
   callCounts: Map<string, number>;
+  /** Calls the human has explicitly rejected this session, keyed by callKey, valued by a
+   * searchable snippet of the input so a later mention of the same command can clear it. */
+  rejected?: Map<string, string>;
 };
 
 /** The identity of one tool call, for counting exact repeats. Input order is whatever the
@@ -138,3 +141,33 @@ export function evaluateRule(
 
   return { deny: false };
 }
+
+/** A short, human-searchable string standing in for a tool call's input: the command or path
+ * a person would actually type or say when talking about this call, falling back to its JSON. */
+function commandSnippet(input: unknown): string {
+  if (input && typeof input === 'object') {
+    const record = input as Record<string, unknown>;
+    if (typeof record.command === 'string') return record.command;
+    if (typeof record.file_path === 'string') return record.file_path;
+  }
+  try {
+    return JSON.stringify(input ?? '');
+  } catch {
+    return String(input ?? '');
+  }
+}
+
+/** Records that this exact call was rejected by the human this session. */
+export function rememberRejection(state: SessionState, tool: string, input: unknown): void {
+  if (!state.rejected) state.rejected = new Map<string, string>();
+  const key = callKey({ tool, input: input as Record<string, unknown> });
+  state.rejected.set(key, commandSnippet(input));
+}
+
+/** True when this exact call was rejected earlier this session and has not since been cleared. */
+export function wasRejected(state: SessionState, tool: string, input: unknown): boolean {
+  if (!state.rejected) return false;
+  const key = callKey({ tool, input: input as Record<string, unknown> });
+  return state.rejected.has(key);
+}
+

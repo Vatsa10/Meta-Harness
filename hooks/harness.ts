@@ -6,7 +6,16 @@
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
-import { callKey, evaluateRule, loadInstalled, loadRules, type Rule, type SessionState } from './rules.js';
+import {
+  callKey,
+  evaluateRule,
+  loadInstalled,
+  loadRules,
+  rememberRejection,
+  type Rule,
+  type SessionState,
+  wasRejected,
+} from './rules.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -193,19 +202,60 @@ export function registerObserver(on: On): void {
  * one always; the tool.check one on every path that does not deny), so the two compose in
  * either registration order: a handler that always forwards never depends on what ran before it.
  */
+/** Unambiguous phrases the engine emits when the human declines a tool call outright, as opposed
+ * to the tool itself failing. Recording on these two phrases only (never a bare "no" in the
+ * conversation) keeps rejection memory from firing on an ordinary declined suggestion in prose. */
+const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
+
 export function registerRules(on: On): void {
-  const state: SessionState = { readPaths: new Set<string>(), callCounts: new Map<string, number>() };
+  const state: SessionState = {
+    readPaths: new Set<string>(),
+    callCounts: new Map<string, number>(),
+    rejected: new Map<string, string>(),
+  };
   let rules: Rule[] | null = null;
 
-  on('tool.call', safely('tool.call:read-tracking', async (dollar, event: any, next) => {
+  // One combined tool.call handler, not two: registerRules previously registered a single
+  // 'tool.call' listener, and a second, independent registration here would need the engine to
+  // compose multiple listeners on the same event, which a bare event-map (as opposed to an
+  // emitter) does not do. Folding rejection-memory into the same handler keeps it working
+  // regardless of how many listeners per event the host actually supports.
+  //
+  // afterCall, not safely: the rejection check reads the outcome text, which only exists AFTER
+  // the tool has already run, so a `safely` recovery re-entering next() would run it twice. The
+  // read-tracking half does not depend on the outcome, so it runs first, before next() below.
+  on('tool.call', afterCall('tool.call:read-tracking', async (dollar, event: any, outcome: any) => {
     if (event?.tool === 'Read') {
       const path = String(event?.input?.file_path ?? '');
       if (path) state.readPaths.add(path);
+    }
+    const text = resultText((outcome as any)?.result);
+    if (REJECTION_PATTERN.test(text)) {
+      rememberRejection(state, String(event?.tool ?? ''), event?.input);
+    }
+  }));
+
+  on('prompt.section', safely('prompt.section:rejection-clearing', async (dollar, event: any, next) => {
+    const text = String(event?.prompt ?? '');
+    if (text) {
+      const lower = text.toLowerCase();
+      for (const [key, snippet] of [...(state.rejected ?? new Map<string, string>()).entries()]) {
+        if (snippet && lower.includes(snippet.toLowerCase())) {
+          state.rejected!.delete(key);
+        }
+      }
     }
     return next(event);
   }));
 
   on('tool.check', safely('tool.check', async (dollar, event: any, next) => {
+    const tool = String(event?.tool ?? '');
+    if (wasRejected(state, tool, event?.input)) {
+      return {
+        decision: 'deny',
+        reason: 'This exact call was already rejected earlier this session [rejection-memory]',
+      };
+    }
     if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);

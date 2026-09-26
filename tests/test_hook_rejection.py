@@ -1,0 +1,44 @@
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_rejection_memory_is_exported():
+    source = (ROOT / "hooks" / "rules.ts").read_text(encoding="utf-8")
+    assert "export function rememberRejection" in source
+    assert "export function wasRejected" in source
+
+
+def test_tool_check_checks_rejection_before_the_rule_loop():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    assert "wasRejected(state" in source
+
+
+def test_rejection_behaviour_via_node():
+    """A grep over the source cannot prove a rejected call is ever remembered or denied: it
+    would pass just as well against a rememberRejection that is a no-op, or a tool.check that
+    ignores wasRejected's verdict. hooks/harness.rejection.test.mts drives the real
+    registerRules() handlers with a fake `$` and asserts on the actual decisions returned.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not on PATH; cannot run the hooks/harness.rejection.test.mts behavioural test")
+
+    result = subprocess.run(
+        [node, "--experimental-strip-types", "--no-warnings",
+         "--import", (ROOT / "hooks" / "loaders" / "preload.mjs").as_uri(),
+         str(ROOT / "hooks" / "harness.rejection.test.mts")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, (
+        f"hooks/harness.rejection.test.mts failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "all assertions passed" in result.stdout
