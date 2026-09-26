@@ -113,3 +113,13 @@ def test_readme_documents_what_shipped():
                    "/harness waste | pending | why", "version_weight", "`judge` field"):
         assert needle in text, needle
     assert "11 of the 21" in text and "recall is unmeasured" in text
+
+
+def test_drift_and_waste_spec_carries_the_final_measured_baseline_and_outcome():
+    spec = (ROOT / "docs" / "superpowers" / "specs" / "2026-09-26-drift-and-waste-design.md")
+    text = spec.read_text(encoding="utf-8")
+    assert "n = 98" not in text
+    for needle in ("249", "31,166", "298 calls burned", "11 of the 21", "refused every judge",
+                   "ToolCallResult.context", "not implemented"):
+        assert needle in text, needle
+    assert "kNN (default)" not in text
