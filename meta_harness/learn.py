@@ -24,8 +24,8 @@ PROMPT_PATH = Path(__file__).resolve().parent / "learn_prompt.md"
 @dataclass
 class FailureClass:
     signature: str
-    kind: str = ""
-    tool: str = ""
+    kind: str
+    tool: str
     count: int = 0
     episodes: list[FailureEpisode] = field(default_factory=list)
 
@@ -147,18 +147,29 @@ def merge_failures(observed: Sequence[FailureClass],
 
 
 def _signature_weights(sessions: Sequence[Session]) -> dict[str, float]:
-    """Age each signature by the newest session that showed it, and by version distance."""
+    """Age each signature by the mean, per-occurrence weight of the sessions that showed it.
+
+    A signature's weight is not the newest occurrence's weight: taking the max would let one
+    fresh occurrence launder fifty stale ones, since `merge_failures` multiplies the whole count
+    by this weight. Instead this accumulates the sum of per-episode weights and the number of
+    episodes, and returns the mean - so a class seen 50 times long ago and once this week gets
+    a weight close to the old occurrences' decayed weight, not 1.0, and its effective weighted
+    count (mean * count) reflects mostly-stale evidence honestly. A class still occurring
+    regularly stays near full weight because most of its occurrences are recent.
+    """
     from .temporal import recency_weight, version_weight
 
     current = max((s.version for s in sessions if s.version), default="")
-    weights: dict[str, float] = {}
+    totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
     for session in sessions:
         stamp = session.ended or session.started
         weight = recency_weight(stamp) * version_weight(session.version, current)
         for episode in failure_episodes(session):
             signature = episode_signature(episode)
-            weights[signature] = max(weights.get(signature, 0.0), weight)
-    return weights
+            totals[signature] = totals.get(signature, 0.0) + weight
+            counts[signature] = counts.get(signature, 0) + 1
+    return {signature: totals[signature] / counts[signature] for signature in totals}
 
 
 def select_target(sessions: Sequence[Session], store: HarnessStore,
