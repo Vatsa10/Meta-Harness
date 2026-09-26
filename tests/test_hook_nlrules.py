@@ -18,6 +18,22 @@ def test_session_rules_are_written_to_the_pending_proposal_file():
     assert "pending-session-rules.json" in source
 
 
+def test_nlrules_reads_prompt_submit_not_prompt_section():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # prompt.section has no event.text/event.prompt at all; only prompt.submit's event carries
+    # the human's actual words.
+    assert "safely('prompt.submit:nlrules'" in source
+
+
+def test_stop_instruction_requires_an_actionable_verb():
+    source = (ROOT / "hooks" / "rules.ts").read_text(encoding="utf-8")
+    # The action verb (running/using/calling/doing/touching/editing/deleting) is mandatory, not
+    # optional: an earlier version made it optional and matched "don't worry about it", "never
+    # mind" and other acknowledgements with no actionable target.
+    assert "STOP_VERB" in source
+    assert "touching|editing|deleting" in source
+
+
 def test_nlrules_behaviour_via_node():
     """A grep over the source cannot prove parseStopInstruction discriminates a real instruction
     from an ordinary question, or that a session rule actually denies a matching call while

@@ -174,25 +174,50 @@ export function wasRejected(state: SessionState, tool: string, input: unknown): 
 }
 
 /**
- * A conservative leading-verb parse: only text that OPENS with "stop"/"don't"/"never" (optionally
- * followed by a gerund like "running") is treated as an instruction. Matching anywhere in the
- * text would catch ordinary questions and descriptions that merely contain the word "stop"
- * somewhere, which is exactly the false-positive this must not produce.
+ * A conservative leading-verb parse: text must OPEN with "stop"/"don't"/"never" AND be
+ * immediately followed by one of a fixed, small set of ACTION verbs (running/using/calling/
+ * doing/touching/editing/deleting) before anything counts as an instruction's object.
+ *
+ * Matching anywhere in the text, or treating the action verb as optional, both let ordinary
+ * prose through as if it were an instruction: "don't worry about it", "don't know why this
+ * fails", "never mind" and "Don't forget to update the README" all open with a trigger word but
+ * name no actionable target, and "stop" alone or "stop, that's wrong" have no object at all.
+ * Requiring one of these specific verbs, immediately after the trigger word, is what tells an
+ * instruction ("stop running X") apart from those — none of the four contains "running", "using",
+ * "calling", "doing", "touching", "editing" or "deleting" in that position, so none matches.
  */
-const STOP_INSTRUCTION = /^\s*(?:stop|don'?t|never)\s+(?:running|using|doing|calling)?\s*(.+)/i;
+const STOP_VERB = /^\s*(?:stop|don'?t|never)\s+(running|using|calling|doing|touching|editing|deleting)\s+(.+)/i;
 
-/** Tools whose surface is a shell-like command line; anything else defaults to Bash, the most
- * common subject of a "stop running X" instruction. */
-const EDIT_LIKE = /\b(writ(?:e|ing)|edit(?:ing)?)\b/i;
+/** Verbs whose object is a file or a piece of code rather than a shell command. */
+const EDIT_LIKE_VERBS = new Set(['editing', 'touching', 'deleting']);
+
+/** Words introducing a qualifier this mechanism cannot represent ("pytest WITHOUT -q"): the
+ * pattern is cut before the qualifier rather than including words that would make the pattern
+ * match nothing real. */
+const QUALIFIER = /\s+(?:without|unless|except|only if|if)\b/i;
+
+/** The rule's pattern: the object's leading token, with any qualifier this mechanism cannot
+ * represent dropped rather than encoded into a pattern that would match no real call. */
+function leadingToken(rest: string): string {
+  const beforeQualifier = rest.split(QUALIFIER)[0] ?? '';
+  const token = beforeQualifier.trim().split(/\s+/)[0] ?? '';
+  return token.replace(/["'.,?!]+$/g, '');
+}
 
 /** Parses a "stop doing X" / "don't run X again" instruction out of free text, or returns null
- * for anything that is not unambiguously such an instruction (a question, a description, etc). */
+ * for anything that is not unambiguously such an instruction (a question, a description, an
+ * acknowledgement with no actionable target, etc). The returned `pattern` is deliberately just
+ * the object's leading token (e.g. "pytest", not "pytest without -q"): a qualifier this
+ * mechanism cannot represent is dropped rather than baked into a pattern that would deny nothing
+ * real; `tool.check`'s denial reason says so explicitly, so the human sees exactly what is
+ * actually blocked. */
 export function parseStopInstruction(text: string): { tool: string; pattern: string } | null {
-  const match = STOP_INSTRUCTION.exec(text ?? '');
+  const match = STOP_VERB.exec(text ?? '');
   if (!match) return null;
-  const pattern = match[1]?.replace(/["'.?!]+$/g, '').trim();
+  const verb = match[1].toLowerCase();
+  const pattern = leadingToken(match[2] ?? '');
   if (!pattern) return null;
-  const tool = EDIT_LIKE.test(pattern) ? 'Edit' : 'Bash';
+  const tool = EDIT_LIKE_VERBS.has(verb) ? 'Edit' : 'Bash';
   return { tool, pattern };
 }
 

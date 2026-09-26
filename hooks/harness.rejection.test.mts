@@ -105,10 +105,10 @@ async function main() {
     const stillDenied = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
     assert.equal(stillDenied.decision, 'deny', 'sanity check: must be denied before the mention');
 
-    await handlers['prompt.section'][0](
+    await handlers['prompt.submit'][0](
       dollar,
-      { prompt: 'actually please go ahead and run rm -rf build again' },
-      async (e: any) => ({ text: e?.fallback ?? null }),
+      { text: 'actually please go ahead and run rm -rf build again', wait: false, origin: { plugin: 'test' } },
+      async (e: any) => ({ text: e?.text ?? '' }),
     );
 
     const allowedAfterMention = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
@@ -151,6 +151,66 @@ async function main() {
     const result = await handlers['tool.check'][0](dollar, { tool: 'Bash', input: { command: 'ls' } }, next);
     assert.equal(nextCalled, true, 'the allow path must still call next');
     assert.equal(result.decision, 'allow');
+  }
+
+  // --- the rejection can be announced via `deny` alone (the real ToolCallResult deny branch) ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    // Shaped exactly as ToolCallResult's deny branch: `{ deny, result: undefined, text: undefined }`.
+    const denyOutcome = { deny: "The user doesn't want to proceed with this tool use." };
+    const event = { tool: 'Bash', input: { command: 'rm -rf build' } };
+    await runToolCall(handlers, dollar, event, async () => denyOutcome);
+
+    const result = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
+    assert.equal(result.decision, 'deny', 'a rejection carried only on `deny` must still be remembered');
+  }
+
+  // --- the rejection can be announced via `text` alone (the model-facing joined text) ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    // Shaped exactly as ToolCallResult's answered branch, with the rejection surfaced only in
+    // `text` (the model-facing joined text), not `result`.
+    const textOutcome = { result: { ok: true }, text: 'Tool use was rejected by the user.' };
+    const event = { tool: 'Bash', input: { command: 'rm -rf build' } };
+    await runToolCall(handlers, dollar, event, async () => textOutcome);
+
+    const result = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
+    assert.equal(result.decision, 'deny', 'a rejection carried only on `text` must still be remembered');
+  }
+
+  // --- a real PromptSubmitInput-shaped event (text/wait/origin/context) drives the same handler ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    const event = { tool: 'Bash', input: { command: 'rm -rf build' } };
+    await runToolCall(handlers, dollar, event, async () => rejectedResult);
+
+    const realShapedPromptSubmit = {
+      text: 'go ahead and run rm -rf build again please',
+      wait: false,
+      origin: { user: {} },
+      context: ['some earlier context'],
+    };
+    let forwarded: any = null;
+    await handlers['prompt.submit'][0](dollar, realShapedPromptSubmit, async (e: any) => {
+      forwarded = e;
+      return { text: e.text, context: e.context, origin: e.origin };
+    });
+    assert.deepEqual(forwarded, realShapedPromptSubmit, 'a handler with nothing to add must pass the real event through unchanged');
+
+    const allowed = await handlers['tool.check'][0](dollar, event, async () => ({ decision: 'allow' }));
+    assert.equal(allowed.decision, 'allow', 'the real-shaped mention must still clear the rejection');
   }
 
   // --- a merely-failed call (not a rejection) must not be remembered ---

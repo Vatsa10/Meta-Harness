@@ -18,6 +18,23 @@ def test_tool_check_checks_rejection_before_the_rule_loop():
     assert "wasRejected(state" in source
 
 
+def test_mention_clearing_reads_prompt_submit_not_prompt_section():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # prompt.section has no event.text/event.prompt at all; only prompt.submit's event carries
+    # the human's actual words, which is what mention-clearing must read.
+    assert "safely('prompt.submit:nlrules'" in source
+    assert "event?.text" in source
+
+
+def test_rejection_text_is_read_from_every_outcome_field():
+    source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
+    # A real ToolCallResult carries the rejection on `deny`, `text` or `result` depending on
+    # where in the chain it was decided; checking `result` alone missed the other two.
+    assert "function outcomeText" in source
+    assert "outcome?.deny" in source
+    assert "outcome?.text" in source
+
+
 def test_rejection_behaviour_via_node():
     """A grep over the source cannot prove a rejected call is ever remembered or denied: it
     would pass just as well against a rememberRejection that is a no-op, or a tool.check that

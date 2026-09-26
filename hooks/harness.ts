@@ -1,8 +1,18 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler is wrapped in `safely`, which swallows errors and falls through to `next`.
- * A learning system that can break a session is worse than no learning system.
+ * Every handler is wrapped in `safely` or `afterCall`, both of which swallow a throw and fall
+ * through to `next` rather than break the turn. A learning system that can break a session is
+ * worse than no learning system.
+ *
+ * Per-turn features (rejection memory, session rules, injections, the first-run message) live on
+ * `prompt.submit`, never `prompt.section`. `prompt.section` fires once per NAMED SECTION of the
+ * system prompt, its sections are cached for the whole session, and returning `{ text }` REPLACES
+ * that section — there is no `event.prompt`/`event.text` carrying the user's words on it, and a
+ * handler with no section-name filter fires for and can overwrite every section that exists,
+ * including ones it has never heard of. `prompt.submit` carries the user's actual turn as
+ * `e.text`, and a hook adds anything the model should see via `next({ ...e, context: [...] })`
+ * without touching the system prompt at all.
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
@@ -142,6 +152,19 @@ function resultText(result: unknown): string {
 }
 
 /**
+ * All the text a real `tool.call` outcome (ToolCallResult) can carry, across every shape it can
+ * take: `deny` (the refusal string, present only on the deny branch), `text` (the model-facing
+ * joined text core sets) and `result` (the tool's own record). A human's rejection can be
+ * announced in any of the three depending on where in the chain it was decided — checking
+ * `result` alone (as an earlier version here did) missed a rejection that surfaced as `deny` or
+ * `text` instead.
+ */
+function outcomeText(outcome: any): string {
+  const parts = [outcome?.deny, outcome?.text, resultText(outcome?.result)];
+  return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
+}
+
+/**
  * Unambiguous tool-error phrases: strings a tool emits when it refuses, which do not plausibly
  * appear as the FIRST thing in a successful result. Anything weaker (a bare `error:` anywhere in
  * the text) matched a successful `Grep` for the word "error:" and recorded it as a failure;
@@ -160,7 +183,7 @@ function isError(result: unknown): boolean {
   const text = resultText(result);
   // Otherwise only an error ANNOUNCED at the start of the result counts, plus a short list of
   // phrases a tool only ever emits when it refused.
-  return /^\s*"?(error|[A-Za-z.]*Error:|Traceback \(most recent call last\))/i.test(text)
+  return /^\s*"?(error|[A-Za-z.]*Error:|Traceback \(most recent call last\))/i.test(text)
     || ERROR_PHRASES.test(text);
 }
 
@@ -195,20 +218,24 @@ export function registerObserver(on: On): void {
   }));
 }
 
-/**
- * Enforces installed `rule` artifacts at tool.check: the layer that costs no standing tokens
- * and cannot be talked around, because it runs before the tool call, not as prose in a prompt.
- *
- * Registers two independent `tool.call`/`tool.check` handlers alongside registerObserver's own
- * `tool.call` handler above. Each handler here calls `next` unconditionally (the read-tracking
- * one always; the tool.check one on every path that does not deny), so the two compose in
- * either registration order: a handler that always forwards never depends on what ran before it.
- */
 /** Unambiguous phrases the engine emits when the human declines a tool call outright, as opposed
  * to the tool itself failing. Recording on these two phrases only (never a bare "no" in the
  * conversation) keeps rejection memory from firing on an ordinary declined suggestion in prose. */
 const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
 
+/**
+ * Enforces installed `rule` artifacts at tool.check: the layer that costs no standing tokens and
+ * cannot be talked around, because it runs before the tool call, not as prose in a prompt.
+ *
+ * Also carries this session's rejection memory (task 13) and session-scoped "stop doing X" rules
+ * (task 14), both stored on the same `SessionState` so `tool.check` can consult them ahead of the
+ * installed-rule loop. Rejection detection lives in the same `tool.call` handler as read-tracking
+ * below; the real hook declarations confirm multiple listeners on one event DO compose in
+ * production (each runs, `next` chains through them), so a second, independent registration would
+ * have worked too — they were folded into one handler here for simplicity, not because
+ * composition needed it. `prompt.submit` (not `prompt.section`) is where the human's own words
+ * are read, since only `prompt.submit`'s event carries `text`.
+ */
 export function registerRules(on: On): void {
   const state: SessionState = {
     readPaths: new Set<string>(),
@@ -218,28 +245,28 @@ export function registerRules(on: On): void {
   };
   let rules: Rule[] | null = null;
 
-  // One combined tool.call handler, not two: registerRules previously registered a single
-  // 'tool.call' listener, and a second, independent registration here would need the engine to
-  // compose multiple listeners on the same event, which a bare event-map (as opposed to an
-  // emitter) does not do. Folding rejection-memory into the same handler keeps it working
-  // regardless of how many listeners per event the host actually supports.
-  //
-  // afterCall, not safely: the rejection check reads the outcome text, which only exists AFTER
-  // the tool has already run, so a `safely` recovery re-entering next() would run it twice. The
-  // read-tracking half does not depend on the outcome, so it runs first, before next() below.
+  // afterCall, not safely: rejection detection reads the outcome, which only exists AFTER the
+  // tool has already run (or been denied), so a `safely` recovery re-entering next() would run
+  // the tool a second time. `next` resolves before this handler's own body runs at all — both
+  // the read-tracking and the rejection check below run AFTER the call, not "first"; read-tracking
+  // simply doesn't care about the outcome, so its ordering relative to `next` has no effect either
+  // way.
   on('tool.call', afterCall('tool.call:read-tracking', async (dollar, event: any, outcome: any) => {
     if (event?.tool === 'Read') {
       const path = String(event?.input?.file_path ?? '');
       if (path) state.readPaths.add(path);
     }
-    const text = resultText((outcome as any)?.result);
+    const text = outcomeText(outcome);
     if (REJECTION_PATTERN.test(text)) {
       rememberRejection(state, String(event?.tool ?? ''), event?.input);
     }
   }));
 
-  on('prompt.section', safely('prompt.section:nlrules', async (dollar, event: any, next) => {
-    const text = String(event?.prompt ?? '');
+  // prompt.submit, not prompt.section: only prompt.submit's event carries the human's actual
+  // words (`e.text`). This handler mutates session state only (never the model-visible prompt),
+  // so it always passes `event` through to `next` unchanged.
+  on('prompt.submit', safely('prompt.submit:nlrules', async (dollar, event: any, next) => {
+    const text = String(event?.text ?? '');
     const instruction = parseStopInstruction(text);
     if (instruction) {
       addSessionRule(state, instruction);
@@ -271,7 +298,12 @@ export function registerRules(on: On): void {
       if (haystack.includes(rule.pattern.toLowerCase())) {
         return {
           decision: 'deny',
-          reason: `Session rule from this conversation: stop ${rule.pattern} [session-rule]`,
+          // Says exactly what was blocked: the rule denies any call whose input contains this
+          // one token, nothing narrower — a qualifier the human's own phrasing carried (like
+          // "without -q") could not be represented, so the rule is honest about denying the
+          // command in every form rather than pretending to be more precise than it is.
+          reason: `Session rule from this conversation: this blocks any ${tool} call whose input `
+            + `contains "${rule.pattern}", in any form [session-rule]`,
         };
       }
     }
