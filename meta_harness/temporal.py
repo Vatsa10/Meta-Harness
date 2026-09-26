@@ -56,4 +56,34 @@ def version_weight(seen: str, current: str) -> float:
     return 0.6 if distance == 1 else 0.3
 
 
-__all__ = ["HALF_LIFE_DAYS", "WEIGHT_FLOOR", "recency_weight", "version_weight"]
+from collections.abc import Sequence, Set as AbstractSet
+
+QUIET_DAYS = 90.0
+
+
+def retirement_candidates(installed: "Sequence[object]", live_signatures: AbstractSet[str],
+                          now: datetime | None = None,
+                          quiet_days: float = QUIET_DAYS) -> list[tuple[object, str]]:
+    """Installed artifacts whose origin failure has not been seen for `quiet_days`.
+
+    Proposed, never performed. An artifact that is doing its job prevents the very evidence
+    that would justify keeping it, so silence is ambiguous and a human has to decide.
+    """
+    moment = now or datetime.now(timezone.utc)
+    proposed: list[tuple[object, str]] = []
+    for artifact in installed:
+        signature = (getattr(artifact, "origin", {}) or {}).get("signature", "")
+        if not signature or signature in live_signatures:
+            continue
+        created = _parse(getattr(artifact, "created", "") or "")
+        if created is None:
+            continue                     # no usable date is not evidence of staleness
+        age_days = (moment - created).total_seconds() / 86400.0
+        if age_days >= quiet_days:
+            proposed.append((artifact, f"{signature} has not been seen in "
+                                       f"{quiet_days:.0f} days (installed {age_days:.0f} days ago)"))
+    return proposed
+
+
+__all__ = ["HALF_LIFE_DAYS", "WEIGHT_FLOOR", "QUIET_DAYS", "recency_weight", "version_weight",
+           "retirement_candidates"]

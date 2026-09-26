@@ -18,11 +18,12 @@ from .cc_history import (compare_reports, draft_tasks, harness_report, load_sess
 from .demo import run as run_demo
 from .harness_store import Artifact, HarnessStore, harness_home
 from .cc_harness import AgentConfig
-from .learn import (config_with, decide_retention, propose_artifact, run_replay, score_task_set,
-                    select_target)
+from .learn import (config_with, decide_retention, merge_failures, observed_failures,
+                    propose_artifact, rank_failures, run_replay, score_task_set, select_target)
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
 from .replay import build_replay
+from .temporal import retirement_candidates
 
 BASELINE_ROOT = Path(__file__).resolve().parent.parent / "baselines"
 DEFAULT_BASELINES = {
@@ -284,6 +285,9 @@ def _command_learn(args) -> int:
     store = HarnessStore(harness_home())
 
     if args.status:
+        sessions = load_sessions(limit=args.limit, include_text=False)
+        live_signatures = {f.signature for f in
+                           merge_failures(observed_failures(), rank_failures(sessions))}
         print(json.dumps({
             "home": str(store.root),
             "staged": [{"id": a.id, "type": a.type, "signature": a.signature,
@@ -291,6 +295,10 @@ def _command_learn(args) -> int:
             "installed": [{"id": a.id, "type": a.type, "signature": a.signature}
                           for a in store.list_installed()],
             "tombstones": sorted(store.tombstones()),
+            "retirement_candidates": [
+                {"id": a.id, "reason": reason}
+                for a, reason in retirement_candidates(store.list_installed(), live_signatures)
+            ],
         }, indent=2))
         return 0
 
