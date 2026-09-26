@@ -17,10 +17,9 @@ python -m meta_harness waste --this-project --json
 ```
 
 Summarize the report for the user: sessions read, corrections found, calls burned before they
-spoke up, and repeated identical failures. Then state the report's own caveat verbatim (its
-`caveat` field) - do not round it up or drop the qualifier. The measured number is that in a
-hand-labelled audit, roughly half of flagged corrections (11 of 21, 52.4%) turned out to be
-genuine; say exactly that, not "most corrections are real" or "this measures waste precisely."
+spoke up, and repeated identical failures. Then relay the report's `caveat` field verbatim -
+quote it as given, do not paraphrase, round, restate its figures from memory, or drop a
+qualifier. The caveat is the only statement of how reliable these numbers are.
 This also refreshes `<harness_home>/waste.json` as a side effect, which other tooling reads.
 
 If the user wants the wider history (not just this project), drop `--this-project` and consider
@@ -43,14 +42,18 @@ to accept or discard each one:
    signature no longer shows up live - this is a proposal only, nothing is retired
    automatically; reviewing and rejecting/accepting is on the user).
 
-2. Pending session rules, staged at `<harness_home>/pending-session-rules.json`. These come from
-   "stop doing X" style corrections and are never installed automatically - read that file and
-   list each proposed rule. Accepting one means moving it into the harness's active session-rule
-   config yourself; until then it has no effect on behavior.
+2. Session rules, recorded at `<harness_home>/pending-session-rules.json`. These come from a
+   human's own "stop doing X" style prompt (never from a plugin, peer, scheduled or notification
+   prompt). A parsed rule takes effect IMMEDIATELY: it denies matching calls for the rest of the
+   current session, with no acceptance step. The file is only a record of the rules created;
+   nothing reads it back, so a rule never outlives its session and there is no way to make one
+   permanent yet. (The end-of-session "keep it?" prompt the design describes is not
+   implemented.) Read that file and list each rule, and say plainly that it is already in effect
+   for this session and ends with it.
 
-Report all three lists together (staged artifacts, retirement candidates, pending session
-rules), even when one is empty, and say explicitly for each what accepting or discarding it
-would take.
+Report all three lists together (staged artifacts, retirement candidates, session rules), even
+when one is empty, and say explicitly for each what accepting or discarding it would take (for a
+session rule: nothing - it ends with the session).
 
 ## `/harness why`
 

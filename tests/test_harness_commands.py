@@ -23,3 +23,18 @@ def test_every_command_it_names_exists_in_the_cli():
     import re
     for invoked in re.findall(r"python -m meta_harness (\w+)", text):
         assert invoked in known, f"{invoked} is documented but not a real subcommand"
+
+
+# --- final fix wave --------------------------------------------------------------------------
+
+def test_the_command_defers_to_the_report_caveat_rather_than_restating_a_figure():
+    text = (ROOT / "commands" / "harness.md").read_text(encoding="utf-8")
+    assert "52.4" not in text and "11 of 21" not in text
+    assert "`caveat` field verbatim" in text
+
+
+def test_the_command_does_not_claim_a_session_rule_waits_for_acceptance():
+    text = (ROOT / "commands" / "harness.md").read_text(encoding="utf-8")
+    assert "until then it has no effect" not in text
+    assert "IMMEDIATELY" in text
+    assert "not\n   implemented" in text or "not implemented" in text
