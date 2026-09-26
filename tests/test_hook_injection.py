@@ -7,17 +7,19 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_prompt_section_is_registered_and_wrapped():
+def test_injection_is_registered_on_prompt_submit_not_prompt_section():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    assert "'prompt.section'" in source
-    assert "safely('prompt.section'" in source
+    # prompt.section has no event.text/event.prompt at all, and returning {text} from it
+    # REPLACES that system-prompt section; registerInjection moved to prompt.submit so it can
+    # match the user's actual turn and ATTACH via context instead (see the module doc comment).
+    assert "safely('prompt.submit:injection'" in source
 
 
-def test_injection_returns_null_when_nothing_matches():
+def test_injection_attaches_context_rather_than_replacing_text():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    # Returning null leaves the section out entirely, which is why this costs nothing
-    # on turns where no artifact is relevant.
-    assert "text: null" in source
+    # A match is attached via next({ ...event, context: [...] }), never returned as a {text}
+    # that would replace a system-prompt section.
+    assert "context: [...(event?.context ?? []), joined]" in source
 
 
 def test_injection_records_what_it_injected():

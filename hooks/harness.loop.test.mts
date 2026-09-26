@@ -70,22 +70,29 @@ async function main() {
     );
   }
 
-  // --- the produced `injection` artifact actually injects on a matching turn ---
+  // --- the produced `injection` artifact actually attaches on a matching turn ---
+  // registerInjection fires on `prompt.submit` (event.text), not `prompt.section` (which has no
+  // event.text/event.prompt at all and would have its returned {text} REPLACE a system-prompt
+  // section rather than add anything).
   {
     const dollar = makeDollar();
     const { on, handlers } = makeOn();
     registerInjection(on as any);
-    const next = async () => ({ text: null });
+    const forwardingNext = async (event: any) => ({ text: event.text, context: event.context, origin: event.origin });
 
-    const matched = await handlers['prompt.section'](dollar, { prompt: 'rerun the bash script' }, next);
-    assert.ok(matched.text, 'the produced injection must fire on a turn naming its trigger');
+    const matched = await handlers['prompt.submit'](
+      dollar, { text: 'rerun the bash script', wait: false, origin: { user: {} } }, forwardingNext,
+    );
+    assert.ok(matched.context && matched.context.length, 'the produced injection must fire on a turn naming its trigger');
     assert.ok(
-      String(matched.text).includes('PASS AN EXPLICIT TIMEOUT'),
-      `the injected text must be the produced payload, got: ${matched.text}`,
+      String(matched.context[0]).includes('PASS AN EXPLICIT TIMEOUT'),
+      `the attached context must carry the produced payload, got: ${matched.context}`,
     );
 
-    const unmatched = await handlers['prompt.section'](dollar, { prompt: 'zzzz qqqq' }, next);
-    assert.equal(unmatched.text, null, 'an unrelated turn must still cost nothing');
+    const unmatched = await handlers['prompt.submit'](
+      dollar, { text: 'zzzz qqqq', wait: false, origin: { user: {} } }, forwardingNext,
+    );
+    assert.equal(unmatched.context, undefined, 'an unrelated turn must still cost nothing');
   }
 
   console.log('hooks/harness.loop.test.mts: all assertions passed');
