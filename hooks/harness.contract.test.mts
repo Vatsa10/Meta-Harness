@@ -25,7 +25,8 @@
  *    the tool itself runs exactly once.
  *
  * 3. Case 1 repeated across every file state the handlers branch on: bootstrap.json present or
- *    absent, waste.json present or absent, and an installed injection whose trigger appears IN
+ *    absent, waste.json present or absent, drift.json absent/enabled/disabled with a long stretch
+ *    of tool calls pending, and an installed injection whose trigger appears IN
  *    the section text, both before and after a prompt.submit turn has run. A handler that
  *    deleted a section only once bootstrap.json exists (the original CRITICAL 1 shape) passes
  *    case 1, which only ever runs with an empty harness home; it fails here.
@@ -163,27 +164,45 @@ async function main() {
       { name: 'memory', text: 'remember the timeout flag' },
       { name: 'tool_use', text: 'ORIGINAL' },
     ];
+    // drift.json: absent, explicitly enabled with a threshold every stretch here passes, and
+    // disabled. No drift state may reach a prompt.section, even with a long stretch pending.
+    const driftStates: Array<[string, string | null]> = [
+      ['absent', null],
+      ['enabled', JSON.stringify({ enabled: true, min_calls: 1, judge: 'overlap' })],
+      ['disabled', JSON.stringify({ enabled: false, min_calls: 1 })],
+    ];
     for (const hasBootstrap of [false, true]) {
       for (const hasWaste of [false, true]) {
         for (const afterTurn of [false, true]) {
-          const files = new Map<string, string>();
-          installInjection(files, ['timeout', 'env', 'original']);
-          if (hasBootstrap) files.set(`${HOME}/bootstrap.json`, '{"shown":"2026-01-01"}');
-          if (hasWaste) files.set(`${HOME}/waste.json`, WASTE);
-          const dollar = makeFakeDollar(files);
-          const { on, fire } = makeChainingOn();
-          register(on as any, {} as any);
-          if (afterTurn) {
-            await fire(dollar, 'prompt.submit', { text: 'why the timeout', wait: false, origin: { kind: 'composer' } },
-              async (e: any) => ({ text: e.text, context: e.context }));
-          }
-          for (const section of sections) {
-            const result = await fire(dollar, 'prompt.section', { ...section }, async (e: any) => ({ text: e.text }));
-            assert.equal(
-              result?.text, section.text,
-              `section ${section.name} changed with bootstrap.json=${hasBootstrap} waste.json=${hasWaste} `
-                + `afterTurn=${afterTurn}: got ${JSON.stringify(result)}`,
-            );
+          for (const [drift, driftJson] of driftStates) {
+            const files = new Map<string, string>();
+            installInjection(files, ['timeout', 'env', 'original']);
+            if (hasBootstrap) files.set(`${HOME}/bootstrap.json`, '{"shown":"2026-01-01"}');
+            if (hasWaste) files.set(`${HOME}/waste.json`, WASTE);
+            if (driftJson !== null) files.set(`${HOME}/drift.json`, driftJson);
+            const dollar = makeFakeDollar(files);
+            const { on, fire } = makeChainingOn();
+            register(on as any, {} as any);
+            const toolCalls = async () => {
+              for (let i = 0; i < 5; i += 1) {
+                await fire(dollar, 'tool.call', { tool: 'Bash', command: `echo ${i}`, tool_use_id: `tu-${i}` },
+                  async () => ({ ref: i, result: { stdout: '' }, text: '' }));
+              }
+            };
+            await toolCalls();
+            if (afterTurn) {
+              await fire(dollar, 'prompt.submit', { text: 'why the timeout', wait: false, origin: { kind: 'composer' } },
+                async (e: any) => ({ text: e.text, context: e.context }));
+              await toolCalls();
+            }
+            for (const section of sections) {
+              const result = await fire(dollar, 'prompt.section', { ...section }, async (e: any) => ({ text: e.text }));
+              assert.equal(
+                result?.text, section.text,
+                `section ${section.name} changed with bootstrap.json=${hasBootstrap} waste.json=${hasWaste} `
+                  + `afterTurn=${afterTurn} drift.json=${drift}: got ${JSON.stringify(result)}`,
+              );
+            }
           }
         }
       }

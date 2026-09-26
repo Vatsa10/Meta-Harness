@@ -30,6 +30,7 @@ import {
   type SessionState,
   wasRejected,
 } from './rules.js';
+import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -94,6 +95,26 @@ export function afterCall<E, R>(
       logSkip(dollar, name, error);
     }
     return outcome;
+  };
+}
+
+/**
+ * Like `afterCall`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
+ * something appended). `next` is called exactly once, up front; if the handler throws, core's
+ * outcome is returned as it came, never a second call to `next`.
+ */
+export function afterCallMap<E, R>(
+  name: string,
+  handler: (dollar: any, event: E, outcome: R) => Promise<R>,
+): Fallible<E, R> {
+  return async (dollar, event, next) => {
+    const outcome = await next(event);
+    try {
+      return await handler(dollar, event, outcome);
+    } catch (error) {
+      logSkip(dollar, name, error);
+      return outcome;
+    }
   };
 }
 
@@ -509,6 +530,51 @@ export function registerInjection(on: On): void {
 }
 
 /**
+ * Says once per stretch, on the result of the tool call that crosses `min_calls`, that a stretch
+ * of tool calls has run long: the note rides in the result's `context` ("what the model reads
+ * after the tool's result and the user never sees"), so the model reads it mid-stretch, BEFORE
+ * the user would notice, not after the user has already spoken.
+ *
+ * Disabled unless `<harnessHome>/drift.json` explicitly enables it (see `hooks/drift.ts`); the
+ * ship gate refused every judge, so by default this counts calls and says nothing.
+ *
+ * `tool.call` uses `afterCallMap`: `next` is called exactly once, up front, and the note is
+ * appended to a COPY of the answered outcome; a throw anywhere after `next` returns core's
+ * outcome untouched, never re-running the tool. A `{ deny }` outcome is never given context (its
+ * type forbids it): past the threshold the note waits for the next answered call. The latch is
+ * set only once the note is actually attached.
+ *
+ * `prompt.submit` only resets the stretch when the user speaks (see `userSpoke`); it attaches
+ * nothing and passes the event through unchanged, under `safely`, which calls `next` once.
+ * Nothing here listens on `prompt.section`, whose return replaces a system-prompt section.
+ */
+export function registerDrift(on: On): void {
+  let count = 0;
+  let warned = false;
+  let config: DriftConfig | null | undefined;
+
+  on('tool.call', afterCallMap('tool.call:drift', async (dollar, _event: any, outcome: any) => {
+    count += 1;
+    if (warned) return outcome;
+    if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
+    if (config === undefined) config = await loadDriftConfig(dollar, harnessHome(dollar));
+    if (!shouldWarn(count, config)) return outcome;
+    const context = Array.isArray(outcome.context) ? outcome.context : [];
+    warned = true;
+    return { ...outcome, context: [...context, driftNote(count)] };
+  }));
+
+  on('prompt.submit', safely('prompt.submit:drift', async (_dollar, event: any, next) => {
+    if (userSpoke(event)) {
+      count = 0;
+      warned = false;
+      config = undefined; // re-read per stretch, so an edited drift.json takes effect
+    }
+    return next(event);
+  }));
+}
+
+/**
  * Says once, on the first `prompt.submit` after install, what wrong-direction work has cost so
  * far, then never again: `<harnessHome>/bootstrap.json` is the marker. Presence of that file
  * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
@@ -585,4 +651,5 @@ export const register: Register = (on: On, options: PluginOptions) => {
   registerRules(on);
   registerInjection(on);
   registerBootstrap(on);
+  registerDrift(on);
 };
