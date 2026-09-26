@@ -580,9 +580,11 @@ export function registerDrift(on: On): void {
  * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
  * every session after the first, not just within the process that happened to write it.
  *
- * The numbers come from a report `meta-harness waste --json` writes to
+ * The numbers come from the report `meta-harness waste` (with or without `--json`) writes to
  * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
- * `meta_harness/waste.py`'s `waste_report()`); this hook never runs that command itself.
+ * `meta_harness/waste.py`'s `waste_report()`). This hook never runs that command and nothing
+ * runs it in the background: until someone has run `meta-harness waste` (or `/harness waste`)
+ * once, there is no report and no line. A report with `sessions: 0` is skipped, unmarked.
  *
  * Handles its own failures rather than relying on `safely`: this handler calls `next` in the
  * MIDDLE, then does one more fallible thing afterward (writing the marker). Under the old
@@ -613,9 +615,14 @@ export function registerBootstrap(on: On): void {
           const waste: any = JSON.parse(await dollar.fs.read(wastePath));
           const sessions = waste?.sessions;
           const callsBurned = waste?.corrections?.calls_burned;
-          if (sessions != null && callsBurned != null) {
-            const line = `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
-              + '`/harness waste` for the breakdown.';
+          // A report over zero sessions (an empty or mis-pointed transcript store) says nothing
+          // worth saying once and for good: skip it and leave the marker unwritten.
+          if (typeof sessions === 'number' && sessions > 0 && callsBurned != null) {
+            // Hedged on purpose: the count comes from a keyword heuristic whose hand-labelled
+            // precision is about half, so the line is an estimate, never a statement of fact.
+            const line = `Across ${sessions} past sessions, an estimated ~${callsBurned} tool calls may have gone `
+              + 'to work you later corrected (a rough heuristic, roughly half of its flags are genuine). '
+              + '`/harness waste` for the breakdown and how reliable it is.';
             outboundEvent = { ...event, context: [...(event?.context ?? []), line] };
             markDone = true;
           }
