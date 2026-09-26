@@ -1,8 +1,8 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler fails open: most are wrapped in `safely` or `afterCall`, both of which swallow a
- * throw and fall through to `next` rather than break the turn — and neither ever calls `next` a
+ * Every handler fails open: most are wrapped in `safely`, `afterCall` or `afterCallMap`, all of which swallow a
+ * throw and fall through to `next` rather than break the turn — and none ever calls `next` a
  * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
  * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
  * human's prompt twice, is worse than no learning system.

@@ -86,9 +86,18 @@ explicitly in the prompt.
 caveman and ponytail hook `SessionStart` and `UserPromptSubmit` because a persona must persist
 against drift. superpowers hooks only to inject its index skill across a 14-skill library.
 
-Meta-Harness is a small process library, so it relies on model invocation by description, the same
-mechanism `superpowers:test-driven-development` uses. Nothing is injected into sessions that are
-not doing harness work.
+Meta-Harness is a small process library, so its skills rely on model invocation by description,
+the same mechanism `superpowers:test-driven-development` uses; no `SessionStart` or
+`UserPromptSubmit` hook loads them.
+
+The separate function hooks (opt-in, early access; see `hooks/README.md`) do act in every session
+once enabled. They listen only on `tool.call`, `tool.check` and `prompt.submit` - never
+`prompt.section` - and add: installed rules and injections, rejection memory, "stop doing X"
+session rules (session-scoped, immediate, created only by a human's prompt), a one-time hedged
+first-run line (needs a prior `meta-harness waste` run), and a drift note that is built and tested
+but ships disabled because its ship gate refused every judge. `/harness waste | pending | why`
+inspects them; `meta-harness waste` carries its own caveat (roughly half of flagged corrections
+were genuine in a hand-labelled audit; recall unmeasured).
 
 ## Why Haiku 4.5 is the default harness model
 

@@ -66,3 +66,50 @@ def test_plugin_version_bumped():
     import json
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert manifest["version"] == "0.7.0"
+
+
+# --- final fix wave: user docs must describe the hooks that actually ship ---------------------
+
+USER_DOCS = [ROOT / "README.md", ROOT / "hooks" / "README.md",
+             ROOT / "skills" / "learning-from-failures" / "SKILL.md", ROOT / "docs" / "plugin.md"]
+_DENIAL = re.compile(r"\b(not|never|nothing|no)\b", re.I)
+
+
+def test_no_user_doc_presents_prompt_section_as_a_live_hook():
+    for doc in USER_DOCS:
+        text = doc.read_text(encoding="utf-8")
+        for sentence in _SENTENCE_SPLIT.split(text):
+            if "prompt.section" in sentence and not _DENIAL.search(sentence):
+                raise AssertionError(f"{doc}: {sentence!r}")
+
+
+def test_hook_source_registers_no_prompt_section_listener():
+    for path in (ROOT / "hooks").glob("*.ts"):
+        assert "on('prompt.section'" not in path.read_text(encoding="utf-8"), path
+
+
+def test_hooks_readme_does_not_claim_every_handler_uses_safely():
+    text = (ROOT / "hooks" / "README.md").read_text(encoding="utf-8")
+    assert not re.search(r"every handler is wrapped in `safely`", text, re.I)
+    for wrapper in ("`safely`", "`afterCall`", "`afterCallMap`"):
+        assert wrapper in text
+
+
+def test_readme_says_drift_ships_disabled_and_never_claims_it_is_enabled():
+    for doc in (ROOT / "README.md", ROOT / "hooks" / "README.md"):
+        text = doc.read_text(encoding="utf-8")
+        assert re.search(r"ship(s|ped) (DISABLED|disabled)", text), doc
+        assert not re.search(r"drift (note|detection) is (on|enabled)", text, re.I), doc
+
+
+def test_readme_states_no_stale_test_count():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert not re.search(r"^\d+ tests\b", text, re.M)
+
+
+def test_readme_documents_what_shipped():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    for needle in ("meta_harness waste", "Rejection memory", "session rules", "first-run line",
+                   "/harness waste | pending | why", "version_weight", "`judge` field"):
+        assert needle in text, needle
+    assert "11 of the 21" in text and "recall is unmeasured" in text

@@ -50,7 +50,7 @@ python -m meta_harness learn --reject <id> --wrong  # archive and never propose 
 ```
 
 Accepting records the artifact in `installed.json`. Only `rule` and `injection` artifacts are
-enforced from there today, by the `tool.check` and `prompt.section` hooks; an accepted `skill` or
+enforced from there today, by the `tool.check` hook (rules) and a `prompt.submit` hook that attaches injections as context; an accepted `skill` or
 `doctrine` artifact is recorded and scored but has no automatic enforcement path yet, so treat it
 as a note to apply by hand.
 
@@ -86,7 +86,7 @@ before the first model call, is a measured negative result here: it does not tra
 developer's own repository, where the environment is already known (50 orientation calls across
 344 sessions on this machine).
 
-Function hooks (`tool.call`, `tool.check`, `prompt.section`) are early access in Claude Code and
+Function hooks (the plugin listens on `tool.call`, `tool.check` and `prompt.submit` only) are early access in Claude Code and
 need `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; see `hooks/README.md`.
 
 **REQUIRED BACKGROUND:** `optimizing-harnesses` - the three laws this cycle enforces.
