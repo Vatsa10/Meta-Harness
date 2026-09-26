@@ -24,8 +24,8 @@ PROMPT_PATH = Path(__file__).resolve().parent / "learn_prompt.md"
 @dataclass
 class FailureClass:
     signature: str
-    kind: str
-    tool: str
+    kind: str = ""
+    tool: str = ""
     count: int = 0
     episodes: list[FailureEpisode] = field(default_factory=list)
 
@@ -100,7 +100,8 @@ def observed_failures(home: Path | None = None) -> list[FailureClass]:
 
 
 def merge_failures(observed: Sequence[FailureClass],
-                   mined: Sequence[FailureClass]) -> list[FailureClass]:
+                   mined: Sequence[FailureClass],
+                   weights: Mapping[str, float] | None = None) -> list[FailureClass]:
     """Combine live and mined evidence into one ranking, keyed by signature.
 
     Both sources write signatures in the same `tool_error:<tool>:<cause>` / `thrash:<tool>`
@@ -116,8 +117,13 @@ def merge_failures(observed: Sequence[FailureClass],
     and `_command_learn` already handles "no replayable episode for this failure class" for that
     case.
 
+    `weights` ages the evidence: `None` (the default) means every signature keeps weight 1.0, so
+    the ranking - and the existing two-argument call site - is unchanged. When given, each
+    signature's summed count is multiplied by `weights.get(signature, 1.0)` before sorting, so a
+    signature seen only in old sessions can rank below an equal-count signature seen recently.
+
     The tie-break (`-count`, then `signature`) is unchanged from the single-source ranking, so
-    equal-count signatures order the same way on every run.
+    equal weighted counts order the same way on every run.
     """
     grouped: dict[str, FailureClass] = {}
     for failure in mined:
@@ -132,7 +138,27 @@ def merge_failures(observed: Sequence[FailureClass],
                 count=failure.count)
         else:
             entry.count += failure.count
-    return sorted(grouped.values(), key=lambda f: (-f.count, f.signature))
+
+    def sort_key(failure: FailureClass) -> tuple[float, str]:
+        weight = weights.get(failure.signature, 1.0) if weights is not None else 1.0
+        return (-failure.count * weight, failure.signature)
+
+    return sorted(grouped.values(), key=sort_key)
+
+
+def _signature_weights(sessions: Sequence[Session]) -> dict[str, float]:
+    """Age each signature by the newest session that showed it, and by version distance."""
+    from .temporal import recency_weight, version_weight
+
+    current = max((s.version for s in sessions if s.version), default="")
+    weights: dict[str, float] = {}
+    for session in sessions:
+        stamp = session.ended or session.started
+        weight = recency_weight(stamp) * version_weight(session.version, current)
+        for episode in failure_episodes(session):
+            signature = episode_signature(episode)
+            weights[signature] = max(weights.get(signature, 0.0), weight)
+    return weights
 
 
 def select_target(sessions: Sequence[Session], store: HarnessStore,
@@ -142,10 +168,13 @@ def select_target(sessions: Sequence[Session], store: HarnessStore,
     Live observations (what the hook actually saw this session) and mined history (past
     transcripts) are merged into one ranking by signature before selection, so a failure seen in
     both outranks either source alone, and a high-count mined signature is not starved by a
-    single noisy live observation.
+    single noisy live observation. The ranking is also weighted by how recently and on how
+    current a Claude Code version each signature's evidence was seen, so a failure class fixed
+    long ago stops outranking one seen this week.
     """
     covered = store.covered()
-    for failure in merge_failures(observed_failures(home), rank_failures(sessions)):
+    weights = _signature_weights(sessions)
+    for failure in merge_failures(observed_failures(home), rank_failures(sessions), weights=weights):
         if failure.signature not in covered:
             return failure
     return None
