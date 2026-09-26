@@ -191,7 +191,7 @@ async function main() {
       dollar, { tool: 'Bash', input: { command: 'pytest -q' } }, async () => ({ decision: 'allow' }),
     );
     assert.equal(denied.decision, 'deny', 'an unrepresentable qualifier must still deny the pattern in every form');
-    assert.ok(/in any form/i.test(denied.reason ?? ''), `reason must say so honestly, got: ${denied.reason}`);
+    assert.ok(/whatever its arguments/i.test(denied.reason ?? ''), `reason must say so honestly, got: ${denied.reason}`);
   }
 
   // --- 3e. fix round 3: "don't use git push --force" denies `git push --force origin main` but
@@ -366,12 +366,50 @@ async function main() {
 
   // --- direct addSessionRule/evaluator sanity, independent of the parser ---
   {
-    const state: any = { readPaths: new Set(), callCounts: new Map(), rejected: new Map(), sessionRules: [] };
+    const state: any = { callCounts: new Map(), rejected: new Map(), sessionRules: [] };
     addSessionRule(state, { tool: 'Bash', pattern: 'rm -rf' });
     assert.equal(state.sessionRules.length, 1);
   }
 
   console.log('hooks/harness.nlrules.test.mts: all assertions passed');
+
+  // --- 4. launchers: the rule's pattern is matched after python -m / npx / uv run / env ... ---
+  //         and the deny reason says what matching does, never "containing" ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+    await handlers['prompt.submit'][0](dollar, promptSubmit('Stop running pytest without -q.'), async (e: any) => e);
+    const check = (command: string) => handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command } }, async () => ({ decision: 'allow' }),
+    );
+    const launched = [
+      'pytest tests/',
+      'python -m pytest tests/',
+      'python3 -m pytest tests/',
+      'py -m pytest tests/',
+      'npx pytest tests/',
+      'uv run pytest tests/',
+      'poetry run pytest tests/',
+      'pipx run pytest tests/',
+      'env PYTHONPATH=. pytest tests/',
+      'PYTHONPATH=. pytest tests/',
+      'FOO=1 BAR=2 uv run python -m pytest tests/',
+    ];
+    for (const command of launched) {
+      const denied = await check(command);
+      assert.equal(denied.decision, 'deny', `"${command}" must be denied`);
+      assert.ok(!/containing/i.test(denied.reason ?? ''), `reason must not say "containing": ${denied.reason}`);
+      assert.ok(/first words are "pytest"/.test(denied.reason ?? ''), `reason must say how it matches: ${denied.reason}`);
+      assert.ok(/unless "-q" is one of its words/.test(denied.reason ?? ''), `reason must name the flag: ${denied.reason}`);
+      const allowed = await check(command.replace('pytest tests/', 'pytest -q tests/'));
+      assert.equal(allowed.decision, 'allow', `"${command}" with -q must be allowed`);
+    }
+    // A launcher running something else is not the pattern.
+    assert.equal((await check('python -m pip install x')).decision, 'allow');
+    assert.equal((await check('python pytest_helper.py')).decision, 'allow');
+  }
 }
 
 main().catch((error) => {

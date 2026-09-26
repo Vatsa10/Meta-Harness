@@ -1,7 +1,7 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler fails open: most are wrapped in `safely`, `afterCall` or `afterCallMap`, all of which swallow a
+ * Every handler fails open: most run inside `guardBefore`, `guardAfter` or `guardAfterMap`, all of which swallow a
  * throw and fall through to `next` rather than break the turn — and none ever calls `next` a
  * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
  * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
@@ -26,96 +26,135 @@ import {
   loadRules,
   parseStopInstruction,
   rememberRejection,
+  stableStringify,
+  toolArgs,
   type Rule,
   type SessionState,
   wasRejected,
 } from './rules.js';
 import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
 
-export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
+export type Fallible<E, R> = (io: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
 /** Log a skip the same way everywhere, without ever risking a second throw of its own. */
-function logSkip(dollar: any, name: string, error: unknown): void {
+function logSkip(io: any, name: string, error: unknown): void {
   try {
-    dollar.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
+    io.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
   } catch {
     // logging must never be the thing that breaks the turn either
   }
 }
 
-/** Wrap a handler so a throw becomes a pass-through instead of a broken turn. */
-export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    // `next` is the rest of the chain (for prompt.submit, the human's prompt reaching core; for
-    // tool.check, the tool running). Recovering a throw by calling it again is only safe if the
-    // handler never reached it: once it has, a second call submits the prompt twice or runs the
-    // tool twice. So once `next` has been called, its own outcome stands on every path.
-    let called = false;
-    let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
-    const once = async (e: E): Promise<R> => {
-      called = true;
-      try {
-        const value = await next(e);
-        settled = { ok: true, value };
-        return value;
-      } catch (error) {
-        settled = { ok: false, error };
-        throw error;
-      }
-    };
-    try {
-      return await handler(dollar, event, once);
-    } catch (error) {
-      logSkip(dollar, name, error);
-      if (!called) return next(event);
-      const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
-      if (outcome?.ok) return outcome.value;
-      throw outcome ? outcome.error : error;
-    }
-  };
-}
-
 /**
- * Wrap a handler whose work happens AFTER the tool has already run.
- *
- * `safely` recovers a throw that happened before `next` by calling `next(event)`: for a post-`next` handler that would run the tool a SECOND time, duplicating the
- * side effect of a Bash or Write. Here `next` is called exactly once, up front, and the fallible
- * work is what gets swallowed — so an observer that throws costs an observation, never a repeated
- * command.
+ * Why the guards below take `(name, io, event, next, handler)` and are CALLED from inside a
+ * function literal instead of returning a hook: Claude Code's hooks loader rejects any `on(...)`
+ * whose hook argument is not a function literal (or the name of one) written in the call — a
+ * wrapper call such as `on('tool.call', afterCall(...))` fails the whole module, so no hook runs.
+ * Every registration is therefore `on('<event>', async ($, e, next) => guardX(..., $, e, next, ...))`;
+ * tests/test_hook_literals.py enforces that statically.
  */
-export function afterCall<E, R>(
+
+/**
+ * Runs a handler that may call `next` itself, so a throw becomes a pass-through instead of a
+ * broken turn. `next` is the rest of the chain (for prompt.submit, the human's prompt reaching
+ * core; for tool.check, the tool running). Recovering a throw by calling it again is only safe if
+ * the handler never reached it: once it has, a second call submits the prompt twice or runs the
+ * tool twice. So once `next` has been called, its own outcome stands on every path.
+ */
+export async function guardBefore<E, R>(
   name: string,
-  handler: (dollar: any, event: E, outcome: R) => Promise<void>,
-): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    const outcome = await next(event);
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (next: (e: E) => Promise<R>) => Promise<R>,
+): Promise<R> {
+  let called = false;
+  let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
+  const once = async (e: E): Promise<R> => {
+    called = true;
     try {
-      await handler(dollar, event, outcome);
+      const value = await next(e);
+      settled = { ok: true, value };
+      return value;
     } catch (error) {
-      logSkip(dollar, name, error);
+      settled = { ok: false, error };
+      throw error;
     }
-    return outcome;
   };
+  try {
+    return await handler(once);
+  } catch (error) {
+    logSkip(io, name, error);
+    if (!called) return next(event);
+    const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
+    if (outcome?.ok) return outcome.value;
+    throw outcome ? outcome.error : error;
+  }
 }
 
 /**
- * Like `afterCall`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
+ * Runs a handler whose work happens AFTER the tool has already run. `guardBefore` recovers a
+ * throw that happened before `next` by calling `next(event)`: for a post-`next` handler that
+ * would run the tool a SECOND time, duplicating the side effect of a Bash or Write. Here `next` is
+ * called exactly once, up front (a rejection propagates once, untouched), and the fallible work is
+ * what gets swallowed — so an observer that throws costs an observation, never a repeated command.
+ */
+export async function guardAfter<E, R>(
+  name: string,
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<void>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    await handler(outcome);
+  } catch (error) {
+    logSkip(io, name, error);
+  }
+  return outcome;
+}
+
+/**
+ * Like `guardAfter`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
  * something appended). `next` is called exactly once, up front; if the handler throws, core's
  * outcome is returned as it came, never a second call to `next`.
  */
+export async function guardAfterMap<E, R>(
+  name: string,
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<R>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    return await handler(outcome);
+  } catch (error) {
+    logSkip(io, name, error);
+    return outcome;
+  }
+}
+
+/** `guardBefore` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
+export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
+  return (io, event, next) => guardBefore(name, io, event, next, (once) => handler(io, event, once));
+}
+
+/** `guardAfter` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
+export function afterCall<E, R>(
+  name: string,
+  handler: (io: any, event: E, outcome: R) => Promise<void>,
+): Fallible<E, R> {
+  return (io, event, next) => guardAfter(name, io, event, next, (outcome) => handler(io, event, outcome));
+}
+
+/** `guardAfterMap` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCallMap<E, R>(
   name: string,
-  handler: (dollar: any, event: E, outcome: R) => Promise<R>,
+  handler: (io: any, event: E, outcome: R) => Promise<R>,
 ): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    const outcome = await next(event);
-    try {
-      return await handler(dollar, event, outcome);
-    } catch (error) {
-      logSkip(dollar, name, error);
-      return outcome;
-    }
-  };
+  return (io, event, next) => guardAfterMap(name, io, event, next, (outcome) => handler(io, event, outcome));
 }
 
 const REPEAT_WINDOW = 6;
@@ -124,9 +163,12 @@ const REPEAT_THRESHOLD = 4;
 type Recent = { tool: string; key: string };
 
 /** The harness's home directory: overridable for tests, otherwise under the user's profile. */
-function harnessHome(dollar: any): string {
-  const override = dollar.env?.get?.('META_HARNESS_HOME');
-  return override || `${dollar.env?.get?.('USERPROFILE') || dollar.env?.get?.('HOME')}/.claude/harness`;
+async function harnessHome(io: any): Promise<string> {
+  // `$.env.get` answers with a Promise in Claude Code; awaiting also accepts a plain value.
+  const override = await io.env?.get?.('META_HARNESS_HOME');
+  if (override) return override;
+  const profile = (await io.env?.get?.('USERPROFILE')) || (await io.env?.get?.('HOME'));
+  return `${profile}/.claude/harness`;
 }
 
 /**
@@ -209,9 +251,9 @@ export function cause(text: string): string {
 }
 
 /** This session's id, or 'unknown' when the engine cannot supply one; never throws. */
-async function currentSessionId(dollar: any): Promise<string> {
+async function currentSessionId(io: any): Promise<string> {
   try {
-    const id = await dollar.session?.id?.();
+    const id = await io.session?.id?.();
     return id ? String(id) : 'unknown';
   } catch {
     return 'unknown';
@@ -227,11 +269,11 @@ async function currentSessionId(dollar: any): Promise<string> {
  * it; a reader globs `observed-*.jsonl` under the harness home. `$.fs.write` creates missing
  * parent directories itself, so a fresh harness home on a new machine needs no separate mkdir.
  */
-async function observe(dollar: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
-  const path = `${harnessHome(dollar)}/observed-${sessionId}.jsonl`;
+async function observe(io: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
+  const path = `${(await harnessHome(io))}/observed-${sessionId}.jsonl`;
   const line = `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`;
-  const existing = (await dollar.fs.exists(path)) ? await dollar.fs.read(path) : '';
-  await dollar.fs.write(path, existing + line);
+  const existing = (await io.fs.exists(path)) ? await io.fs.read(path) : '';
+  await io.fs.write(path, existing + line);
 }
 
 function resultText(result: unknown): string {
@@ -280,31 +322,67 @@ function isError(result: unknown): boolean {
     || ERROR_PHRASES.test(text);
 }
 
+/**
+ * Launchers stripped from the front of a Bash command before a session rule's pattern is
+ * compared: `python -m`, `python3 -m`, `py -m`, `npx`, `uv run`, `poetry run`, `pipx run`, plus a
+ * leading `env` and any `VAR=value` assignments. Takes lower-cased whitespace tokens.
+ */
+export function stripLaunchers(tokens: string[]): string[] {
+  let rest = tokens;
+  for (;;) {
+    if (rest[0] === 'env' || /^[a-z_][a-z0-9_]*=/.test(rest[0] ?? '')) {
+      rest = rest.slice(1);
+    } else if (['python', 'python3', 'py'].includes(rest[0] ?? '') && rest[1] === '-m') {
+      rest = rest.slice(2);
+    } else if (rest[0] === 'npx') {
+      rest = rest.slice(1);
+    } else if (['uv', 'poetry', 'pipx'].includes(rest[0] ?? '') && rest[1] === 'run') {
+      rest = rest.slice(2);
+    } else {
+      return rest;
+    }
+  }
+}
+
+/** The deny reason for a session rule, saying what the matching actually does. */
+export function sessionRuleReason(tool: string, rule: { pattern: string; requires?: string; flag?: string }): string {
+  const head = 'Session rule from this conversation: this blocks any';
+  if (tool !== 'Bash') {
+    return `${head} ${tool} call whose input contains "${rule.pattern}" [session-rule]`;
+  }
+  const what = `${head} Bash command whose first words are "${rule.pattern}" `
+    + '(after any launcher such as python -m, npx, uv run, poetry run, pipx run, env or VAR=x)';
+  if (rule.requires) return `${what} unless "${rule.requires}" is one of its words [session-rule]`;
+  if (rule.flag) return `${what} and "${rule.flag}" is one of its words [session-rule]`;
+  return `${what}, whatever its arguments [session-rule]`;
+}
+
 /** Observes tool.call outcomes: records errors and repeated identical calls to observed-<session>.jsonl. */
-export function registerObserver(on: On): void {
+export function registerObserver(add: On): void {
   const recent: Recent[] = [];
 
-  // afterCall, not safely: this handler's work runs after the tool has already executed, so a
+  // guardAfter, not guardBefore: this handler's work runs after the tool has already executed, so a
   // recovery that re-entered next() would run the tool twice.
-  on('tool.call', afterCall('tool.call', async (dollar, event: any, outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call', io, event, next, async (outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
-    const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
+    const args = toolArgs(event);
+    const key = `${tool}:${stableStringify(args).slice(0, 200)}`;
 
     recent.push({ tool, key });
     if (recent.length > REPEAT_WINDOW) recent.shift();
     const repeats = recent.filter((entry) => entry.key === key).length;
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     if (repeats >= REPEAT_THRESHOLD) {
-      await observe(dollar, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: event?.input });
+      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: args });
     }
     const text = resultText((outcome as any)?.result);
     if (isError((outcome as any)?.result)) {
-      await observe(dollar, sessionId, {
+      await observe(io, sessionId, {
         kind: 'tool_error',
         tool,
         cause: cause(text),
-        input: event?.input,
+        input: args,
         text: text.slice(0, 400),
       });
     }
@@ -322,43 +400,40 @@ const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
  *
  * Also carries this session's rejection memory (task 13) and session-scoped "stop doing X" rules
  * (task 14), both stored on the same `SessionState` so `tool.check` can consult them ahead of the
- * installed-rule loop. Rejection detection lives in the same `tool.call` handler as read-tracking
- * below; the real hook declarations confirm multiple listeners on one event DO compose in
- * production (each runs, `next` chains through them), so a second, independent registration would
- * have worked too — they were folded into one handler here for simplicity, not because
- * composition needed it. `prompt.submit` (not `prompt.section`) is where the human's own words
+ * installed-rule loop. Rejection detection lives in its own `tool.call` handler below; there is
+ * no read-tracking handler here, since read-before-edit is the engine's job, not this plugin's
+ * (see hooks/rules.ts). Claude Code refuses a second registration of one event without a matcher, so these
+ * hooks are added to `register`'s per-event list and chained inside its single `on` per event.
+ * `prompt.submit` (not `prompt.section`) is where the human's own words
  * are read, since only `prompt.submit`'s event carries `text`.
  */
-export function registerRules(on: On): void {
+export function registerRules(add: On): void {
   const state: SessionState = {
-    readPaths: new Set<string>(),
     callCounts: new Map<string, number>(),
     rejected: new Map<string, string>(),
     sessionRules: [],
   };
   let rules: Rule[] | null = null;
 
-  // afterCall, not safely: rejection detection reads the outcome, which only exists AFTER the
-  // tool has already run (or been denied), so a `safely` recovery re-entering next() would run
-  // the tool a second time. `next` resolves before this handler's own body runs at all — both
-  // the read-tracking and the rejection check below run AFTER the call, not "first"; read-tracking
-  // simply doesn't care about the outcome, so its ordering relative to `next` has no effect either
-  // way.
-  on('tool.call', afterCall('tool.call:read-tracking', async (dollar, event: any, outcome: any) => {
-    if (event?.tool === 'Read') {
-      const path = String(event?.input?.file_path ?? '');
-      if (path) state.readPaths.add(path);
-    }
+  // guardAfter, not guardBefore: rejection detection reads the outcome, which only exists AFTER the
+  // tool has already run (or been denied), so a `guardBefore` recovery re-entering next() would run
+  // the tool a second time. `next` resolves before this handler's own body runs at all.
+  //
+  // There is no read-tracking hook here any more: a live test proved Claude Code's own engine
+  // already denies an Edit/Write of a file not read this session ("File has not been read yet"),
+  // and it runs before this plugin ever sees the call. The plugin-side copy of that check (a
+  // `read-before-edit` rule plus this handler's read-tracking) is retired -- see hooks/rules.ts.
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:rejection-memory', io, event, next, async (outcome: any) => {
     const text = rejectionAnnouncement(outcome);
     if (text && REJECTION_PATTERN.test(text)) {
-      rememberRejection(state, String(event?.tool ?? ''), event?.input);
+      rememberRejection(state, String(event?.tool ?? ''), toolArgs(event));
     }
   }));
 
   // prompt.submit, not prompt.section: only prompt.submit's event carries the human's actual
   // words (`e.text`). This handler mutates session state only (never the model-visible prompt),
   // so it always passes `event` through to `next` unchanged.
-  on('prompt.submit', safely('prompt.submit:nlrules', async (dollar, event: any, next) => {
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:nlrules', io, event, next, async (next) => {
     const text = String(event?.text ?? '');
     // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
     // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
@@ -366,8 +441,8 @@ export function registerRules(on: On): void {
     const instruction = userSpoke(event) ? parseStopInstruction(text) : null;
     if (instruction) {
       addSessionRule(state, instruction);
-      const path = `${harnessHome(dollar)}/pending-session-rules.json`;
-      await dollar.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
+      const path = `${(await harnessHome(io))}/pending-session-rules.json`;
+      await io.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
     }
     if (text) {
       const lower = text.toLowerCase();
@@ -380,7 +455,7 @@ export function registerRules(on: On): void {
     return next(event);
   }));
 
-  on('tool.check', safely('tool.check', async (dollar, event: any, next) => {
+  add('tool.check', async (io: any, event: any, next: any) => guardBefore('tool.check', io, event, next, async (next) => {
     const tool = String(event?.tool ?? '');
     if (wasRejected(state, tool, event?.input)) {
       return {
@@ -399,10 +474,13 @@ export function registerRules(on: On): void {
       const commandTokens = command.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
       const patternTokens = rule.pattern.toLowerCase().split(/\s+/).filter(Boolean);
 
+      // The pattern is matched against the command's first words AFTER any launcher, so a rule
+      // about `pytest` also covers `python -m pytest`, `uv run pytest`, `FOO=1 pytest`, ...
+      const programTokens = stripLaunchers(commandTokens);
       let matches: boolean;
       if (tool === 'Bash') {
         matches = patternTokens.length > 0
-          && patternTokens.every((t, i) => commandTokens[i] === t);
+          && patternTokens.every((t, i) => programTokens[i] === t);
       } else {
         const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
         matches = haystack.includes(rule.pattern.toLowerCase());
@@ -433,26 +511,13 @@ export function registerRules(on: On): void {
         if (!present) continue;
       }
 
-      return {
-        decision: 'deny',
-        reason: rule.requires
-          // Says exactly what is (and is not) blocked: only the qualified form is allowed.
-          ? `Session rule from this conversation: this blocks any ${tool} call containing `
-            + `"${rule.pattern}" UNLESS it also contains "${rule.requires}" [session-rule]`
-          : rule.flag
-          // Says exactly what is blocked: only the pattern carrying that flag.
-          ? `Session rule from this conversation: this blocks any ${tool} call starting with `
-            + `"${rule.pattern}" when it also contains "${rule.flag}" [session-rule]`
-          // No representable qualifier: says so, honestly denying the token in every form
-          // rather than pretending to be more precise than it is.
-          : `Session rule from this conversation: this blocks any ${tool} call whose input `
-            + `contains "${rule.pattern}", in any form [session-rule]`,
-      };
+      return { decision: 'deny', reason: sessionRuleReason(tool, rule) };
     }
-    if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
+    if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
-      if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
+      if (!verdict.deny) continue;
+      return { decision: 'deny', reason: verdict.reason };
     }
     // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this
     // exact call has already been allowed. Counting at tool.check rather than after the result
@@ -489,8 +554,8 @@ function truncate(text: string, limit: number): string {
 }
 
 /** Installed `injection` artifacts only: a `rule`, `skill` or `doctrine` row is never surfaced here. */
-async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
-  const artifacts = await loadInstalled(dollar, home, 'injection');
+async function loadInjections(io: any, home: string): Promise<Injection[]> {
+  const artifacts = await loadInstalled(io, home, 'injection');
   return artifacts.map((artifact) => ({
     artifactId: String(artifact.id),
     triggers: (artifact.origin as any)?.triggers ?? [],
@@ -511,11 +576,11 @@ async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
  * replacement. The hook itself knows what it attached, so use is recorded by construction via
  * `observe` instead of asking the model to self-report a retrieval it might forget.
  */
-export function registerInjection(on: On): void {
+export function registerInjection(add: On): void {
   let injections: Injection[] | null = null;
 
-  on('prompt.submit', safely('prompt.submit:injection', async (dollar, event: any, next) => {
-    if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:injection', io, event, next, async (next) => {
+    if (injections === null) injections = await loadInjections(io, (await harnessHome(io)));
     if (injections.length === 0) return next(event);
 
     const haystack = String(event?.text ?? '').toLowerCase();
@@ -523,9 +588,9 @@ export function registerInjection(on: On): void {
       injection.triggers.some((trigger) => haystack.includes(String(trigger).toLowerCase())));
     if (matched.length === 0) return next(event);
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     for (const injection of matched) {
-      await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
+      await observe(io, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
     const joined = truncate(matched.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
     return next({ ...event, context: [...(event?.context ?? []), joined] });
@@ -541,33 +606,33 @@ export function registerInjection(on: On): void {
  * Disabled unless `<harnessHome>/drift.json` explicitly enables it (see `hooks/drift.ts`); the
  * ship gate refused every judge, so by default this counts calls and says nothing.
  *
- * `tool.call` uses `afterCallMap`: `next` is called exactly once, up front, and the note is
+ * `tool.call` uses `guardAfterMap`: `next` is called exactly once, up front, and the note is
  * appended to a COPY of the answered outcome; a throw anywhere after `next` returns core's
  * outcome untouched, never re-running the tool. A `{ deny }` outcome is never given context (its
  * type forbids it): past the threshold the note waits for the next answered call. The latch is
  * set only once the note is actually attached.
  *
  * `prompt.submit` only resets the stretch when the user speaks (see `userSpoke`); it attaches
- * nothing and passes the event through unchanged, under `safely`, which calls `next` once.
+ * nothing and passes the event through unchanged, under `guardBefore`, which calls `next` once.
  * Nothing here listens on `prompt.section`, whose return replaces a system-prompt section.
  */
-export function registerDrift(on: On): void {
+export function registerDrift(add: On): void {
   let count = 0;
   let warned = false;
   let config: DriftConfig | null | undefined;
 
-  on('tool.call', afterCallMap('tool.call:drift', async (dollar, _event: any, outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfterMap('tool.call:drift', io, event, next, async (outcome: any) => {
     count += 1;
     if (warned) return outcome;
     if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
-    if (config === undefined) config = await loadDriftConfig(dollar, harnessHome(dollar));
+    if (config === undefined) config = await loadDriftConfig(io, (await harnessHome(io)));
     if (!shouldWarn(count, config)) return outcome;
     const context = Array.isArray(outcome.context) ? outcome.context : [];
     warned = true;
     return { ...outcome, context: [...context, driftNote(count)] };
   }));
 
-  on('prompt.submit', safely('prompt.submit:drift', async (_dollar, event: any, next) => {
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:drift', io, event, next, async (next) => {
     if (userSpoke(event)) {
       count = 0;
       warned = false;
@@ -604,18 +669,18 @@ export function registerDrift(on: On): void {
  * is marked done, so the question keeps being asked (at most once per turn, which costs nothing
  * on a turn with no report to show) until it can actually be answered once.
  */
-export function registerBootstrap(on: On): void {
-  on('prompt.submit', async (dollar: any, event: any, next: any) => {
+export function registerBootstrap(add: On): void {
+  add('prompt.submit', async (io: any, event: any, next: any) => {
     let outboundEvent = event;
     let markDone = false;
 
     try {
-      const home = harnessHome(dollar);
+      const home = (await harnessHome(io));
       const bootstrapPath = `${home}/bootstrap.json`;
-      if (!(await dollar.fs.exists(bootstrapPath))) {
+      if (!(await io.fs.exists(bootstrapPath))) {
         const wastePath = `${home}/waste.json`;
-        if (await dollar.fs.exists(wastePath)) {
-          const waste: any = JSON.parse(await dollar.fs.read(wastePath));
+        if (await io.fs.exists(wastePath)) {
+          const waste: any = JSON.parse(await io.fs.read(wastePath));
           const sessions = waste?.sessions;
           const callsBurned = waste?.corrections?.calls_burned;
           // A report over zero sessions (an empty or mis-pointed transcript store) says nothing
@@ -632,7 +697,7 @@ export function registerBootstrap(on: On): void {
         }
       }
     } catch (error) {
-      logSkip(dollar, 'prompt.submit:bootstrap', error);
+      logSkip(io, 'prompt.submit:bootstrap', error);
       outboundEvent = event; // fail open: send the turn through exactly as it arrived
       markDone = false;
     }
@@ -643,23 +708,93 @@ export function registerBootstrap(on: On): void {
 
     if (markDone) {
       try {
-        await dollar.fs.write(`${harnessHome(dollar)}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
+        await io.fs.write(`${(await harnessHome(io))}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
       } catch (error) {
         // Swallowed locally, never recovered by calling next() again: a failed marker write
         // just means the question is asked again next turn, not that the turn breaks or the
         // prompt is submitted twice.
-        logSkip(dollar, 'prompt.submit:bootstrap', error);
+        logSkip(io, 'prompt.submit:bootstrap', error);
       }
     }
     return result;
   });
 }
 
+type AnyHook = (io: any, event: any, next: (e: any) => Promise<any>) => Promise<any>;
+
+/**
+ * Runs `hooks` as one chain, first outermost, the way separate registrations would nest: each
+ * hook's `next` is the rest of the chain, and the last one's `next` is core.
+ */
+export function chain(hooks: AnyHook[], io: any, event: any, next: (e: any) => Promise<any>): Promise<any> {
+  const run = (index: number, e: any): Promise<any> =>
+    index === hooks.length ? next(e) : hooks[index](io, e, (inner: any) => run(index + 1, inner));
+  return run(0, event);
+}
+
+/**
+ * Registers each event ONCE. Claude Code's loader refuses a module that registers one event twice
+ * without a matcher ("on(\"tool.call\") is registered twice without a matcher"), so the features
+ * above add their hooks to a per-event list here and each event gets a single literal that runs
+ * that list in the order the features were added (observer, rules, injection, bootstrap, drift).
+ */
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
-  registerObserver(on);
-  registerRules(on);
-  registerInjection(on);
-  registerBootstrap(on);
-  registerDrift(on);
+  const hooks: Record<string, AnyHook[]> = {};
+  const add = ((event: string, hook: AnyHook) => {
+    (hooks[event] ??= []).push(hook);
+  }) as unknown as On;
+  registerObserver(add);
+  registerRules(add);
+  registerInjection(add);
+  registerBootstrap(add);
+  registerDrift(add);
+  on('tool.call', async ($: any, event: any, next: any) => chain(hooks['tool.call'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('tool.check', async ($: any, event: any, next: any) => chain(hooks['tool.check'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('prompt.submit', async ($: any, event: any, next: any) => chain(hooks['prompt.submit'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
 };

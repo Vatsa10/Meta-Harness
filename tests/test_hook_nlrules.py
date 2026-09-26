@@ -22,7 +22,7 @@ def test_nlrules_reads_prompt_submit_not_prompt_section():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     # prompt.section has no event.text/event.prompt at all; only prompt.submit's event carries
     # the human's actual words.
-    assert "safely('prompt.submit:nlrules'" in source
+    assert "guardBefore('prompt.submit:nlrules'" in source
 
 
 def test_stop_instruction_requires_an_actionable_verb():

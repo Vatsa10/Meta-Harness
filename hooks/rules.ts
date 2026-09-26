@@ -2,8 +2,13 @@
  * Installed `rule` artifacts, applied at tool.check.
  *
  * A rule is the strongest layer available: it costs no standing tokens and cannot be talked
- * around. `read-before-edit` is built in because it is the discovered doctrine's top clause,
- * and a clause a mechanism can enforce should not be a paragraph.
+ * around. There is no built-in read-before-edit rule here: a live test proved Claude Code's own
+ * engine already refuses an Edit/Write of a file that has not been read this session ("File has
+ * not been read yet"), and it runs before this plugin ever sees the call. A plugin-side copy of
+ * that check only added failure modes on top of an enforcement that already existed -- every
+ * Edit denied, every new-file Write denied, and a Write-then-Edit denied even though the Write
+ * itself supplied the read the plugin's tracker never recorded. This module now only carries
+ * rules the engine does not already enforce (installed artifacts, `repeat-call`).
  */
 
 export type Rule = {
@@ -37,7 +42,6 @@ export type SessionRule = {
 };
 
 export type SessionState = {
-  readPaths: Set<string>;
   /** How many times each exact tool+input call has already been allowed this session. */
   callCounts: Map<string, number>;
   /** Calls the human has explicitly rejected this session, keyed by callKey, valued by a
@@ -47,13 +51,45 @@ export type SessionState = {
   sessionRules?: SessionRule[];
 };
 
+/** Keys a `tool.call` event carries beside the tool's own arguments (ToolCallReserved, AgentLoop). */
+const RESERVED_TOOL_CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent']);
+
+/**
+ * The tool's own arguments on a `tool.call` event. On `tool.call` Claude Code puts them at the TOP
+ * LEVEL of the event (`e.command` for Bash, `e.file_path` for Read/Edit) beside the reserved keys;
+ * only `tool.check` nests them under `input`. An object `input` is still honoured, for fakes and in
+ * case a future engine nests them. Every `tool.call` reader goes through this, never `event.input`.
+ */
+export function toolArgs(event: unknown): Record<string, unknown> {
+  if (!event || typeof event !== 'object') return {};
+  const record = event as Record<string, unknown>;
+  if (record.input && typeof record.input === 'object' && !Array.isArray(record.input)) {
+    return record.input as Record<string, unknown>;
+  }
+  const args: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!RESERVED_TOOL_CALL_KEYS.has(key)) args[key] = value;
+  }
+  return args;
+}
+
+/** JSON with object keys sorted, so the same arguments give the same key whatever their order. */
+export function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, inner) => {
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      return Object.fromEntries(Object.keys(inner).sort().map((k) => [k, (inner as any)[k]]));
+    }
+    return inner;
+  });
+}
+
 /** The identity of one tool call, for counting exact repeats. Input order is whatever the
  * engine sends; the same call in the same session serializes the same way, which is all the
  * repeat counter needs. */
 export function callKey(event: { tool?: string; input?: Record<string, unknown> }): string {
   let input = '';
   try {
-    input = JSON.stringify(event.input ?? {});
+    input = stableStringify(event.input ?? {});
   } catch {
     input = String(event.input ?? '');
   }
@@ -67,14 +103,10 @@ export function callKey(event: { tool?: string; input?: Record<string, unknown> 
  */
 export const DEFAULT_REPEAT_THRESHOLD = 4;
 
-export const BUILT_IN_RULES: Rule[] = [
-  {
-    artifactId: 'read-before-edit',
-    kind: 'read-before-edit',
-    tools: ['Edit', 'Write'],
-    reason: 'Read this file in the session before editing it: an edit written from an assumption about its contents lands in the wrong place.',
-  },
-];
+/** No built-in rules ship: read-before-edit is the engine's job now (see the module doc above),
+ * and nothing else has earned a built-in yet. Kept as an array (rather than removed outright) so
+ * `loadRules` has one shape to spread regardless of how many built-ins eventually exist. */
+export const BUILT_IN_RULES: Rule[] = [];
 
 export type InstalledArtifact = {
   id: string;
@@ -90,12 +122,12 @@ export type InstalledArtifact = {
  * missing or corrupt registry, or a missing/malformed artifact.json, yields fewer rows rather
  * than throwing, and every caller gets that behaviour identically instead of re-deriving it.
  */
-export async function loadInstalled(dollar: any, home: string, type: string): Promise<InstalledArtifact[]> {
+export async function loadInstalled(io: any, home: string, type: string): Promise<InstalledArtifact[]> {
   const registry = `${home}/installed.json`;
-  if (!(await dollar.fs.exists(registry))) return [];
+  if (!(await io.fs.exists(registry))) return [];
   let entries: Array<{ id: string; type: string }> = [];
   try {
-    entries = JSON.parse(await dollar.fs.read(registry));
+    entries = JSON.parse(await io.fs.read(registry));
   } catch {
     return [];
   }
@@ -103,9 +135,9 @@ export async function loadInstalled(dollar: any, home: string, type: string): Pr
   for (const entry of entries) {
     if (entry.type !== type) continue;
     const path = `${home}/artifacts/${entry.id}/artifact.json`;
-    if (!(await dollar.fs.exists(path))) continue;
+    if (!(await io.fs.exists(path))) continue;
     try {
-      out.push(JSON.parse(await dollar.fs.read(path)));
+      out.push(JSON.parse(await io.fs.read(path)));
     } catch {
       continue;
     }
@@ -114,9 +146,9 @@ export async function loadInstalled(dollar: any, home: string, type: string): Pr
 }
 
 /** Installed rule artifacts, plus the built-ins. Missing or malformed files are ignored. */
-export async function loadRules(dollar: any, home: string): Promise<Rule[]> {
+export async function loadRules(io: any, home: string): Promise<Rule[]> {
   const rules = [...BUILT_IN_RULES];
-  const artifacts = await loadInstalled(dollar, home, 'rule');
+  const artifacts = await loadInstalled(io, home, 'rule');
   for (const artifact of artifacts) {
     rules.push({
       artifactId: String(artifact.id),
@@ -155,12 +187,6 @@ export function evaluateRule(
       };
     }
     return { deny: false };
-  }
-
-  if (rule.kind === 'read-before-edit') {
-    const path = String((event.input as any)?.file_path ?? '');
-    if (!path || state.readPaths.has(path)) return { deny: false };
-    return { deny: true, reason: `${rule.reason} [${rule.artifactId}]` };
   }
 
   return { deny: false };

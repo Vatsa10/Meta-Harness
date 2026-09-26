@@ -60,7 +60,7 @@ def test_every_hook_is_wrapped_so_it_fails_open():
     # A learning system that can break a session is worse than no learning system.
     for event in ("tool.call", "tool.check", "prompt.section", "turn.complete"):
         if f"'{event}'" in source:
-            assert "safely(" in source, f"{event} must be wrapped"
+            assert "guardBefore(" in source and "guardAfter(" in source, f"{event} must be guarded"
 
 
 def test_plugin_declares_the_hooks_directory():

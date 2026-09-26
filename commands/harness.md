@@ -58,12 +58,14 @@ session rule: nothing - it ends with the session).
 ## `/harness why`
 
 Explain the most recent denial or drift note Claude saw in this session. Denials come from one
-of four sources:
+of three sources in the plugin:
 
 - a learned rule (an installed artifact matching the current call),
-- the read-before-edit check (an edit blocked because the file wasn't read first this session),
 - rejection memory (the same call was already rejected earlier this session),
 - a session rule (a standing "stop doing X" instruction in effect for this session).
+
+A denial that says a file "has not been read yet" is not one of these - that check is Claude
+Code's own engine, not this plugin, and it runs before the plugin ever sees the call.
 
 Quote the denial reason text exactly as it was shown - that reason string is the only evidence
 available; do not invent a fuller justification than what the hook actually said. If nothing was

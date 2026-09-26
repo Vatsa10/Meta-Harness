@@ -85,13 +85,14 @@ def test_no_user_doc_presents_prompt_section_as_a_live_hook():
 
 def test_hook_source_registers_no_prompt_section_listener():
     for path in (ROOT / "hooks").glob("*.ts"):
-        assert "on('prompt.section'" not in path.read_text(encoding="utf-8"), path
+        text = path.read_text(encoding="utf-8")
+        assert "on('prompt.section'" not in text and "add('prompt.section'" not in text, path
 
 
 def test_hooks_readme_does_not_claim_every_handler_uses_safely():
     text = (ROOT / "hooks" / "README.md").read_text(encoding="utf-8")
     assert not re.search(r"every handler is wrapped in `safely`", text, re.I)
-    for wrapper in ("`safely`", "`afterCall`", "`afterCallMap`"):
+    for wrapper in ("`guardBefore`", "`guardAfter`", "`guardAfterMap`"):
         assert wrapper in text
 
 
@@ -113,6 +114,26 @@ def test_readme_documents_what_shipped():
                    "/harness waste | pending | why", "version_weight", "`judge` field"):
         assert needle in text, needle
     assert "11 of the 21" in text and "recall is unmeasured" in text
+
+
+def test_no_user_doc_claims_the_plugin_enforces_read_before_edit():
+    # The plugin's own read-before-edit rule (and the read-tracking that only fed it) is
+    # retired: a live test proved Claude Code's own engine already denies an Edit/Write of an
+    # unread file before the plugin ever sees the call. No user doc may claim the plugin (this
+    # hooks module / `rule` artifacts) is what enforces that.
+    for doc in USER_DOCS:
+        text = doc.read_text(encoding="utf-8")
+        for sentence in _SENTENCE_SPLIT.split(text):
+            if not re.search(r"read.{0,15}before.{0,15}edit|read first|been read", sentence, re.I):
+                continue
+            if re.search(r"engine|Claude Code's own|not (this )?plugin", sentence, re.I):
+                continue  # attributes it to the engine, or explicitly denies the plugin does it
+            raise AssertionError(f"{doc}: {sentence!r}")
+
+
+def test_hooks_readme_names_the_engine_as_the_enforcer():
+    text = (ROOT / "hooks" / "README.md").read_text(encoding="utf-8")
+    assert re.search(r"engine already denies", text, re.I)
 
 
 def test_drift_and_waste_spec_carries_the_final_measured_baseline_and_outcome():

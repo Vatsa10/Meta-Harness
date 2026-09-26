@@ -12,7 +12,7 @@ def test_injection_is_registered_on_prompt_submit_not_prompt_section():
     # prompt.section has no event.text/event.prompt at all, and returning {text} from it
     # REPLACES that system-prompt section; registerInjection moved to prompt.submit so it can
     # match the user's actual turn and ATTACH via context instead (see the module doc comment).
-    assert "safely('prompt.submit:injection'" in source
+    assert "guardBefore('prompt.submit:injection'" in source
 
 
 def test_injection_attaches_context_rather_than_replacing_text():
@@ -35,7 +35,7 @@ def test_injection_never_injects_non_injection_artifact_types():
     # The type filter lives once, in the shared loadInstalled() reader (rules.ts), and
     # harness.ts asks it for 'injection' rows specifically rather than re-filtering itself.
     assert "entry.type !== type" in rules_source
-    assert "loadInstalled(dollar, home, 'injection')" in harness_source
+    assert "loadInstalled(io, home, 'injection')" in harness_source
 
 
 def test_injection_reuses_the_shared_registry_reader():
@@ -45,7 +45,7 @@ def test_injection_reuses_the_shared_registry_reader():
     # fail-open semantics on the next edit to either; both layers must call the one reader.
     assert "export async function loadInstalled" in rules_source
     assert "loadInstalled" in harness_source
-    assert "JSON.parse(await dollar.fs.read(registry))" not in harness_source
+    assert "JSON.parse(await io.fs.read(registry))" not in harness_source
 
 
 def test_injection_text_is_capped_per_artifact_and_in_total():

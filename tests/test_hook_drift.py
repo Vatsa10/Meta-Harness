@@ -18,7 +18,7 @@ def test_drift_never_touches_prompt_section():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     body = source.split("export function registerDrift", 1)[1].split("export function registerBootstrap", 1)[0]
     assert "'prompt.section'" not in body
-    assert "registerDrift(on)" in source
+    assert "registerDrift(add)" in source
 
 
 def test_no_enabling_drift_config_ships():
