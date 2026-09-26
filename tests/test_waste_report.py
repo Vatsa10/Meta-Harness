@@ -120,3 +120,23 @@ def test_the_same_unclassified_error_twice_is_counted_as_a_repeat(tmp_path):
     report = waste_report(home=home)
     assert report["repeats"]["wasted_retries"] == 1
     assert report["repeats"]["sessions_affected"] == 1
+
+
+# --- final fix wave: the caveat names the flagged count this report computed ----------------
+
+def test_caveat_states_the_flagged_count_beside_the_audit_figures():
+    from meta_harness.waste import caveat
+    text = caveat(22)
+    assert "flags 22" in text
+    assert "11 of the 21" in text
+    assert "recall" in text.lower() and "unmeasured" in text.lower()
+
+
+def test_report_caveat_is_computed_from_its_own_correction_count(tmp_path):
+    from meta_harness.waste import waste_report
+    home = make_home(tmp_path, {"s1": [
+        user("go"), assistant("Read", "Edit", "Bash", "Read"), user("no, wrong"),
+    ]})
+    report = waste_report(home=home)
+    assert report["corrections"]["count"] == 1
+    assert "flags 1." in report["caveat"]

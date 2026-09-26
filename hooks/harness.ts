@@ -1,8 +1,8 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler fails open: most are wrapped in `safely` or `afterCall`, both of which swallow a
- * throw and fall through to `next` rather than break the turn — and neither ever calls `next` a
+ * Every handler fails open: most are wrapped in `safely`, `afterCall` or `afterCallMap`, all of which swallow a
+ * throw and fall through to `next` rather than break the turn — and none ever calls `next` a
  * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
  * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
  * human's prompt twice, is worse than no learning system.
@@ -360,7 +360,10 @@ export function registerRules(on: On): void {
   // so it always passes `event` through to `next` unchanged.
   on('prompt.submit', safely('prompt.submit:nlrules', async (dollar, event: any, next) => {
     const text = String(event?.text ?? '');
-    const instruction = parseStopInstruction(text);
+    // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
+    // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
+    // note uses to decide who spoke (`userSpoke`, hooks/drift.ts).
+    const instruction = userSpoke(event) ? parseStopInstruction(text) : null;
     if (instruction) {
       addSessionRule(state, instruction);
       const path = `${harnessHome(dollar)}/pending-session-rules.json`;
@@ -580,9 +583,11 @@ export function registerDrift(on: On): void {
  * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
  * every session after the first, not just within the process that happened to write it.
  *
- * The numbers come from a report `meta-harness waste --json` writes to
+ * The numbers come from the report `meta-harness waste` (with or without `--json`) writes to
  * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
- * `meta_harness/waste.py`'s `waste_report()`); this hook never runs that command itself.
+ * `meta_harness/waste.py`'s `waste_report()`). This hook never runs that command and nothing
+ * runs it in the background: until someone has run `meta-harness waste` (or `/harness waste`)
+ * once, there is no report and no line. A report with `sessions: 0` is skipped, unmarked.
  *
  * Handles its own failures rather than relying on `safely`: this handler calls `next` in the
  * MIDDLE, then does one more fallible thing afterward (writing the marker). Under the old
@@ -613,9 +618,14 @@ export function registerBootstrap(on: On): void {
           const waste: any = JSON.parse(await dollar.fs.read(wastePath));
           const sessions = waste?.sessions;
           const callsBurned = waste?.corrections?.calls_burned;
-          if (sessions != null && callsBurned != null) {
-            const line = `Analyzed ${sessions} sessions. ~${callsBurned} tool calls went to wrong-direction work. `
-              + '`/harness waste` for the breakdown.';
+          // A report over zero sessions (an empty or mis-pointed transcript store) says nothing
+          // worth saying once and for good: skip it and leave the marker unwritten.
+          if (typeof sessions === 'number' && sessions > 0 && callsBurned != null) {
+            // Hedged on purpose: the count comes from a keyword heuristic whose hand-labelled
+            // precision is about half, so the line is an estimate, never a statement of fact.
+            const line = `Across ${sessions} past sessions, an estimated ~${callsBurned} tool calls may have gone `
+              + 'to work you later corrected (a rough heuristic, roughly half of its flags are genuine). '
+              + '`/harness waste` for the breakdown and how reliable it is.';
             outboundEvent = { ...event, context: [...(event?.context ?? []), line] };
             markDone = true;
           }

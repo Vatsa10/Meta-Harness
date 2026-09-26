@@ -265,6 +265,35 @@ async function main() {
     assert.ok(String(result.context[1]).includes('340'), 'the attached line must still be the bootstrap message');
   }
 
+  // --- 9. final fix wave: a report over ZERO sessions attaches nothing and is NOT marked done ---
+  {
+    const files = new Map<string, string>();
+    files.set(wastePath, wasteReport(0, 0));
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerBootstrap(on as any);
+
+    const event = promptSubmit();
+    let forwarded: any = null;
+    await handlers['prompt.submit'](dollar, event, async (e: any) => { forwarded = e; return forwardingNext(e); });
+    assert.deepEqual(forwarded, event, 'a zero-session report must add no line');
+    assert.equal(files.has(bootstrapPath), false, 'a zero-session report must not mark the line as shown');
+  }
+
+  // --- 10. final fix wave: the line is hedged as an estimate, never stated as fact ---
+  {
+    const files = new Map<string, string>();
+    files.set(wastePath, wasteReport(12, 340));
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerBootstrap(on as any);
+
+    const result = await handlers['prompt.submit'](dollar, promptSubmit(), forwardingNext);
+    const line = String(result.context[0]);
+    assert.ok(line.includes('estimated'), `expected the line to be hedged as an estimate, got: ${line}`);
+    assert.ok(!line.includes('went to wrong-direction work'), `the line must not state waste as fact: ${line}`);
+  }
+
   console.log('hooks/harness.bootstrap.test.mts: all assertions passed');
 }
 
