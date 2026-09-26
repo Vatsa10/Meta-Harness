@@ -17,8 +17,8 @@ def test_bootstrap_is_registered_on_prompt_submit():
     assert "export function registerBootstrap" in source
     # prompt.section has no event.text at all and returning {text} from it replaces a
     # system-prompt section; the line is attached as prompt.submit context instead.
-    assert "on('prompt.submit'" in _bootstrap_body(source)
-    assert "registerBootstrap(on)" in source
+    assert "add('prompt.submit'" in _bootstrap_body(source)
+    assert "registerBootstrap(add)" in source
 
 
 def test_bootstrap_calls_next_exactly_once_on_every_path():

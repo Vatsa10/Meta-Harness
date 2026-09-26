@@ -85,7 +85,8 @@ def test_no_user_doc_presents_prompt_section_as_a_live_hook():
 
 def test_hook_source_registers_no_prompt_section_listener():
     for path in (ROOT / "hooks").glob("*.ts"):
-        assert "on('prompt.section'" not in path.read_text(encoding="utf-8"), path
+        text = path.read_text(encoding="utf-8")
+        assert "on('prompt.section'" not in text and "add('prompt.section'" not in text, path
 
 
 def test_hooks_readme_does_not_claim_every_handler_uses_safely():

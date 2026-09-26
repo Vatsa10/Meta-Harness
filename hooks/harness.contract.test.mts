@@ -140,10 +140,10 @@ async function main() {
     const { on, fire, handlers } = makeChainingOn();
     register(on as any, {} as any);
 
-    // register() puts at least two independent tool.call handlers on the chain: registerObserver's
-    // and registerRules'. If composition were broken (e.g. a bare event-map overwriting all but
-    // the last registration), this would be 1.
-    assert.ok((handlers['tool.call']?.length ?? 0) >= 2, 'expected at least two composed tool.call handlers');
+    // register() registers tool.call exactly ONCE: Claude Code's loader refuses a module that
+    // registers one event twice without a matcher. The observer, read-tracking and drift handlers
+    // are composed inside that one registration (`chain`), so the tool must still run once below.
+    assert.equal(handlers['tool.call']?.length ?? 0, 1, 'expected exactly one tool.call registration');
 
     let toolRuns = 0;
     const terminal = async (e: any) => {
@@ -217,7 +217,9 @@ async function main() {
     const dollar = makeFakeDollar(files);
     const { on, fire, handlers } = makeChainingOn();
     register(on as any, {} as any);
-    assert.ok((handlers['prompt.submit']?.length ?? 0) >= 3, 'expected nlrules, injection and bootstrap on prompt.submit');
+    // One registration (the loader refuses a repeat); nlrules, injection, bootstrap and drift
+    // are chained inside it.
+    assert.equal(handlers['prompt.submit']?.length ?? 0, 1, 'expected exactly one prompt.submit registration');
 
     const full = {
       text: 'the build hit a timeout again',

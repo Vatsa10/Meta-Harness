@@ -25,11 +25,11 @@ const JUDGES = new Set(['knn', 'overlap', 'model']);
  * The drift config, or null (disabled) for anything short of an explicit, well-formed
  * `{"enabled": true, "min_calls": <positive number>}`. Never throws.
  */
-export async function loadDriftConfig(dollar: any, home: string): Promise<DriftConfig | null> {
+export async function loadDriftConfig(io: any, home: string): Promise<DriftConfig | null> {
   try {
     const path = `${home}/drift.json`;
-    if (!(await dollar.fs.exists(path))) return null;
-    const raw = await dollar.fs.read(path);
+    if (!(await io.fs.exists(path))) return null;
+    const raw = await io.fs.read(path);
     if (typeof raw !== 'string' || raw.trim() === '') return null;
     const parsed: any = JSON.parse(raw);
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;

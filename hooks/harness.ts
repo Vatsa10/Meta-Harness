@@ -32,19 +32,19 @@ import {
 } from './rules.js';
 import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
 
-export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
+export type Fallible<E, R> = (io: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
 /** Log a skip the same way everywhere, without ever risking a second throw of its own. */
-function logSkip(dollar: any, name: string, error: unknown): void {
+function logSkip(io: any, name: string, error: unknown): void {
   try {
-    dollar.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
+    io.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
   } catch {
     // logging must never be the thing that breaks the turn either
   }
 }
 
 /**
- * Why the guards below take `(name, dollar, event, next, handler)` and are CALLED from inside a
+ * Why the guards below take `(name, io, event, next, handler)` and are CALLED from inside a
  * function literal instead of returning a hook: Claude Code's hooks loader rejects any `on(...)`
  * whose hook argument is not a function literal (or the name of one) written in the call — a
  * wrapper call such as `on('tool.call', afterCall(...))` fails the whole module, so no hook runs.
@@ -61,7 +61,7 @@ function logSkip(dollar: any, name: string, error: unknown): void {
  */
 export async function guardBefore<E, R>(
   name: string,
-  dollar: any,
+  io: any,
   event: E,
   next: (e: E) => Promise<R>,
   handler: (next: (e: E) => Promise<R>) => Promise<R>,
@@ -82,7 +82,7 @@ export async function guardBefore<E, R>(
   try {
     return await handler(once);
   } catch (error) {
-    logSkip(dollar, name, error);
+    logSkip(io, name, error);
     if (!called) return next(event);
     const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
     if (outcome?.ok) return outcome.value;
@@ -99,7 +99,7 @@ export async function guardBefore<E, R>(
  */
 export async function guardAfter<E, R>(
   name: string,
-  dollar: any,
+  io: any,
   event: E,
   next: (e: E) => Promise<R>,
   handler: (outcome: R) => Promise<void>,
@@ -108,7 +108,7 @@ export async function guardAfter<E, R>(
   try {
     await handler(outcome);
   } catch (error) {
-    logSkip(dollar, name, error);
+    logSkip(io, name, error);
   }
   return outcome;
 }
@@ -120,7 +120,7 @@ export async function guardAfter<E, R>(
  */
 export async function guardAfterMap<E, R>(
   name: string,
-  dollar: any,
+  io: any,
   event: E,
   next: (e: E) => Promise<R>,
   handler: (outcome: R) => Promise<R>,
@@ -129,30 +129,30 @@ export async function guardAfterMap<E, R>(
   try {
     return await handler(outcome);
   } catch (error) {
-    logSkip(dollar, name, error);
+    logSkip(io, name, error);
     return outcome;
   }
 }
 
 /** `guardBefore` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
-  return (dollar, event, next) => guardBefore(name, dollar, event, next, (once) => handler(dollar, event, once));
+  return (io, event, next) => guardBefore(name, io, event, next, (once) => handler(io, event, once));
 }
 
 /** `guardAfter` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCall<E, R>(
   name: string,
-  handler: (dollar: any, event: E, outcome: R) => Promise<void>,
+  handler: (io: any, event: E, outcome: R) => Promise<void>,
 ): Fallible<E, R> {
-  return (dollar, event, next) => guardAfter(name, dollar, event, next, (outcome) => handler(dollar, event, outcome));
+  return (io, event, next) => guardAfter(name, io, event, next, (outcome) => handler(io, event, outcome));
 }
 
 /** `guardAfterMap` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCallMap<E, R>(
   name: string,
-  handler: (dollar: any, event: E, outcome: R) => Promise<R>,
+  handler: (io: any, event: E, outcome: R) => Promise<R>,
 ): Fallible<E, R> {
-  return (dollar, event, next) => guardAfterMap(name, dollar, event, next, (outcome) => handler(dollar, event, outcome));
+  return (io, event, next) => guardAfterMap(name, io, event, next, (outcome) => handler(io, event, outcome));
 }
 
 const REPEAT_WINDOW = 6;
@@ -161,9 +161,12 @@ const REPEAT_THRESHOLD = 4;
 type Recent = { tool: string; key: string };
 
 /** The harness's home directory: overridable for tests, otherwise under the user's profile. */
-function harnessHome(dollar: any): string {
-  const override = dollar.env?.get?.('META_HARNESS_HOME');
-  return override || `${dollar.env?.get?.('USERPROFILE') || dollar.env?.get?.('HOME')}/.claude/harness`;
+async function harnessHome(io: any): Promise<string> {
+  // `$.env.get` answers with a Promise in Claude Code; awaiting also accepts a plain value.
+  const override = await io.env?.get?.('META_HARNESS_HOME');
+  if (override) return override;
+  const profile = (await io.env?.get?.('USERPROFILE')) || (await io.env?.get?.('HOME'));
+  return `${profile}/.claude/harness`;
 }
 
 /**
@@ -246,9 +249,9 @@ export function cause(text: string): string {
 }
 
 /** This session's id, or 'unknown' when the engine cannot supply one; never throws. */
-async function currentSessionId(dollar: any): Promise<string> {
+async function currentSessionId(io: any): Promise<string> {
   try {
-    const id = await dollar.session?.id?.();
+    const id = await io.session?.id?.();
     return id ? String(id) : 'unknown';
   } catch {
     return 'unknown';
@@ -264,11 +267,11 @@ async function currentSessionId(dollar: any): Promise<string> {
  * it; a reader globs `observed-*.jsonl` under the harness home. `$.fs.write` creates missing
  * parent directories itself, so a fresh harness home on a new machine needs no separate mkdir.
  */
-async function observe(dollar: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
-  const path = `${harnessHome(dollar)}/observed-${sessionId}.jsonl`;
+async function observe(io: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
+  const path = `${(await harnessHome(io))}/observed-${sessionId}.jsonl`;
   const line = `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`;
-  const existing = (await dollar.fs.exists(path)) ? await dollar.fs.read(path) : '';
-  await dollar.fs.write(path, existing + line);
+  const existing = (await io.fs.exists(path)) ? await io.fs.read(path) : '';
+  await io.fs.write(path, existing + line);
 }
 
 function resultText(result: unknown): string {
@@ -318,12 +321,12 @@ function isError(result: unknown): boolean {
 }
 
 /** Observes tool.call outcomes: records errors and repeated identical calls to observed-<session>.jsonl. */
-export function registerObserver(on: On): void {
+export function registerObserver(add: On): void {
   const recent: Recent[] = [];
 
   // guardAfter, not guardBefore: this handler's work runs after the tool has already executed, so a
   // recovery that re-entered next() would run the tool twice.
-  on('tool.call', async (dollar: any, event: any, next: any) => guardAfter('tool.call', dollar, event, next, async (outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call', io, event, next, async (outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
     const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
 
@@ -331,13 +334,13 @@ export function registerObserver(on: On): void {
     if (recent.length > REPEAT_WINDOW) recent.shift();
     const repeats = recent.filter((entry) => entry.key === key).length;
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     if (repeats >= REPEAT_THRESHOLD) {
-      await observe(dollar, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: event?.input });
+      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: event?.input });
     }
     const text = resultText((outcome as any)?.result);
     if (isError((outcome as any)?.result)) {
-      await observe(dollar, sessionId, {
+      await observe(io, sessionId, {
         kind: 'tool_error',
         tool,
         cause: cause(text),
@@ -360,13 +363,12 @@ const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
  * Also carries this session's rejection memory (task 13) and session-scoped "stop doing X" rules
  * (task 14), both stored on the same `SessionState` so `tool.check` can consult them ahead of the
  * installed-rule loop. Rejection detection lives in the same `tool.call` handler as read-tracking
- * below; the real hook declarations confirm multiple listeners on one event DO compose in
- * production (each runs, `next` chains through them), so a second, independent registration would
- * have worked too — they were folded into one handler here for simplicity, not because
- * composition needed it. `prompt.submit` (not `prompt.section`) is where the human's own words
+ * below. Claude Code refuses a second registration of one event without a matcher, so these
+ * hooks are added to `register`'s per-event list and chained inside its single `on` per event.
+ * `prompt.submit` (not `prompt.section`) is where the human's own words
  * are read, since only `prompt.submit`'s event carries `text`.
  */
-export function registerRules(on: On): void {
+export function registerRules(add: On): void {
   const state: SessionState = {
     readPaths: new Set<string>(),
     callCounts: new Map<string, number>(),
@@ -381,7 +383,7 @@ export function registerRules(on: On): void {
   // the read-tracking and the rejection check below run AFTER the call, not "first"; read-tracking
   // simply doesn't care about the outcome, so its ordering relative to `next` has no effect either
   // way.
-  on('tool.call', async (dollar: any, event: any, next: any) => guardAfter('tool.call:read-tracking', dollar, event, next, async (outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:read-tracking', io, event, next, async (outcome: any) => {
     if (event?.tool === 'Read') {
       const path = String(event?.input?.file_path ?? '');
       if (path) state.readPaths.add(path);
@@ -395,7 +397,7 @@ export function registerRules(on: On): void {
   // prompt.submit, not prompt.section: only prompt.submit's event carries the human's actual
   // words (`e.text`). This handler mutates session state only (never the model-visible prompt),
   // so it always passes `event` through to `next` unchanged.
-  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:nlrules', dollar, event, next, async (next) => {
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:nlrules', io, event, next, async (next) => {
     const text = String(event?.text ?? '');
     // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
     // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
@@ -403,8 +405,8 @@ export function registerRules(on: On): void {
     const instruction = userSpoke(event) ? parseStopInstruction(text) : null;
     if (instruction) {
       addSessionRule(state, instruction);
-      const path = `${harnessHome(dollar)}/pending-session-rules.json`;
-      await dollar.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
+      const path = `${(await harnessHome(io))}/pending-session-rules.json`;
+      await io.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
     }
     if (text) {
       const lower = text.toLowerCase();
@@ -417,7 +419,7 @@ export function registerRules(on: On): void {
     return next(event);
   }));
 
-  on('tool.check', async (dollar: any, event: any, next: any) => guardBefore('tool.check', dollar, event, next, async (next) => {
+  add('tool.check', async (io: any, event: any, next: any) => guardBefore('tool.check', io, event, next, async (next) => {
     const tool = String(event?.tool ?? '');
     if (wasRejected(state, tool, event?.input)) {
       return {
@@ -486,7 +488,7 @@ export function registerRules(on: On): void {
             + `contains "${rule.pattern}", in any form [session-rule]`,
       };
     }
-    if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
+    if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
       if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
@@ -526,8 +528,8 @@ function truncate(text: string, limit: number): string {
 }
 
 /** Installed `injection` artifacts only: a `rule`, `skill` or `doctrine` row is never surfaced here. */
-async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
-  const artifacts = await loadInstalled(dollar, home, 'injection');
+async function loadInjections(io: any, home: string): Promise<Injection[]> {
+  const artifacts = await loadInstalled(io, home, 'injection');
   return artifacts.map((artifact) => ({
     artifactId: String(artifact.id),
     triggers: (artifact.origin as any)?.triggers ?? [],
@@ -548,11 +550,11 @@ async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
  * replacement. The hook itself knows what it attached, so use is recorded by construction via
  * `observe` instead of asking the model to self-report a retrieval it might forget.
  */
-export function registerInjection(on: On): void {
+export function registerInjection(add: On): void {
   let injections: Injection[] | null = null;
 
-  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:injection', dollar, event, next, async (next) => {
-    if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:injection', io, event, next, async (next) => {
+    if (injections === null) injections = await loadInjections(io, (await harnessHome(io)));
     if (injections.length === 0) return next(event);
 
     const haystack = String(event?.text ?? '').toLowerCase();
@@ -560,9 +562,9 @@ export function registerInjection(on: On): void {
       injection.triggers.some((trigger) => haystack.includes(String(trigger).toLowerCase())));
     if (matched.length === 0) return next(event);
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     for (const injection of matched) {
-      await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
+      await observe(io, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
     const joined = truncate(matched.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
     return next({ ...event, context: [...(event?.context ?? []), joined] });
@@ -588,23 +590,23 @@ export function registerInjection(on: On): void {
  * nothing and passes the event through unchanged, under `guardBefore`, which calls `next` once.
  * Nothing here listens on `prompt.section`, whose return replaces a system-prompt section.
  */
-export function registerDrift(on: On): void {
+export function registerDrift(add: On): void {
   let count = 0;
   let warned = false;
   let config: DriftConfig | null | undefined;
 
-  on('tool.call', async (dollar: any, event: any, next: any) => guardAfterMap('tool.call:drift', dollar, event, next, async (outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfterMap('tool.call:drift', io, event, next, async (outcome: any) => {
     count += 1;
     if (warned) return outcome;
     if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
-    if (config === undefined) config = await loadDriftConfig(dollar, harnessHome(dollar));
+    if (config === undefined) config = await loadDriftConfig(io, (await harnessHome(io)));
     if (!shouldWarn(count, config)) return outcome;
     const context = Array.isArray(outcome.context) ? outcome.context : [];
     warned = true;
     return { ...outcome, context: [...context, driftNote(count)] };
   }));
 
-  on('prompt.submit', async (dollar: any, event: any, next: any) => guardBefore('prompt.submit:drift', dollar, event, next, async (next) => {
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:drift', io, event, next, async (next) => {
     if (userSpoke(event)) {
       count = 0;
       warned = false;
@@ -641,18 +643,18 @@ export function registerDrift(on: On): void {
  * is marked done, so the question keeps being asked (at most once per turn, which costs nothing
  * on a turn with no report to show) until it can actually be answered once.
  */
-export function registerBootstrap(on: On): void {
-  on('prompt.submit', async (dollar: any, event: any, next: any) => {
+export function registerBootstrap(add: On): void {
+  add('prompt.submit', async (io: any, event: any, next: any) => {
     let outboundEvent = event;
     let markDone = false;
 
     try {
-      const home = harnessHome(dollar);
+      const home = (await harnessHome(io));
       const bootstrapPath = `${home}/bootstrap.json`;
-      if (!(await dollar.fs.exists(bootstrapPath))) {
+      if (!(await io.fs.exists(bootstrapPath))) {
         const wastePath = `${home}/waste.json`;
-        if (await dollar.fs.exists(wastePath)) {
-          const waste: any = JSON.parse(await dollar.fs.read(wastePath));
+        if (await io.fs.exists(wastePath)) {
+          const waste: any = JSON.parse(await io.fs.read(wastePath));
           const sessions = waste?.sessions;
           const callsBurned = waste?.corrections?.calls_burned;
           // A report over zero sessions (an empty or mis-pointed transcript store) says nothing
@@ -669,7 +671,7 @@ export function registerBootstrap(on: On): void {
         }
       }
     } catch (error) {
-      logSkip(dollar, 'prompt.submit:bootstrap', error);
+      logSkip(io, 'prompt.submit:bootstrap', error);
       outboundEvent = event; // fail open: send the turn through exactly as it arrived
       markDone = false;
     }
@@ -680,23 +682,93 @@ export function registerBootstrap(on: On): void {
 
     if (markDone) {
       try {
-        await dollar.fs.write(`${harnessHome(dollar)}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
+        await io.fs.write(`${(await harnessHome(io))}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
       } catch (error) {
         // Swallowed locally, never recovered by calling next() again: a failed marker write
         // just means the question is asked again next turn, not that the turn breaks or the
         // prompt is submitted twice.
-        logSkip(dollar, 'prompt.submit:bootstrap', error);
+        logSkip(io, 'prompt.submit:bootstrap', error);
       }
     }
     return result;
   });
 }
 
+type AnyHook = (io: any, event: any, next: (e: any) => Promise<any>) => Promise<any>;
+
+/**
+ * Runs `hooks` as one chain, first outermost, the way separate registrations would nest: each
+ * hook's `next` is the rest of the chain, and the last one's `next` is core.
+ */
+export function chain(hooks: AnyHook[], io: any, event: any, next: (e: any) => Promise<any>): Promise<any> {
+  const run = (index: number, e: any): Promise<any> =>
+    index === hooks.length ? next(e) : hooks[index](io, e, (inner: any) => run(index + 1, inner));
+  return run(0, event);
+}
+
+/**
+ * Registers each event ONCE. Claude Code's loader refuses a module that registers one event twice
+ * without a matcher ("on(\"tool.call\") is registered twice without a matcher"), so the features
+ * above add their hooks to a per-event list here and each event gets a single literal that runs
+ * that list in the order the features were added (observer, rules, injection, bootstrap, drift).
+ */
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
-  registerObserver(on);
-  registerRules(on);
-  registerInjection(on);
-  registerBootstrap(on);
-  registerDrift(on);
+  const hooks: Record<string, AnyHook[]> = {};
+  const add = ((event: string, hook: AnyHook) => {
+    (hooks[event] ??= []).push(hook);
+  }) as unknown as On;
+  registerObserver(add);
+  registerRules(add);
+  registerInjection(add);
+  registerBootstrap(add);
+  registerDrift(add);
+  on('tool.call', async ($: any, event: any, next: any) => chain(hooks['tool.call'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('tool.check', async ($: any, event: any, next: any) => chain(hooks['tool.check'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('prompt.submit', async ($: any, event: any, next: any) => chain(hooks['prompt.submit'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
 };

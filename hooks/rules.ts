@@ -90,12 +90,12 @@ export type InstalledArtifact = {
  * missing or corrupt registry, or a missing/malformed artifact.json, yields fewer rows rather
  * than throwing, and every caller gets that behaviour identically instead of re-deriving it.
  */
-export async function loadInstalled(dollar: any, home: string, type: string): Promise<InstalledArtifact[]> {
+export async function loadInstalled(io: any, home: string, type: string): Promise<InstalledArtifact[]> {
   const registry = `${home}/installed.json`;
-  if (!(await dollar.fs.exists(registry))) return [];
+  if (!(await io.fs.exists(registry))) return [];
   let entries: Array<{ id: string; type: string }> = [];
   try {
-    entries = JSON.parse(await dollar.fs.read(registry));
+    entries = JSON.parse(await io.fs.read(registry));
   } catch {
     return [];
   }
@@ -103,9 +103,9 @@ export async function loadInstalled(dollar: any, home: string, type: string): Pr
   for (const entry of entries) {
     if (entry.type !== type) continue;
     const path = `${home}/artifacts/${entry.id}/artifact.json`;
-    if (!(await dollar.fs.exists(path))) continue;
+    if (!(await io.fs.exists(path))) continue;
     try {
-      out.push(JSON.parse(await dollar.fs.read(path)));
+      out.push(JSON.parse(await io.fs.read(path)));
     } catch {
       continue;
     }
@@ -114,9 +114,9 @@ export async function loadInstalled(dollar: any, home: string, type: string): Pr
 }
 
 /** Installed rule artifacts, plus the built-ins. Missing or malformed files are ignored. */
-export async function loadRules(dollar: any, home: string): Promise<Rule[]> {
+export async function loadRules(io: any, home: string): Promise<Rule[]> {
   const rules = [...BUILT_IN_RULES];
-  const artifacts = await loadInstalled(dollar, home, 'rule');
+  const artifacts = await loadInstalled(io, home, 'rule');
   for (const artifact of artifacts) {
     rules.push({
       artifactId: String(artifact.id),

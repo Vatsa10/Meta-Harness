@@ -92,12 +92,35 @@ def on_calls(src: str) -> list[tuple[int, list[str]]]:
 
 
 def violations(src: str) -> list[str]:
+    """Every loader refusal met live in Claude Code 2.1.283, checked against the source."""
     bad = []
+    seen: dict[str, int] = {}
     for line, args in on_calls(src):
         if len(args) != 2 or not re.fullmatch(r"(['\"]).+\1", args[0]):
             bad.append(f"line {line}: not on('<event>', hook): {args!r}")
-        elif not LITERAL.match(args[1]):
-            bad.append(f"line {line}: hook is not a function literal: {args[1][:80]!r}")
+            continue
+        hook = args[1]
+        if not LITERAL.match(hook):
+            bad.append(f"line {line}: hook is not a function literal: {hook[:80]!r}")
+            continue
+        event = args[0][1:-1]
+        if event in seen:
+            bad.append(f"line {line}: on({event!r}) registered twice without a matcher (first at {seen[event]})")
+        seen.setdefault(event, line)
+        # "$ itself is passed as an argument (bound, passed, spread, returned or read)": the hook's
+        # first parameter may only appear as `$.noun.event(`.
+        params = re.match(r"^(?:async\s+)?\(?\s*([A-Za-z_$][\w$]*)", hook)
+        if params:
+            name = re.escape(params.group(1))
+            body = hook[params.end():]
+            for use in re.finditer(rf"(?<![\w$.]){name}(?![\w$])", body):
+                if not re.match(rf"{name}\.[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$]*\(", body[use.start():]):
+                    bad.append(f"line {line}: {params.group(1)} used other than as $.noun.event(...)")
+                    break
+            # "$.env.get takes a literal name as its first argument"
+            for get in re.finditer(rf"{name}\.env\.get\(\s*([^)]*)\)", body):
+                if not re.fullmatch(r"(['\"])[A-Za-z_][\w]*\1", get.group(1).strip()):
+                    bad.append(f"line {line}: $.env.get with a non-literal name: {get.group(1)!r}")
     return bad
 
 
@@ -105,19 +128,22 @@ def _modules() -> list[Path]:
     return [p for p in HOOKS.glob("*.ts") if ".test." not in p.name]
 
 
-def test_every_on_hook_is_a_function_literal():
+def test_every_on_hook_is_a_loadable_function_literal():
     found = 0
     for path in _modules():
         src = path.read_text(encoding="utf-8")
         found += len(on_calls(src))
         assert violations(src) == [], f"{path.name}: {violations(src)}"
-    assert found >= 8, "expected the harness's registrations to be found"
+    assert found >= 3, "expected the harness's registrations to be found"
 
 
-def test_checker_rejects_wrapper_calls():
-    bad = "on('tool.call', afterCall('tool.call', async (d, e, o) => {}));"
-    assert violations(bad)
+def test_checker_rejects_what_the_loader_rejects():
+    assert violations("on('tool.call', afterCall('tool.call', async (d, e, o) => {}));")
     assert violations("on('x', safely('x', async () => 1));")
-    good = "on('tool.call', async (dollar: any, event: any, next: any) => guard(next));"
+    good = "on('tool.call', async ($: any, event: any, next: any) => run({ r: (p) => $.fs.read(p) }, next));"
     assert violations(good) == []
     assert violations("register(on); // on(x)") == []
+    assert violations("on('a', async ($) => 1);\non('a', async ($) => 2);")
+    assert violations("on('a', async ($, e, next) => helper($, e, next));")
+    assert violations("on('a', async ($, e, next) => $.env.get(name));")
+    assert violations("on('a', async ($, e, next) => $.env.get('HOME'));") == []
