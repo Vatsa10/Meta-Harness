@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -40,3 +41,49 @@ def test_this_project_with_zero_matches_still_prints_the_json_report_verbatim_on
     report = json.loads(captured.out)
     assert code == 0
     assert report["sessions"] == 0
+
+
+# --- fix round 2: `meta-harness waste` also writes <harness_home>/waste.json ------------------
+
+def test_waste_writes_waste_json_under_harness_home(tmp_path, capsys, monkeypatch):
+    harness_home = tmp_path / "harness"
+    monkeypatch.setenv("META_HARNESS_HOME", str(harness_home))
+    code = main(["waste", "--json", "--home", str(tmp_path / "nothing")])
+    capsys.readouterr()
+    assert code == 0
+    written = json.loads((harness_home / "waste.json").read_text(encoding="utf-8"))
+    assert written["sessions"] == 0
+    assert "corrections" in written
+
+
+def test_waste_writes_waste_json_in_human_mode_too(tmp_path, capsys, monkeypatch):
+    harness_home = tmp_path / "harness"
+    monkeypatch.setenv("META_HARNESS_HOME", str(harness_home))
+    code = main(["waste", "--home", str(tmp_path / "nothing")])
+    capsys.readouterr()
+    assert code == 0
+    assert (harness_home / "waste.json").is_file()
+
+
+def test_waste_json_write_uses_a_temp_file_and_rename(tmp_path, capsys, monkeypatch):
+    harness_home = tmp_path / "harness"
+    monkeypatch.setenv("META_HARNESS_HOME", str(harness_home))
+    main(["waste", "--json", "--home", str(tmp_path / "nothing")])
+    capsys.readouterr()
+    leftover_temp_files = list(harness_home.glob(".waste.json.*.tmp"))
+    assert leftover_temp_files == []
+    assert (harness_home / "waste.json").is_file()
+
+
+def test_waste_json_write_failure_still_prints_the_report_and_exits_0(tmp_path, capsys, monkeypatch):
+    # Point META_HARNESS_HOME at a path that can never be a directory (it is a file), so
+    # home.mkdir(...) raises and the write is expected to fail open.
+    blocked = tmp_path / "not_a_directory"
+    blocked.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("META_HARNESS_HOME", str(blocked))
+    code = main(["waste", "--json", "--home", str(tmp_path / "nothing")])
+    captured = capsys.readouterr()
+    assert code == 0
+    report = json.loads(captured.out)
+    assert report["sessions"] == 0
+    assert "waste.json" in captured.err

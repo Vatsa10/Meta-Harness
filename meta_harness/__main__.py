@@ -394,6 +394,25 @@ def _command_learn(args) -> int:
     return 0
 
 
+def _write_waste_json(report: dict) -> None:
+    """Write the report to <harness_home>/waste.json, so a first-run hook that reads it has
+    something to read: `meta-harness waste --json` alone only ever printed to stdout. Writes
+    via a temp file plus an atomic rename so a concurrent reader never sees a half-written
+    file, and fails open - a write failure here must never stop the command from printing its
+    report and exiting 0."""
+    from .harness_store import harness_home
+
+    try:
+        home = harness_home()
+        home.mkdir(parents=True, exist_ok=True)
+        target = home / "waste.json"
+        tmp = home / f".waste.json.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as error:
+        print(f"warning: could not write waste.json ({error}); continuing", file=sys.stderr)
+
+
 def _command_waste(args: argparse.Namespace) -> int:
     from .cc_history import project_slug
     from .waste import waste_report
@@ -404,6 +423,7 @@ def _command_waste(args: argparse.Namespace) -> int:
     project = project_slug(Path.cwd()) if args.this_project else None
     home = Path(args.home) if args.home else None
     report = waste_report(home=home, project=project, limit=args.limit, since=args.since)
+    _write_waste_json(report)
 
     if args.this_project and report["sessions"] == 0:
         # A slug with no matches is silent failure dressed up as "nothing to report" -
