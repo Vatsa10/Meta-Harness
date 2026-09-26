@@ -30,6 +30,7 @@ import {
   type SessionState,
   wasRejected,
 } from './rules.js';
+import { driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
 
 export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -509,6 +510,44 @@ export function registerInjection(on: On): void {
 }
 
 /**
+ * Says once per stretch, as model-only context, that a stretch of tool calls has run long.
+ *
+ * Disabled unless `<harnessHome>/drift.json` explicitly enables it (see `hooks/drift.ts`); the
+ * ship gate refused every judge, so by default this counts calls and says nothing.
+ *
+ * `tool.call` uses `afterCall`: counting needs nothing from the outcome, but `afterCall` calls
+ * `next` exactly once, up front, and returns its outcome untouched, so a throw in the counting
+ * can never re-run the tool or alter its result. `prompt.submit` uses `safely`: the note is
+ * attached BEFORE `next`, and `safely` falls through to `next(event)` exactly once if anything
+ * before it throws, never a second time after. The note is ATTACHED to `context`, never written
+ * to `prompt.section`, whose return replaces a system-prompt section.
+ */
+export function registerDrift(on: On): void {
+  let count = 0;
+  let warned = false;
+
+  on('tool.call', afterCall('tool.call:drift', async () => {
+    count += 1;
+  }));
+
+  on('prompt.submit', safely('prompt.submit:drift', async (dollar, event: any, next) => {
+    const stretch = count;
+    const alreadyWarned = warned;
+    // The user speaking ends the stretch whether or not a note goes out, and whether or not the
+    // config can be read.
+    if (userSpoke(event)) {
+      count = 0;
+      warned = false;
+    }
+    if (alreadyWarned) return next(event);
+    const config = await loadDriftConfig(dollar, harnessHome(dollar));
+    if (!shouldWarn(stretch, config)) return next(event);
+    if (!userSpoke(event)) warned = true;
+    return next({ ...event, context: [...(event?.context ?? []), driftNote(stretch)] });
+  }));
+}
+
+/**
  * Says once, on the first `prompt.submit` after install, what wrong-direction work has cost so
  * far, then never again: `<harnessHome>/bootstrap.json` is the marker. Presence of that file
  * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
@@ -585,4 +624,5 @@ export const register: Register = (on: On, options: PluginOptions) => {
   registerRules(on);
   registerInjection(on);
   registerBootstrap(on);
+  registerDrift(on);
 };
