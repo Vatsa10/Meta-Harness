@@ -76,10 +76,32 @@ async function main() {
       // A mid-sentence mention of "stop": matching anywhere in the text (rather than only at
       // the start) would misfire on this.
       'can you help me figure out why the retries never stop?',
+      // Fix round 2 finding 4: the object must plausibly be a command, tool or file — a
+      // pronoun or a bare determiner names nothing, so these must ALSO return null, not a rule
+      // that denies every Bash call containing the English word "that" or "the".
+      'Stop doing that',
+      'stop using the',
     ];
     for (const text of mustNotMatch) {
       const rule = parseStopInstruction(text);
       assert.equal(rule, null, `must not be parsed as a stop instruction: ${JSON.stringify(text)}`);
+    }
+  }
+
+  // --- 2b. fix round 2 finding 4: the PLAIN IMPERATIVE (not just the -ing form) must also parse ---
+  {
+    const mustMatch: Array<[string, string]> = [
+      ["don't use git push --force", 'git'],
+      ['never call the deploy script', 'deploy'],
+      ["don't run pytest", 'pytest'],
+    ];
+    for (const [text, expectedPattern] of mustMatch) {
+      const rule = parseStopInstruction(text);
+      assert.ok(rule, `expected a rule to be parsed from: ${JSON.stringify(text)}`);
+      assert.equal(
+        rule!.pattern, expectedPattern,
+        `expected pattern "${expectedPattern}" from ${JSON.stringify(text)}, got: ${rule!.pattern}`,
+      );
     }
   }
 
@@ -101,9 +123,9 @@ async function main() {
     assert.equal(allowed.decision, 'allow', 'an unrelated call must not be denied by the session rule');
   }
 
-  // --- 3b. end-to-end with the brief's literal example: both `pytest tests/` and `pytest -q`
-  //         are denied, because the dropped "without -q" qualifier means the rule blocks pytest
-  //         entirely, in every form, and says so ---
+  // --- 3b. fix round 2 finding 6 (reversing an earlier ruling): "stop running pytest without
+  //         -q" denies `pytest tests/` but ALLOWS `pytest -q` and `pytest -q tests/` — the
+  //         qualifier is now captured as a `requires` flag, not dropped into a blanket denial ---
   {
     const files = new Map<string, string>();
     const dollar = makeFakeDollar(files);
@@ -112,20 +134,64 @@ async function main() {
 
     await handlers['prompt.submit'][0](dollar, promptSubmit('stop running pytest without -q'), async (e: any) => e);
 
-    const deniedA = await handlers['tool.check'][0](
+    const denied = await handlers['tool.check'][0](
       dollar, { tool: 'Bash', input: { command: 'pytest tests/' } }, async () => ({ decision: 'allow' }),
     );
-    assert.equal(deniedA.decision, 'deny', '"pytest tests/" must be denied: it contains the blocked token');
-    assert.ok(/pytest/i.test(deniedA.reason ?? ''), `reason must name what was blocked, got: ${deniedA.reason}`);
+    assert.equal(denied.decision, 'deny', '"pytest tests/" (no -q) must be denied');
+    assert.ok(/pytest/i.test(denied.reason ?? ''), `reason must name what was blocked, got: ${denied.reason}`);
 
-    const deniedB = await handlers['tool.check'][0](
+    const allowedBare = await handlers['tool.check'][0](
       dollar, { tool: 'Bash', input: { command: 'pytest -q' } }, async () => ({ decision: 'allow' }),
     );
     assert.equal(
-      deniedB.decision, 'deny',
-      '"pytest -q" must ALSO be denied: the qualifier "without -q" could not be represented, so the rule ' +
-      'honestly blocks pytest in every form rather than pretending to allow the qualified case',
+      allowedBare.decision, 'allow',
+      '"pytest -q" — the exact command the human asked to KEEP — must be ALLOWED, not blocked',
     );
+
+    const allowedWithArgs = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest -q tests/' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(allowedWithArgs.decision, 'allow', '"pytest -q tests/" must also be allowed: it still contains -q');
+  }
+
+  // --- 3c: a qualifier this mechanism genuinely cannot represent (not a "without X" flag)
+  //         still falls back to the honest blanket denial, in every form ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    await handlers['prompt.submit'][0](dollar, promptSubmit("stop running pytest unless it's urgent"), async (e: any) => e);
+
+    const denied = await handlers['tool.check'][0](
+      dollar, { tool: 'Bash', input: { command: 'pytest -q' } }, async () => ({ decision: 'allow' }),
+    );
+    assert.equal(denied.decision, 'deny', 'an unrepresentable qualifier must still deny the pattern in every form');
+    assert.ok(/in any form/i.test(denied.reason ?? ''), `reason must say so honestly, got: ${denied.reason}`);
+  }
+
+  // --- 3d. finding 3: a FULLY populated PromptSubmitInput reaches core with every field intact ---
+  {
+    const files = new Map<string, string>();
+    const dollar = makeFakeDollar(files);
+    const { on, handlers } = makeOn();
+    registerRules(on as any);
+
+    const fullEvent = {
+      text: 'stop running pytest',
+      wait: true,
+      origin: { user: {} },
+      context: ['an earlier context entry'],
+      attachments: [{ type: 'image' as const, mediaType: 'image/png' }],
+      turnId: 'turn-9',
+    };
+    let forwarded: any = null;
+    await handlers['prompt.submit'][0](dollar, fullEvent, async (e: any) => {
+      forwarded = e;
+      return { text: e.text, context: e.context, origin: e.origin };
+    });
+    assert.deepEqual(forwarded, fullEvent, 'this handler must never modify the event, field for field');
   }
 
   // --- 4. the session rule is not written to installed.json ---

@@ -14,6 +14,17 @@ export type Rule = {
   threshold?: number;
 };
 
+export type SessionRule = {
+  tool: string;
+  pattern: string;
+  /** The one flag/token that, if PRESENT in the call, means the rule allows it. Captures a
+   * "without <flag>" qualifier ("stop running pytest without -q" denies pytest unless the call
+   * also contains "-q"): the qualifier is representable, so it narrows the rule instead of
+   * being dropped into a blanket denial. Absent when the human's qualifier (if any) could not
+   * be represented this way, in which case the rule denies its pattern unconditionally. */
+  requires?: string;
+};
+
 export type SessionState = {
   readPaths: Set<string>;
   /** How many times each exact tool+input call has already been allowed this session. */
@@ -22,7 +33,7 @@ export type SessionState = {
    * searchable snippet of the input so a later mention of the same command can clear it. */
   rejected?: Map<string, string>;
   /** "Stop doing X" rules added from the human's own words, in effect for this session only. */
-  sessionRules?: Array<{ tool: string; pattern: string }>;
+  sessionRules?: SessionRule[];
 };
 
 /** The identity of one tool call, for counting exact repeats. Input order is whatever the
@@ -175,54 +186,92 @@ export function wasRejected(state: SessionState, tool: string, input: unknown): 
 
 /**
  * A conservative leading-verb parse: text must OPEN with "stop"/"don't"/"never" AND be
- * immediately followed by one of a fixed, small set of ACTION verbs (running/using/calling/
- * doing/touching/editing/deleting) before anything counts as an instruction's object.
+ * immediately followed by one of a fixed, small set of ACTION verbs — a gerund (running/using/
+ * calling/doing/touching/editing/deleting/pushing) OR the plain imperative (run/use/call/do/
+ * touch/edit/delete/push) — before anything counts as an instruction's object.
  *
  * Matching anywhere in the text, or treating the action verb as optional, both let ordinary
  * prose through as if it were an instruction: "don't worry about it", "don't know why this
  * fails", "never mind" and "Don't forget to update the README" all open with a trigger word but
  * name no actionable target, and "stop" alone or "stop, that's wrong" have no object at all.
  * Requiring one of these specific verbs, immediately after the trigger word, is what tells an
- * instruction ("stop running X") apart from those — none of the four contains "running", "using",
- * "calling", "doing", "touching", "editing" or "deleting" in that position, so none matches.
+ * instruction ("stop running X") apart from those. Accepting the bare imperative alongside the
+ * gerund is what lets "don't use git push --force", "never call the deploy script" and "don't
+ * run pytest" parse at all — an earlier version only accepted the -ing form and silently missed
+ * every plain-imperative instruction.
  */
-const STOP_VERB = /^\s*(?:stop|don'?t|never)\s+(running|using|calling|doing|touching|editing|deleting)\s+(.+)/i;
+const STOP_VERB =
+  /^\s*(?:stop|don'?t|never)\s+(running|using|calling|doing|touching|editing|deleting|pushing|run|use|call|do|touch|edit|delete|push)\s+(.+)/i;
 
 /** Verbs whose object is a file or a piece of code rather than a shell command. */
-const EDIT_LIKE_VERBS = new Set(['editing', 'touching', 'deleting']);
+const EDIT_LIKE_VERBS = new Set(['editing', 'touching', 'deleting', 'edit', 'touch', 'delete']);
 
-/** Words introducing a qualifier this mechanism cannot represent ("pytest WITHOUT -q"): the
- * pattern is cut before the qualifier rather than including words that would make the pattern
- * match nothing real. */
-const QUALIFIER = /\s+(?:without|unless|except|only if|if)\b/i;
+/** A determiner is never itself the object ("the deploy script" -> "deploy script"). */
+const LEADING_DETERMINER = /^(?:the|a|an)\s+(?=\S)/i;
 
-/** The rule's pattern: the object's leading token, with any qualifier this mechanism cannot
- * represent dropped rather than encoded into a pattern that would match no real call. */
-function leadingToken(rest: string): string {
-  const beforeQualifier = rest.split(QUALIFIER)[0] ?? '';
-  const token = beforeQualifier.trim().split(/\s+/)[0] ?? '';
-  return token.replace(/["'.,?!]+$/g, '');
+/** Function words — pronouns, determiners, catch-all nouns — that name no actual command, tool
+ * or file: "Stop doing that" and "stop using the" must deny nothing, not deny every call whose
+ * input happens to contain the English word "that" or "the". */
+const FUNCTION_WORDS = new Set([
+  'that', 'this', 'it', 'the', 'a', 'an', 'those', 'these', 'them', 'they', 'there', 'here',
+  'everything', 'something', 'anything', 'nothing', 'things', 'stuff', 'that\'s', 'it\'s',
+]);
+
+/** A plausible command name, flag or path: word/path characters only, and not a bare function
+ * word — "pytest", "git", "-q" and "deploy" all pass; "that" and "the" do not. */
+function isPlausibleObject(token: string): boolean {
+  if (!token) return false;
+  if (FUNCTION_WORDS.has(token.toLowerCase())) return false;
+  return /^[A-Za-z0-9\-][\w.\-/]*$/.test(token);
+}
+
+/** Words introducing a qualifier this mechanism cannot represent as a `requires` flag ("pytest
+ * UNLESS it's urgent"): the pattern is cut before the qualifier rather than including words that
+ * would make the pattern match nothing real, and `tool.check`'s denial reason says so. */
+const UNREPRESENTABLE_QUALIFIER = /\s+(?:unless|except|only if|if)\b/i;
+
+/** A "without <flag>" qualifier IS representable: it becomes `requires`, so `tool.check` can
+ * deny the pattern only when that flag is absent, instead of denying it in every form — denying
+ * `pytest -q` outright, the exact command the human asked to KEEP, was the wrong call. */
+const WITHOUT_QUALIFIER = /\s+without\s+(\S+)/i;
+
+/** The rule's object: its leading token (a plausible command/flag/path only — see
+ * `isPlausibleObject`), plus the flag a "without X" qualifier requires to be present, when the
+ * human's phrasing carried one. Returns null when no plausible object can be found at all. */
+function parseObject(rest: string): { pattern: string; requires?: string } | null {
+  const cleaned = rest.trim().replace(LEADING_DETERMINER, '');
+
+  const withoutMatch = WITHOUT_QUALIFIER.exec(cleaned);
+  const requires = withoutMatch ? withoutMatch[1].replace(/["'.,?!]+$/g, '') : undefined;
+  const beforeQualifier = withoutMatch
+    ? cleaned.slice(0, withoutMatch.index)
+    : (cleaned.split(UNREPRESENTABLE_QUALIFIER)[0] ?? cleaned);
+
+  const token = (beforeQualifier.trim().split(/\s+/)[0] ?? '').replace(/["'.,?!]+$/g, '');
+  if (!isPlausibleObject(token)) return null;
+  return requires ? { pattern: token, requires } : { pattern: token };
 }
 
 /** Parses a "stop doing X" / "don't run X again" instruction out of free text, or returns null
  * for anything that is not unambiguously such an instruction (a question, a description, an
- * acknowledgement with no actionable target, etc). The returned `pattern` is deliberately just
- * the object's leading token (e.g. "pytest", not "pytest without -q"): a qualifier this
- * mechanism cannot represent is dropped rather than baked into a pattern that would deny nothing
- * real; `tool.check`'s denial reason says so explicitly, so the human sees exactly what is
- * actually blocked. */
-export function parseStopInstruction(text: string): { tool: string; pattern: string } | null {
+ * acknowledgement with no actionable target, an object that is a pronoun/determiner/catch-all
+ * rather than a command, etc). The returned `pattern` is deliberately just the object's leading
+ * token (e.g. "pytest", not "pytest without -q"): a "without X" qualifier becomes `requires`
+ * instead (see `parseObject`), and any other unrepresentable qualifier is dropped rather than
+ * baked into a pattern that would deny nothing real — `tool.check`'s denial reason says so
+ * explicitly either way, so the human sees exactly what is actually blocked. */
+export function parseStopInstruction(text: string): SessionRule | null {
   const match = STOP_VERB.exec(text ?? '');
   if (!match) return null;
   const verb = match[1].toLowerCase();
-  const pattern = leadingToken(match[2] ?? '');
-  if (!pattern) return null;
+  const object = parseObject(match[2] ?? '');
+  if (!object) return null;
   const tool = EDIT_LIKE_VERBS.has(verb) ? 'Edit' : 'Bash';
-  return { tool, pattern };
+  return { tool, ...object };
 }
 
 /** Adds a session-scoped rule parsed from the human's own words. Never touches the installed store. */
-export function addSessionRule(state: SessionState, rule: { tool: string; pattern: string }): void {
+export function addSessionRule(state: SessionState, rule: SessionRule): void {
   if (!state.sessionRules) state.sessionRules = [];
   state.sessionRules.push(rule);
 }
