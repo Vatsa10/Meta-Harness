@@ -6,14 +6,22 @@ The correction labels `iter_stretches` produces are noisy - a hand-labelled audi
 hand-labelled gold set instead (correction-gold.json: {session_id, project, start_turn, calls,
 label, why}, label "a" = genuine correction, "c" = not a correction) and scores against that.
 
-A stretch is counted as a ground-truth POSITIVE only when it joins a gold "a" record on
-(session_id, start_turn). Every other stretch - a gold "c" match, or one the detector never
-flagged and that has no gold record at all - is a NEGATIVE. Some gold keys no longer exist on
-disk (the transcript store rotates); those are skipped and reported, not treated as either.
+The join is by CONTAINMENT, not exact match: a gold record's (session_id, start_turn) is joined
+to the stretch, in that same session, with the largest start_turn that is still <= the gold
+record's start_turn (stretches are contiguous and non-overlapping within a session, so that is
+the stretch whose span the gold turn falls inside). A stretch splitter fix can move a gold
+turn into an earlier, merged stretch - it does not delete it - so an exact-match join would
+silently miscount some genuine corrections as unmatched, or worse, as a false positive on the
+wrong stretch. A stretch is a ground-truth POSITIVE if ANY gold record it contains is labelled
+"a"; it is a NEGATIVE otherwise (a gold "c" only, or no gold record at all - which is the case
+for the vast majority of stretches, since gold covers only what was hand-labelled). A gold
+record whose session has no stretch starting at or before its turn fails to join at all, and is
+reported, not silently dropped.
 """
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import statistics
 import sys
@@ -25,8 +33,9 @@ from meta_harness.drift import judge_knn, judge_overlap, shape
 from meta_harness.waste import iter_stretches
 
 # Fixed location of the hand-labelled gold set (an sdd planning artifact, not part of the
-# package - shared across every lane's worktree, so it is referenced by its one true path
-# rather than something relative to this file).
+# package - shared across every lane's worktree). Overridable via `evaluate(gold_path=...)` or
+# `--gold` so a missing/relocated file is the caller's problem to fix, not this tool's to
+# silently paper over.
 GOLD_PATH = Path(
     r"D:\Files\Vatsa\Projects\Meta-Harness\.superpowers\sdd\2026-09-26-drift-and-waste"
     r"\correction-gold.json"
@@ -39,6 +48,11 @@ MIN_CALLS_SAVED: int = 3
 # either judge, so it is excluded from evaluation entirely rather than counted as a miss.
 JUDGE_MIN_CALLS = 8
 
+# The model judge (meta_harness.drift.judge_model) needs a live `complete` callable and cannot
+# be scored offline against a transcript store - there is nothing to inject it with here. It is
+# reported as unevaluated, not silently left out of the table.
+UNEVALUATED_JUDGES = ("model",)
+
 
 def gate(precision: float, median_calls_saved: float) -> bool:
     """Whether a judge ships. Stated before tuning, and not softened after seeing the numbers:
@@ -47,12 +61,18 @@ def gate(precision: float, median_calls_saved: float) -> bool:
     return precision >= PRECISION_BAR and median_calls_saved >= MIN_CALLS_SAVED
 
 
-def _load_gold(gold_path: Path = GOLD_PATH) -> list[dict[str, Any]]:
+class GoldFileMissing(RuntimeError):
+    """Raised when the gold set can't be read - never treated as "zero positives"."""
+
+
+def _load_gold(gold_path: Path) -> list[dict[str, Any]]:
+    if not gold_path.exists():
+        raise GoldFileMissing(f"gold file not found: {gold_path}")
     try:
         with gold_path.open(encoding="utf-8") as handle:
             return json.load(handle)
-    except (OSError, ValueError):
-        return []
+    except ValueError as exc:
+        raise GoldFileMissing(f"gold file at {gold_path} is not valid JSON: {exc}") from exc
 
 
 def _transcripts(root: Path, limit: int | None) -> list[Path]:
@@ -77,20 +97,60 @@ def _all_stretches(paths: list[Path]) -> list:
     return stretches
 
 
-def evaluate(judge_name: str, home: Path | None = None, limit: int | None = None) -> dict[str, Any]:
+def _join_gold_by_containment(gold: list[dict[str, Any]], stretches: list) -> dict[str, Any]:
+    """Join each gold record to the stretch, in the same session, that contains its start_turn:
+    the stretch with the largest start_turn <= the gold record's start_turn. Returns the set of
+    stretch identities that are ground-truth positive, plus join accounting: how many gold
+    records joined, how many joined to a DIFFERENT start_turn than their own (moved by a
+    splitter change), and the records that failed to join at all.
+    """
+    by_session: dict[str, list] = collections.defaultdict(list)
+    for s in stretches:
+        by_session[s.session_id].append(s)
+    for entries in by_session.values():
+        entries.sort(key=lambda s: s.start_turn)
+
+    contained_labels: dict[int, list[str]] = collections.defaultdict(list)
+    moved = 0
+    failed: list[dict[str, Any]] = []
+
+    for record in gold:
+        candidates = by_session.get(record["session_id"], [])
+        containing = None
+        for s in candidates:
+            if s.start_turn <= record["start_turn"]:
+                containing = s
+            else:
+                break
+        if containing is None:
+            failed.append(record)
+            continue
+        if containing.start_turn != record["start_turn"]:
+            moved += 1
+        contained_labels[id(containing)].append(record["label"])
+
+    positive_ids = {stretch_id for stretch_id, labels in contained_labels.items() if "a" in labels}
+    matched = len(gold) - len(failed)
+    return {
+        "positive_ids": positive_ids,
+        "matched": matched,
+        "moved": moved,
+        "failed": failed,
+    }
+
+
+def evaluate(judge_name: str, home: Path | None = None, limit: int | None = None,
+             gold_path: Path = GOLD_PATH) -> dict[str, Any]:
     """Score one judge ("overlap" or "knn") against the hand-labelled gold set, not against the
-    noisy `ended_by` label. Returns fired/corrections/caught/recall/precision/median_calls_saved
-    and whether the judge ships, plus how many gold records had no matching stretch on disk."""
+    noisy `ended_by` label. Returns fired/corrections/caught/recall/precision/median_calls_saved,
+    whether the judge ships, and the gold join accounting (matched/moved/failed)."""
     root = Path(home) if home is not None else claude_home() / "projects"
     paths = _transcripts(root, limit)
     stretches = _all_stretches(paths)
 
-    gold = _load_gold()
-    gold_by_key = {(record["session_id"], record["start_turn"]): record["label"] for record in gold}
-
-    on_disk_keys = {(s.session_id, s.start_turn) for s in stretches}
-    matched_gold = {key for key in gold_by_key if key in on_disk_keys}
-    gold_skipped = len(gold_by_key) - len(matched_gold)
+    gold = _load_gold(gold_path)
+    join = _join_gold_by_containment(gold, stretches)
+    positive_ids = join["positive_ids"]
 
     # Build the kNN training index once, tagged by session, for leave-one-session-out lookups.
     knn_index_by_session: dict[str, list] = {}
@@ -109,9 +169,7 @@ def evaluate(judge_name: str, home: Path | None = None, limit: int | None = None
         if n < JUDGE_MIN_CALLS:
             continue
 
-        key = (s.session_id, s.start_turn)
-        label = gold_by_key.get(key)
-        ground_truth_positive = label == "a"
+        ground_truth_positive = id(s) in positive_ids
 
         first_fire = None
         if judge_name == "overlap":
@@ -151,8 +209,10 @@ def evaluate(judge_name: str, home: Path | None = None, limit: int | None = None
         "precision": precision,
         "median_calls_saved": median_calls_saved,
         "ships": gate(precision, median_calls_saved),
-        "gold_skipped": gold_skipped,
-        "gold_total": len(gold_by_key),
+        "gold_total": len(gold),
+        "gold_matched": join["matched"],
+        "gold_moved": join["moved"],
+        "gold_failed": len(join["failed"]),
     }
 
 
@@ -160,9 +220,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--gold", type=Path, default=GOLD_PATH, dest="gold_path")
     args = parser.parse_args(argv)
 
-    rows = [evaluate(name, home=args.home, limit=args.limit) for name in ("overlap", "knn")]
+    try:
+        rows = [evaluate(name, home=args.home, limit=args.limit, gold_path=args.gold_path)
+                for name in ("overlap", "knn")]
+    except GoldFileMissing as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
     header = (f"{'judge':<10} {'fired':>6} {'corr':>6} {'caught':>7} {'recall':>7} "
               f"{'prec':>6} {'calls_saved':>12} {'ships':>6}")
@@ -171,10 +237,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{row['judge']:<10} {row['fired']:>6} {row['corrections']:>6} {row['caught']:>7} "
               f"{row['recall']:>7.2f} {row['precision']:>6.2f} {row['median_calls_saved']:>12} "
               f"{str(row['ships']):>6}")
+    for name in UNEVALUATED_JUDGES:
+        print(f"{name:<10} {'n/a':>6} {'n/a':>6} {'n/a':>7} {'n/a':>7} {'n/a':>6} {'n/a':>12} "
+              f"{'False':>6}  (unevaluated: needs live model calls, cannot be scored offline)")
+
     if rows:
-        skipped = rows[0]["gold_skipped"]
-        total = rows[0]["gold_total"]
-        print(f"\ngold records: {total}, skipped (no stretch on disk): {skipped}")
+        row = rows[0]
+        print(f"\ngold records: {row['gold_total']}, joined: {row['gold_matched']} "
+              f"(moved to a different stretch than their own start_turn: {row['gold_moved']}), "
+              f"failed to join: {row['gold_failed']}")
 
     return 0
 
