@@ -320,6 +320,41 @@ function isError(result: unknown): boolean {
     || ERROR_PHRASES.test(text);
 }
 
+/**
+ * Launchers stripped from the front of a Bash command before a session rule's pattern is
+ * compared: `python -m`, `python3 -m`, `py -m`, `npx`, `uv run`, `poetry run`, `pipx run`, plus a
+ * leading `env` and any `VAR=value` assignments. Takes lower-cased whitespace tokens.
+ */
+export function stripLaunchers(tokens: string[]): string[] {
+  let rest = tokens;
+  for (;;) {
+    if (rest[0] === 'env' || /^[a-z_][a-z0-9_]*=/.test(rest[0] ?? '')) {
+      rest = rest.slice(1);
+    } else if (['python', 'python3', 'py'].includes(rest[0] ?? '') && rest[1] === '-m') {
+      rest = rest.slice(2);
+    } else if (rest[0] === 'npx') {
+      rest = rest.slice(1);
+    } else if (['uv', 'poetry', 'pipx'].includes(rest[0] ?? '') && rest[1] === 'run') {
+      rest = rest.slice(2);
+    } else {
+      return rest;
+    }
+  }
+}
+
+/** The deny reason for a session rule, saying what the matching actually does. */
+export function sessionRuleReason(tool: string, rule: { pattern: string; requires?: string; flag?: string }): string {
+  const head = 'Session rule from this conversation: this blocks any';
+  if (tool !== 'Bash') {
+    return `${head} ${tool} call whose input contains "${rule.pattern}" [session-rule]`;
+  }
+  const what = `${head} Bash command whose first words are "${rule.pattern}" `
+    + '(after any launcher such as python -m, npx, uv run, poetry run, pipx run, env or VAR=x)';
+  if (rule.requires) return `${what} unless "${rule.requires}" is one of its words [session-rule]`;
+  if (rule.flag) return `${what} and "${rule.flag}" is one of its words [session-rule]`;
+  return `${what}, whatever its arguments [session-rule]`;
+}
+
 /** Observes tool.call outcomes: records errors and repeated identical calls to observed-<session>.jsonl. */
 export function registerObserver(add: On): void {
   const recent: Recent[] = [];
@@ -438,10 +473,13 @@ export function registerRules(add: On): void {
       const commandTokens = command.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
       const patternTokens = rule.pattern.toLowerCase().split(/\s+/).filter(Boolean);
 
+      // The pattern is matched against the command's first words AFTER any launcher, so a rule
+      // about `pytest` also covers `python -m pytest`, `uv run pytest`, `FOO=1 pytest`, ...
+      const programTokens = stripLaunchers(commandTokens);
       let matches: boolean;
       if (tool === 'Bash') {
         matches = patternTokens.length > 0
-          && patternTokens.every((t, i) => commandTokens[i] === t);
+          && patternTokens.every((t, i) => programTokens[i] === t);
       } else {
         const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
         matches = haystack.includes(rule.pattern.toLowerCase());
@@ -472,21 +510,7 @@ export function registerRules(add: On): void {
         if (!present) continue;
       }
 
-      return {
-        decision: 'deny',
-        reason: rule.requires
-          // Says exactly what is (and is not) blocked: only the qualified form is allowed.
-          ? `Session rule from this conversation: this blocks any ${tool} call containing `
-            + `"${rule.pattern}" UNLESS it also contains "${rule.requires}" [session-rule]`
-          : rule.flag
-          // Says exactly what is blocked: only the pattern carrying that flag.
-          ? `Session rule from this conversation: this blocks any ${tool} call starting with `
-            + `"${rule.pattern}" when it also contains "${rule.flag}" [session-rule]`
-          // No representable qualifier: says so, honestly denying the token in every form
-          // rather than pretending to be more precise than it is.
-          : `Session rule from this conversation: this blocks any ${tool} call whose input `
-            + `contains "${rule.pattern}", in any form [session-rule]`,
-      };
+      return { decision: 'deny', reason: sessionRuleReason(tool, rule) };
     }
     if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
     for (const rule of rules) {
