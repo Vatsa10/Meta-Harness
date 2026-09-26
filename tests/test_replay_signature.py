@@ -1,5 +1,7 @@
+import pytest
+
 from meta_harness.cc_history import FailureEpisode
-from meta_harness.replay import episode_signature
+from meta_harness.replay import _cause, episode_signature
 
 
 def _episode(kind="tool_error", tools=("Bash",), detail="", assistant_text=""):
@@ -49,3 +51,33 @@ def test_charmap_decode_error_still_classifies_as_decode():
 def test_bare_cp1252_mention_still_classifies_as_decode():
     episode = _episode(assistant_text="failed with cp1252")
     assert episode_signature(episode) == "tool_error:Bash:unicode-decode"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("This command requires approval", "needs-approval"),
+    ("Permission for this action was denied by the Claude Code auto mode classifier", "needs-approval"),
+    ("The user doesn't want to proceed with this tool use. The tool use was rejected", "user-rejected"),
+    ("<tool_use_error>Blocked: sleep 45 followed by: echo waited", "blocked-policy"),
+    ("bash: -c: line 1: unexpected EOF while looking for matching `'", "shell-quoting"),
+    ("Contains simple_expansion", "shell-quoting"),
+    ("Compound command changes working directory (Set-Location)", "compound-shell"),
+    ("This PowerShell command contains multiple operations. The following part requires approval", "compound-shell"),
+    ("Tab 3 is not in Claude's tab group for this session", "tab-target"),
+    ("Couldn't determine which page this action targets", "tab-target"),
+    ("File has been modified since read, either by the user or by a linter", "stale-read"),
+    ("EISDIR: illegal operation on a directory, read", "is-directory"),
+])
+def test_dominant_failure_classes_get_their_own_cause(text, expected):
+    assert _cause(text) == expected
+
+
+def test_existing_causes_are_unchanged_by_the_new_patterns():
+    # The compound-shell pattern mentions approval; it must not steal plain permission errors,
+    # and the encode/decode ordering stays load-bearing.
+    assert _cause("Permission denied") == "permission"
+    assert _cause("UnicodeEncodeError: 'charmap' codec") == "unicode-encode"
+    assert _cause("No such file or directory") == "missing-path"
+
+
+def test_cause_survives_non_ascii_error_text():
+    assert _cause("bash: ─────: command not found \U0001f600") == "missing-command"

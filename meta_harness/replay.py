@@ -27,6 +27,62 @@ ERROR_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"has not been read yet|must read.*before", "unread-edit"),
     (r"String to replace not found|old_string", "edit-mismatch"),
     (r"SyntaxError|unterminated", "syntax"),
+    # Classes that dominate real Claude Code history. Appended after the originals so the
+    # first-match rule cannot change any existing classification.
+    (r"contains multiple operations|Compound command changes working directory", "compound-shell"),
+    (r"requires approval|denied by the Claude Code auto mode classifier", "needs-approval"),
+    (r"doesn't want to proceed|tool use was rejected", "user-rejected"),
+    (r"Blocked:|blocked by a deny rule", "blocked-policy"),
+    (r"unexpected EOF while looking|simple_expansion|expansion obfuscation", "shell-quoting"),
+    (r"not in Claude's tab group|determine which page this action targets", "tab-target"),
+    (r"modified since read", "stale-read"),
+    (r"EISDIR|illegal operation on a directory", "is-directory"),
+    # Second pass: the classes that dominated the remaining "other" bucket once the eight
+    # classes above were carved out (measured against .meta-harness/history-text/episodes.jsonl).
+    # Appended last so none of the above ordering guarantees are disturbed.
+    (r"Traceback \(most recent call last\)", "python-traceback"),
+    (r"Permission to (use|read).*has been denied", "permission-denied-tool"),
+    (r"File does not exist", "missing-path"),
+    (r"is temporarily unavailable", "model-unavailable"),
+    (
+        r"InputValidationError|Workflow script file not found|No task found with ID"
+        r"|Invalid workflow script|scriptPath must be a script path|Unknown skill:"
+        r"|Task ID is required",
+        "workflow-error",
+    ),
+    (r"Failed to execute JavaScript|JavaScript execution error", "js-error"),
+    (
+        r"Error capturing screenshot|actions\[\d+\][^\n]*failed|Failed to find element"
+        r"|Failed to execute action|Error capturing zoomed screenshot"
+        r"|is not a supported form input|Can't interact with browser-internal",
+        "browser-action-failed",
+    ),
+    (r"No such tool available", "unknown-tool"),
+    (r"hook did not respond before|tool did not respond in time", "hook-timeout"),
+    (r"Found \d+ matches of the string", "edit-mismatch"),
+    (r"Python was not found|pdftoppm is not installed", "missing-command"),
+    (
+        r"node:internal/modules/(package_json_reader|run_main)|Cannot find module"
+        r"|ERR_MODULE_NOT_FOUND",
+        "module-not-found",
+    ),
+    (r'"error":\{"name":"(HttpException|McpError)"|already exists in local config', "api-error"),
+    (
+        r"fatal: (pathspec|detected dubious ownership|ambiguous argument|.*is outside repository)"
+        r"|ignored by one of your \.gitignore|docker: Error response from daemon",
+        "git-error",
+    ),
+    (r"On branch \S+\r?\nYour branch is (up to date|ahead of)|warning: in the working copy of", "git-noise"),
+    (r"npm error code|npm warn exec", "npm-error"),
+    (r"exceeds maximum allowed tokens", "output-too-large"),
+    (r"ConnectionRefusedError|connection refused|ECONNREFUSED", "connection-refused"),
+    (r"was blocked\. For security|is blocked\. This path is protected|denied by your permission", "blocked-policy"),
+    (r"FAILED |ERROR at setup of|\.{3,}F|F\.{2,}", "test-failure"),
+    (r"tab group no longer exists|Missing required parameter tabId", "tab-target"),
+    (r"needs design-system authorization", "needs-approval"),
+    (r"ENAMETOOLONG", "path-too-long"),
+    (r"error TS\d+|imported but unused", "ts-error"),
+    (r"not logged into any GitHub hosts", "gh-auth-error"),
 )
 
 
