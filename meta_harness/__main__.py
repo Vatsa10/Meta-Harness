@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shlex
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -133,6 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "origin replay gates retention")
     learn.add_argument("--model", default="opus", help="model for the proposer")
     learn.add_argument("--provider", default="claude-cli")
+
+    waste = sub.add_parser("waste", help="what wrong-direction work and repeat failure cost")
+    waste.add_argument("--this-project", action="store_true",
+                       help="only sessions whose project matches this working directory")
+    waste.add_argument("--since", default="", help="ISO date; ignore sessions older than this")
+    waste.add_argument("--limit", type=int, default=None, help="most recent N sessions")
+    waste.add_argument("--json", action="store_true", help="print the report as JSON")
+    waste.add_argument("--home", default="", help="transcript root (defaults to ~/.claude/projects)")
     return parser
 
 
@@ -393,6 +402,73 @@ def _command_learn(args) -> int:
     return 0
 
 
+def _write_waste_json(report: dict) -> None:
+    """Write the report to <harness_home>/waste.json, so a first-run hook that reads it has
+    something to read: `meta-harness waste --json` alone only ever printed to stdout. Writes
+    via a temp file plus an atomic rename so a concurrent reader never sees a half-written
+    file, and fails open - a write failure here must never stop the command from printing its
+    report and exiting 0."""
+    from .harness_store import harness_home
+
+    try:
+        home = harness_home()
+        home.mkdir(parents=True, exist_ok=True)
+        target = home / "waste.json"
+        tmp = home / f".waste.json.{os.getpid()}.tmp"
+        tmp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as error:
+        print(f"warning: could not write waste.json ({error}); continuing", file=sys.stderr)
+
+
+def _command_waste(args: argparse.Namespace) -> int:
+    from .cc_history import project_slug
+    from .waste import waste_report
+
+    if hasattr(sys.stdout, "reconfigure"):   # a project name or error may not be cp1252-safe
+        sys.stdout.reconfigure(errors="replace")
+
+    project = project_slug(Path.cwd()) if args.this_project else None
+    home = Path(args.home) if args.home else None
+    report = waste_report(home=home, project=project, limit=args.limit, since=args.since)
+    _write_waste_json(report)
+
+    if args.this_project and report["sessions"] == 0:
+        # A slug with no matches is silent failure dressed up as "nothing to report" -
+        # loud on stderr so --json's stdout stays the report, verbatim, for callers that parse it.
+        print(f"no sessions found for project slug {project!r} under "
+              f"{home or 'the default transcript store'}; this can happen from a git worktree, "
+              f"whose slug does not match its main checkout. Try running without --this-project.",
+              file=sys.stderr)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+
+    corrections = report["corrections"]
+    print(f"sessions {report['sessions']}   tool calls {report['tool_calls']:,}")
+    print()
+    print("wrong-direction work")
+    print(f"  corrections                {corrections['count']}")
+    print(f"  calls burned before you spoke  median {corrections['median']}"
+          f"  p75 {corrections['p75']}  p90 {corrections['p90']}  max {corrections['max']}")
+    print(f"  total calls burned         {corrections['calls_burned']:,}")
+    print()
+    print("repeated identical failures")
+    print(f"  wasted retries             {report['repeats']['wasted_retries']:,}"
+          f"  (in {report['repeats']['sessions_affected']} sessions)")
+    for row in report["repeats"]["top"][:5]:
+        print(f"    {row['wasted']:5d}  {row['tool']}:{row['cause']}")
+    if report["by_project"]:
+        print()
+        print("worst projects by calls burned")
+        for row in report["by_project"][:5]:
+            print(f"    {row['calls_burned']:5d}  {row['project']}  ({row['corrections']} corrections)")
+    print()
+    print(report["caveat"])
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "demo":
@@ -418,6 +494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_run(args)
     if args.command == "learn":
         return _command_learn(args)
+    if args.command == "waste":
+        return _command_waste(args)
     experience = FilesystemExperience(args.root)
     frontier_file = experience.root / "frontier.json"
     print(json.dumps({
