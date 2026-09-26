@@ -63,7 +63,7 @@ async function main() {
     assert.ok(typeof editBeforeRead.reason === 'string' && editBeforeRead.reason.includes('read-before-edit'));
 
     // Read tracked via the tool.call handler
-    await handlers['tool.call'](dollar, { tool: 'Read', input: { file_path: 'a.txt' } }, async () => ({}));
+    await handlers['tool.call'](dollar, { tool: 'Read', file_path: 'a.txt' }, async () => ({}));
 
     const editAfterRead = await handlers['tool.check'](
       dollar,
@@ -165,7 +165,7 @@ async function main() {
     const denied = await handlers['tool.check'](dollar, { tool: 'Write', input: { file_path: 'b.txt' } }, nextAllow);
     assert.equal(denied.decision, 'deny');
 
-    await handlers['tool.call'](dollar, { tool: 'Read', input: { file_path: 'b.txt' } }, async () => ({}));
+    await handlers['tool.call'](dollar, { tool: 'Read', file_path: 'b.txt' }, async () => ({}));
 
     const allowed = await handlers['tool.check'](dollar, { tool: 'Write', input: { file_path: 'b.txt' } }, nextAllow);
     assert.equal(allowed.decision, 'allow');

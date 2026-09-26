@@ -47,13 +47,45 @@ export type SessionState = {
   sessionRules?: SessionRule[];
 };
 
+/** Keys a `tool.call` event carries beside the tool's own arguments (ToolCallReserved, AgentLoop). */
+const RESERVED_TOOL_CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent']);
+
+/**
+ * The tool's own arguments on a `tool.call` event. On `tool.call` Claude Code puts them at the TOP
+ * LEVEL of the event (`e.command` for Bash, `e.file_path` for Read/Edit) beside the reserved keys;
+ * only `tool.check` nests them under `input`. An object `input` is still honoured, for fakes and in
+ * case a future engine nests them. Every `tool.call` reader goes through this, never `event.input`.
+ */
+export function toolArgs(event: unknown): Record<string, unknown> {
+  if (!event || typeof event !== 'object') return {};
+  const record = event as Record<string, unknown>;
+  if (record.input && typeof record.input === 'object' && !Array.isArray(record.input)) {
+    return record.input as Record<string, unknown>;
+  }
+  const args: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!RESERVED_TOOL_CALL_KEYS.has(key)) args[key] = value;
+  }
+  return args;
+}
+
+/** JSON with object keys sorted, so the same arguments give the same key whatever their order. */
+export function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, inner) => {
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      return Object.fromEntries(Object.keys(inner).sort().map((k) => [k, (inner as any)[k]]));
+    }
+    return inner;
+  });
+}
+
 /** The identity of one tool call, for counting exact repeats. Input order is whatever the
  * engine sends; the same call in the same session serializes the same way, which is all the
  * repeat counter needs. */
 export function callKey(event: { tool?: string; input?: Record<string, unknown> }): string {
   let input = '';
   try {
-    input = JSON.stringify(event.input ?? {});
+    input = stableStringify(event.input ?? {});
   } catch {
     input = String(event.input ?? '');
   }

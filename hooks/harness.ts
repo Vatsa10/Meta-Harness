@@ -26,6 +26,8 @@ import {
   loadRules,
   parseStopInstruction,
   rememberRejection,
+  stableStringify,
+  toolArgs,
   type Rule,
   type SessionState,
   wasRejected,
@@ -363,7 +365,8 @@ export function registerObserver(add: On): void {
   // recovery that re-entered next() would run the tool twice.
   add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call', io, event, next, async (outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
-    const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
+    const args = toolArgs(event);
+    const key = `${tool}:${stableStringify(args).slice(0, 200)}`;
 
     recent.push({ tool, key });
     if (recent.length > REPEAT_WINDOW) recent.shift();
@@ -371,7 +374,7 @@ export function registerObserver(add: On): void {
 
     const sessionId = await currentSessionId(io);
     if (repeats >= REPEAT_THRESHOLD) {
-      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: event?.input });
+      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: args });
     }
     const text = resultText((outcome as any)?.result);
     if (isError((outcome as any)?.result)) {
@@ -379,7 +382,7 @@ export function registerObserver(add: On): void {
         kind: 'tool_error',
         tool,
         cause: cause(text),
-        input: event?.input,
+        input: args,
         text: text.slice(0, 400),
       });
     }
@@ -420,12 +423,12 @@ export function registerRules(add: On): void {
   // way.
   add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:read-tracking', io, event, next, async (outcome: any) => {
     if (event?.tool === 'Read') {
-      const path = String(event?.input?.file_path ?? '');
+      const path = String(toolArgs(event).file_path ?? '');
       if (path) state.readPaths.add(path);
     }
     const text = rejectionAnnouncement(outcome);
     if (text && REJECTION_PATTERN.test(text)) {
-      rememberRejection(state, String(event?.tool ?? ''), event?.input);
+      rememberRejection(state, String(event?.tool ?? ''), toolArgs(event));
     }
   }));
 

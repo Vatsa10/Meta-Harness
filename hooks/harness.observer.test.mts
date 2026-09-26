@@ -49,7 +49,7 @@ async function main() {
     });
     assert.equal(typeof handler, 'function', 'registerObserver must register a tool.call handler');
 
-    const event = { tool: 'Bash', input: { command: 'cat missing.txt' } };
+    const event = { tool: 'Bash', tool_use_id: 'toolu_x', command: 'cat missing.txt' };
     const next = async () => ({ result: 'No such file or directory: missing.txt' });
 
     const outcome = await handler(dollar, event, next);
@@ -80,8 +80,8 @@ async function main() {
     });
 
     const failingNext = async () => ({ result: 'PermissionError: Permission denied: /etc/shadow' });
-    await handler(dollar, { tool: 'Read', input: { file_path: '/etc/shadow' } }, failingNext);
-    await handler(dollar, { tool: 'Read', input: { file_path: '/etc/shadow2' } }, failingNext);
+    await handler(dollar, { tool: 'Read', tool_use_id: 'toolu_x', file_path: '/etc/shadow' }, failingNext);
+    await handler(dollar, { tool: 'Read', tool_use_id: 'toolu_x', file_path: '/etc/shadow2' }, failingNext);
 
     const expectedPath = 'C:/fake-harness-home/observed-sess-abc123.jsonl';
     const lines = files.get(expectedPath)!.trim().split('\n');
@@ -100,7 +100,7 @@ async function main() {
     });
 
     const okNext = async () => ({ result: 'ok' });
-    await handler(dollar, { tool: 'Read', input: { file_path: 'a.txt' } }, okNext);
+    await handler(dollar, { tool: 'Read', tool_use_id: 'toolu_x', file_path: 'a.txt' }, okNext);
     assert.equal(files.size, 0, 'a clean call must not write an observation');
   }
 
@@ -114,7 +114,7 @@ async function main() {
     });
 
     const okNext = async () => ({ result: 'ok' });
-    const event = { tool: 'Bash', input: { command: 'flaky' } };
+    const event = { tool: 'Bash', tool_use_id: 'toolu_x', command: 'flaky' };
     for (let i = 0; i < 4; i += 1) {
       await handler(dollar, event, okNext);
     }
@@ -152,7 +152,7 @@ async function main() {
       calls += 1;
       return { result: 'Error: No such file or directory: missing.txt' };
     };
-    const outcome = await handler(dollar, { tool: 'Bash', input: { command: 'rm -rf build' } }, next);
+    const outcome = await handler(dollar, { tool: 'Bash', tool_use_id: 'toolu_x', command: 'rm -rf build' }, next);
     assert.equal(calls, 1, 'a failing observer must never run the tool a second time');
     assert.deepEqual(outcome, { result: 'Error: No such file or directory: missing.txt' },
       'the real outcome must still be returned when observation fails');
@@ -172,12 +172,12 @@ async function main() {
     const grepNext = async () => ({
       result: 'src/app.ts:12:  console.log("error: something happened");',
     });
-    await handler(dollar, { tool: 'Grep', input: { pattern: 'error:' } }, grepNext);
+    await handler(dollar, { tool: 'Grep', tool_use_id: 'toolu_x', pattern: 'error:' }, grepNext);
     assert.equal(files.size, 0, 'a successful search for error text must not be recorded as a failure');
 
     // The engine's own structured verdict is authoritative in both directions.
     const flagged = async () => ({ result: { is_error: true, content: 'nothing suspicious here' } });
-    await handler(dollar, { tool: 'Bash', input: { command: 'false' } }, flagged);
+    await handler(dollar, { tool: 'Bash', tool_use_id: 'toolu_x', command: 'false' }, flagged);
     assert.equal(files.size, 1, 'an is_error result must be recorded even with innocuous text');
 
     const files2 = new Map<string, string>();
@@ -187,7 +187,7 @@ async function main() {
       if (event === 'tool.call') handler2 = h;
     });
     const notFlagged = async () => ({ result: { is_error: false, content: 'Error: in a quoted log line' } });
-    await handler2(dollar2, { tool: 'Bash', input: { command: 'cat log' } }, notFlagged);
+    await handler2(dollar2, { tool: 'Bash', tool_use_id: 'toolu_x', command: 'cat log' }, notFlagged);
     assert.equal(files2.size, 0, 'is_error:false must win over error-looking text');
   }
 
