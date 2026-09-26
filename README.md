@@ -51,9 +51,22 @@ that check does not run and the recorded verdict says so. Nothing installs itsel
 
 Artifacts sit at four layers, strongest first: `rule` (a `tool.check`, costing no standing
 tokens and not ignorable) > `injection` (a prompt section, paid every turn) > `skill` >
-`doctrine`. Only `rule` and `injection` are enforced by the hooks today. That ordering is an
-argued design claim, not a measured one — `tools/prose_vs_rule.py` is the experiment that would
-test it, and it has not been run here.
+`doctrine`. Only `rule` and `injection` are enforced by the hooks today. **That ordering is this
+project's own design position — it appears nowhere in `paper.pdf`.** `tools/prose_vs_rule.py` is
+the experiment that would test it against a measured baseline, and it has not been run here.
+
+What the paper does establish (Table 3, online text classification, median/best score): a
+proposer given scores only reaches 34.6/41.3, scores plus an LLM summary reaches 34.9/38.7, and
+full raw execution traces reach 50.0/56.7. Raw trace access is the paper's key ingredient — a
+summary "may even hurt by compressing away diagnostically useful details." Appendix A.2 adds a
+second, independently evidenced principle: on TerminalBench-2 the proposer regressed six
+consecutive iterations while editing prompts and control flow, diagnosed the shared prompt edit
+as the confound, and then won with a purely additive change. Additive beats invasive.
+
+One measured negative result of our own: the paper's winning TerminalBench-2 discovery was an
+environment snapshot injected before the first model call. That does not transfer to a
+developer's own repository, where the environment is already known — 50 orientation calls across
+344 sessions on this machine. We do not build it.
 
 The hooks need Claude Code's function-hook surface, which is early access:
 
