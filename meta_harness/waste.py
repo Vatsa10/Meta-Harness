@@ -52,23 +52,19 @@ _STOP_OBJECTS = (
 _OPENING_CORRECTION_RE = re.compile(
     r"\b(no,|not what\b|wrong\b|don'?t do\b|why did you\b|i said\b"
     r"|actually,|that'?s not\b|instead of\b|you broke\b|doesn'?t work\b"
-    r"|still (broken|failing)\b)"
+    r"|still (broken|failing)\b|revert\b|undo\b|roll back\b)"
     r"|\bstop\b(?!(?:\s+\w+){0,3}\s*\b(?:" + _STOP_OBJECTS + r"))",
     re.I,
 )
-# "revert"/"undo" are checked over the WHOLE message, not just the opening: on the gold set
-# they were the rare trigger words that stayed high-precision (2 false positives in 46) even
-# said well into a message, and anchoring them cost several genuine "please revert that"
-# corrections that lead with several sentences of context first.
-_FULLTEXT_CORRECTION_RE = re.compile(r"\brevert\b|\bundo\b", re.I)
-
-# The gold set's messages were all a few hundred characters; real transcripts include some
-# messages tens of thousands of characters long (large pastes with no <pasted_content>
-# wrapper - a log dump, a whole file). Unbounded, "revert"/"undo" anywhere in one of those is
-# far more likely to be an incidental occurrence (a changelog line, a git log, a library's own
-# help text) than the human addressing the assistant, so the full-text check is capped to a
-# generous prefix rather than the entire message.
-_FULLTEXT_SCAN_CHARS = 3000
+# Fix round 3: "revert"/"undo"/"roll back" used to be checked over the WHOLE message (capped at
+# 3000 chars), on the theory they stayed high-precision even said well into a message. Measured
+# against the full 88-record gold set (D:\...\correction-gold.json) over ALL current firings,
+# that widening bought 6 extra genuine corrections at the cost of 27 false ones (precision
+# 15/51 = 29.4% with it, vs 9/18 = 50.0% keeping 9 of 18 genuine without it). A narrower
+# "imperative at the start of a clause" form was also tried and measured worse (kept only 9 of
+# 18 genuine, same false count, lower precision than plain opening-anchoring). So "revert",
+# "undo" and "roll back" are folded into _OPENING_CORRECTION_RE above instead: anchored to the
+# message's own opening exactly like every other trigger word, no full-text scan at all.
 
 # User-role messages the harness itself injects, not the human speaking: slash-command
 # scaffolding, background-task notifications, local-command output/caveats, system reminders,
@@ -85,6 +81,7 @@ HARNESS_MARKERS = (
     "<system-reminder>",
     "<ide_opened_file>",
     "[Request interrupted by user",
+    "Base directory for this skill:",
 )
 
 PATH_KEYS = ("file_path", "path", "notebook_path")
@@ -111,8 +108,6 @@ def _is_correction(text: str) -> bool:
     """Whether a human message is a genuine wrong-direction correction, tuned against a
     hand-labelled gold set rather than intuition (see CORRECTION_RE's docstring)."""
     stripped = PASTED_CONTENT_RE.sub(" ", text)
-    if _FULLTEXT_CORRECTION_RE.search(stripped[:_FULLTEXT_SCAN_CHARS]):
-        return True
     return _OPENING_CORRECTION_RE.search(_opening(stripped)) is not None
 
 
@@ -218,15 +213,17 @@ from typing import Any
 from .cc_history import claude_home, is_artifact_project
 from .replay import _cause
 
-# Measured against a 64-record hand-labelled gold set (18 genuine corrections, 46 false
-# positives from the pre-fix detector): of the 18 genuine, this detector still fires on 15; of
-# the 46 false, it still fires on 12 - precision on that gold subset is 15/(15+12) = 56%. The
-# gold set only covers stretches the OLD detector fired on, so this measures precision and
-# retention, not recall: a genuine correction the old detector never caught is invisible to it.
-CAVEAT = ("Correction counts come from a keyword heuristic over your own messages, measured at "
-          "56% precision against a 64-record hand-labelled gold set (still roughly 2 in 5 "
-          "flagged stretches may not be genuine corrections, and some genuine corrections are "
-          "missed). Treat this as a cost estimate, not an audit.")
+# Fix round 3, measured against the full 88-record hand-labelled gold set
+# (D:\...\correction-gold.json) over ALL current firings of this detector on the real transcript
+# store: 11 of 21 flagged stretches were genuine corrections in a hand-labelled audit (52.4%
+# precision). The gold set covers every stretch the detector fires on as of that audit, so this
+# measures precision, not recall: a genuine correction this detector never fires on at all is
+# invisible to this figure, and recall is unmeasured.
+CAVEAT = ("Correction counts come from a keyword heuristic over your own messages. In a "
+          "hand-labelled audit, 11 of 21 flagged stretches were genuine corrections (52.4% "
+          "precision) - roughly half of what's flagged may not be a genuine correction, and "
+          "recall (genuine corrections this misses entirely) is unmeasured. Treat this as a "
+          "cost estimate, not an audit.")
 
 
 def _percentile(values: list[int], fraction: float) -> int:

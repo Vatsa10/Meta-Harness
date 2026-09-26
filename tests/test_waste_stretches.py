@@ -230,6 +230,38 @@ REVERT_MENTIONED_ONLY_FAR_INTO_A_VERY_LONG_MESSAGE = (
 )
 
 
+# --- fix round 3: harness-injected skill text is not the human speaking ---------------------
+#
+# Real shape (structure copied from ~/.claude/projects, content invented): the harness injects a
+# skill's own instructions as a user-role message whenever a skill is invoked, starting with
+# this exact prefix, as a one-block content list with a "text" field.
+
+SKILL_INJECTION = (
+    "Base directory for this skill: /some/plugin/skills/example-skill\n\n"
+    "# Example skill\n\nThis skill helps with an invented example task. Revert any change that "
+    "doesn't work and undo it before continuing, then stop and report back."
+)
+
+
+def skill_injection_message():
+    return {"type": "user", "message": {"role": "user",
+            "content": [{"type": "text", "text": SKILL_INJECTION}]}}
+
+
+def test_skill_injection_marker_does_not_end_a_stretch(tmp_path):
+    path = write_transcript(tmp_path, [
+        user("go"),
+        assistant(("Read", {"file_path": "a.py"}), ("Edit", {"file_path": "a.py"})),
+        skill_injection_message(),
+        assistant(("Bash", {"command": "pytest"})),
+        user("thanks"),
+    ])
+    stretches = list(iter_stretches(path, min_calls=3))
+    assert len(stretches) == 1
+    assert stretches[0].calls == ["Read", "Edit", "Bash"]
+    assert stretches[0].ended_by == "user"
+
+
 def test_ide_opened_file_marker_does_not_end_a_stretch(tmp_path):
     path = write_transcript(tmp_path, [
         user("go"),
