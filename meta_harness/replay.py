@@ -77,7 +77,7 @@ ERROR_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"exceeds maximum allowed tokens", "output-too-large"),
     (r"ConnectionRefusedError|connection refused|ECONNREFUSED", "connection-refused"),
     (r"was blocked\. For security|is blocked\. This path is protected|denied by your permission", "blocked-policy"),
-    (r"FAILED |ERROR at setup of|\.{3,}F|F\.{2,}", "test-failure"),
+    (r"=+ FAILURES =+|ERROR at setup of|\bAssertionError\b|FAILED \S+::", "test-failure"),
     (r"tab group no longer exists|Missing required parameter tabId", "tab-target"),
     (r"needs design-system authorization", "needs-approval"),
     (r"ENAMETOOLONG", "path-too-long"),

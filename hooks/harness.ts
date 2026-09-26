@@ -72,8 +72,23 @@ function harnessHome(dollar: any): string {
 /**
  * Mirrors meta_harness.replay.ERROR_PATTERNS: same regex text and slug, in the same order, so a
  * `cause` recorded here dedupes against what Python's `_cause()` computes from the same text.
- * `tests/test_hook_assets.py::test_ts_cause_patterns_match_python_error_patterns` asserts this
- * list and the Python one cannot drift apart silently.
+ *
+ * Every backslash in these patterns is doubled (`\\d`, `\\[`, `\\(`, ...). These are plain JS
+ * string literals fed to `new RegExp(pattern, 'i')` below, and a JS string literal silently
+ * drops a backslash in front of any character it does not recognize as an escape -- `\d`, `\S`,
+ * `\[`, `\]`, `\(` and `\)` are NOT recognized string escapes (only `\n`, `\r`, `\t`, `\'`, `\\`,
+ * etc. are), so a single backslash here compiles to a regex with a missing metacharacter escape
+ * (`\d+` -> a literal-`d` character class, `\(...\)` -> an unescaped group, and so on). A prior
+ * version of this file used single backslashes throughout, which type-checked and passed a
+ * test that only compared source text, while classifying 235 of 1,167 real failure texts
+ * differently from the Python side. Regex literals (`/.../i`) would not have this problem, but
+ * would need a parallel array-of-RegExp construction; doubling the backslash here keeps this
+ * array's shape (string, string) identical to ERROR_PATTERNS's (str, str), which is what the
+ * parity test below relies on to generate its own fixtures programmatically in the future.
+ *
+ * `tests/test_hook_assets.py::test_ts_and_python_cause_agree_on_fixtures` actually EXECUTES both
+ * classifiers over `tests/cause_fixtures.py::CAUSE_FIXTURES` (via node) and asserts identical
+ * slugs -- not a source-text comparison, which cannot detect this class of bug.
  *
  * UnicodeEncodeError must stay ordered before the decode/charmap/cp1252 pattern: an encode
  * failure's message can also contain the word "decode" in surrounding text, so checking decode
@@ -97,30 +112,30 @@ const CAUSE_PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ['not in Claude\'s tab group|determine which page this action targets', 'tab-target'],
   ['modified since read', 'stale-read'],
   ['EISDIR|illegal operation on a directory', 'is-directory'],
-  ['Traceback \(most recent call last\)', 'python-traceback'],
+  ['Traceback \\(most recent call last\\)', 'python-traceback'],
   ['Permission to (use|read).*has been denied', 'permission-denied-tool'],
   ['File does not exist', 'missing-path'],
   ['is temporarily unavailable', 'model-unavailable'],
   ['InputValidationError|Workflow script file not found|No task found with ID|Invalid workflow script|scriptPath must be a script path|Unknown skill:|Task ID is required', 'workflow-error'],
   ['Failed to execute JavaScript|JavaScript execution error', 'js-error'],
-  ['Error capturing screenshot|actions\[\d+\][^\n]*failed|Failed to find element|Failed to execute action|Error capturing zoomed screenshot|is not a supported form input|Can\'t interact with browser-internal', 'browser-action-failed'],
+  ['Error capturing screenshot|actions\\[\\d+\\][^\\n]*failed|Failed to find element|Failed to execute action|Error capturing zoomed screenshot|is not a supported form input|Can\'t interact with browser-internal', 'browser-action-failed'],
   ['No such tool available', 'unknown-tool'],
   ['hook did not respond before|tool did not respond in time', 'hook-timeout'],
-  ['Found \d+ matches of the string', 'edit-mismatch'],
+  ['Found \\d+ matches of the string', 'edit-mismatch'],
   ['Python was not found|pdftoppm is not installed', 'missing-command'],
   ['node:internal/modules/(package_json_reader|run_main)|Cannot find module|ERR_MODULE_NOT_FOUND', 'module-not-found'],
-  ['"error":\{"name":"(HttpException|McpError)"|already exists in local config', 'api-error'],
-  ['fatal: (pathspec|detected dubious ownership|ambiguous argument|.*is outside repository)|ignored by one of your \.gitignore|docker: Error response from daemon', 'git-error'],
-  ['On branch \S+\r?\nYour branch is (up to date|ahead of)|warning: in the working copy of', 'git-noise'],
+  ['"error":\\{"name":"(HttpException|McpError)"|already exists in local config', 'api-error'],
+  ['fatal: (pathspec|detected dubious ownership|ambiguous argument|.*is outside repository)|ignored by one of your \\.gitignore|docker: Error response from daemon', 'git-error'],
+  ['On branch \\S+\\r?\\nYour branch is (up to date|ahead of)|warning: in the working copy of', 'git-noise'],
   ['npm error code|npm warn exec', 'npm-error'],
   ['exceeds maximum allowed tokens', 'output-too-large'],
   ['ConnectionRefusedError|connection refused|ECONNREFUSED', 'connection-refused'],
-  ['was blocked\. For security|is blocked\. This path is protected|denied by your permission', 'blocked-policy'],
-  ['FAILED |ERROR at setup of|\.{3,}F|F\.{2,}', 'test-failure'],
+  ['was blocked\\. For security|is blocked\\. This path is protected|denied by your permission', 'blocked-policy'],
+  ['=+ FAILURES =+|ERROR at setup of|\\bAssertionError\\b|FAILED \\S+::', 'test-failure'],
   ['tab group no longer exists|Missing required parameter tabId', 'tab-target'],
   ['needs design-system authorization', 'needs-approval'],
   ['ENAMETOOLONG', 'path-too-long'],
-  ['error TS\d+|imported but unused', 'ts-error'],
+  ['error TS\\d+|imported but unused', 'ts-error'],
   ['not logged into any GitHub hosts', 'gh-auth-error'],
 ];
 

@@ -1,7 +1,8 @@
 import pytest
 
+from cause_fixtures import CAUSE_FIXTURES
 from meta_harness.cc_history import FailureEpisode
-from meta_harness.replay import _cause, episode_signature
+from meta_harness.replay import ERROR_PATTERNS, _cause, episode_signature
 
 
 def _episode(kind="tool_error", tools=("Bash",), detail="", assistant_text=""):
@@ -81,3 +82,26 @@ def test_existing_causes_are_unchanged_by_the_new_patterns():
 
 def test_cause_survives_non_ascii_error_text():
     assert _cause("bash: ─────: command not found \U0001f600") == "missing-command"
+
+
+@pytest.mark.parametrize("text,expected", list(CAUSE_FIXTURES))
+def test_cause_fixtures_are_pinned(text, expected):
+    """This fixture list is the single source of truth shared with
+    tests/test_hook_assets.py's TypeScript/Python parity check. Every one of the 25 second-pass
+    patterns appended to ERROR_PATTERNS after Task 1's first eight supplied roughly a third of
+    the named `tool_error` episodes and had no test of its own -- any one of them could be
+    deleted without a single test failing. Every entry here pins a real sample string to its
+    expected slug, so a silent deletion or over-narrowing shows up immediately.
+    """
+    assert _cause(text) == expected
+
+
+def test_every_error_pattern_slug_is_reachable_from_the_fixtures():
+    """Guards against a pattern being added to ERROR_PATTERNS without a matching fixture in
+    CAUSE_FIXTURES (the inverse failure mode of test_cause_fixtures_are_pinned): every slug that
+    appears in ERROR_PATTERNS must be produced by at least one fixture text.
+    """
+    pattern_slugs = {slug for _pattern, slug in ERROR_PATTERNS}
+    fixture_slugs = {expected for _text, expected in CAUSE_FIXTURES}
+    missing = pattern_slugs - fixture_slugs
+    assert not missing, f"these ERROR_PATTERNS slugs have no pinning fixture: {sorted(missing)}"
