@@ -8,3 +8,6 @@ __pycache__/
 .tb
 .tb-pilot
 fast-jev-compaction/
+
+# Isolated worktrees created for parallel agents
+.claude/worktrees/
