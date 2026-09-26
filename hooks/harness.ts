@@ -400,15 +400,15 @@ const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
  *
  * Also carries this session's rejection memory (task 13) and session-scoped "stop doing X" rules
  * (task 14), both stored on the same `SessionState` so `tool.check` can consult them ahead of the
- * installed-rule loop. Rejection detection lives in the same `tool.call` handler as read-tracking
- * below. Claude Code refuses a second registration of one event without a matcher, so these
+ * installed-rule loop. Rejection detection lives in its own `tool.call` handler below; there is
+ * no read-tracking handler here, since read-before-edit is the engine's job, not this plugin's
+ * (see hooks/rules.ts). Claude Code refuses a second registration of one event without a matcher, so these
  * hooks are added to `register`'s per-event list and chained inside its single `on` per event.
  * `prompt.submit` (not `prompt.section`) is where the human's own words
  * are read, since only `prompt.submit`'s event carries `text`.
  */
 export function registerRules(add: On): void {
   const state: SessionState = {
-    readPaths: new Set<string>(),
     callCounts: new Map<string, number>(),
     rejected: new Map<string, string>(),
     sessionRules: [],
@@ -417,15 +417,13 @@ export function registerRules(add: On): void {
 
   // guardAfter, not guardBefore: rejection detection reads the outcome, which only exists AFTER the
   // tool has already run (or been denied), so a `guardBefore` recovery re-entering next() would run
-  // the tool a second time. `next` resolves before this handler's own body runs at all — both
-  // the read-tracking and the rejection check below run AFTER the call, not "first"; read-tracking
-  // simply doesn't care about the outcome, so its ordering relative to `next` has no effect either
-  // way.
-  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:read-tracking', io, event, next, async (outcome: any) => {
-    if (event?.tool === 'Read') {
-      const path = String(toolArgs(event).file_path ?? '');
-      if (path) state.readPaths.add(path);
-    }
+  // the tool a second time. `next` resolves before this handler's own body runs at all.
+  //
+  // There is no read-tracking hook here any more: a live test proved Claude Code's own engine
+  // already denies an Edit/Write of a file not read this session ("File has not been read yet"),
+  // and it runs before this plugin ever sees the call. The plugin-side copy of that check (a
+  // `read-before-edit` rule plus this handler's read-tracking) is retired -- see hooks/rules.ts.
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:rejection-memory', io, event, next, async (outcome: any) => {
     const text = rejectionAnnouncement(outcome);
     if (text && REJECTION_PATTERN.test(text)) {
       rememberRejection(state, String(event?.tool ?? ''), toolArgs(event));
@@ -519,12 +517,6 @@ export function registerRules(add: On): void {
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
       if (!verdict.deny) continue;
-      // Creating a file that does not exist yet has nothing to read first: without this, the
-      // read-before-edit rule denied every Write of a new file in a live session.
-      if (rule.kind === 'read-before-edit') {
-        const path = String((event?.input as any)?.file_path ?? '');
-        if (path && !(await io.fs.exists(path))) continue;
-      }
       return { decision: 'deny', reason: verdict.reason };
     }
     // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this

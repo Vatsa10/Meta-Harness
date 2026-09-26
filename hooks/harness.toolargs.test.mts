@@ -6,8 +6,8 @@
  * On `tool.call`, Claude Code 2.1.283 puts the tool's arguments at the TOP LEVEL of the event
  * (`e.command`, `e.file_path`) beside `tool`, `tool_use_id`, `agentId` and `consent`. Only
  * `tool.check` nests them under `input`. Earlier fakes put `input` on tool.call too, which hid a
- * live bug: read-tracking recorded nothing, so the built-in read-before-edit rule denied every
- * Edit. Every case here runs both shapes: the real top-level one, and the `input` variant.
+ * live bug in the rejection-memory tracker. Every case here runs both shapes: the real
+ * top-level one, and the `input` variant.
  */
 
 import assert from 'node:assert/strict';
@@ -52,7 +52,8 @@ const allow = async () => ({ decision: 'allow' });
 
 async function main() {
   for (const shape of ['real', 'nested'] as const) {
-    // --- 1. a Read seen at tool.call lets the Edit of that file through read-before-edit ---
+    // --- 1. the plugin never denies an Edit of an unread file itself: that check belongs to
+    //     Claude Code's own engine, which runs before the plugin ever sees the call ---
     {
       const { files, fire } = setup();
       files.set('C:/p/notes.txt', 'hello');
@@ -65,8 +66,7 @@ async function main() {
 
       const unread = await fire('tool.check',
         { tool: 'Edit', input: { file_path: 'C:/p/other.txt', old_string: 'a', new_string: 'b' } }, allow);
-      assert.equal(unread.decision, 'deny', `${shape}: an Edit of an unread file must still be denied`);
-      assert.match(unread.reason, /\[read-before-edit\]/);
+      assert.equal(unread.decision, 'allow', `${shape}: the plugin must not deny an Edit of an unread file`);
     }
 
     // --- 2. a call rejected at tool.call is denied when the same call reaches tool.check ---
@@ -92,14 +92,17 @@ async function main() {
     }
   }
 
-  // --- 5. read-before-edit never blocks creating a file that does not exist yet ---
+  // --- 5. the plugin never blocks a Write, new file or otherwise, nor a Write-then-Edit ---
   {
     const { files, fire } = setup();
     const fresh = await fire('tool.check', { tool: 'Write', input: { file_path: 'C:/p/fresh.txt', content: 'hi' } }, allow);
     assert.equal(fresh.decision, 'allow', 'a Write of a new file must be allowed');
     files.set('C:/p/existing.txt', 'old');
     const existing = await fire('tool.check', { tool: 'Write', input: { file_path: 'C:/p/existing.txt', content: 'hi' } }, allow);
-    assert.equal(existing.decision, 'deny', 'overwriting an existing unread file must still be denied');
+    assert.equal(existing.decision, 'allow', 'overwriting an existing unread file must not be denied by the plugin');
+    const editAfterWrite = await fire('tool.check',
+      { tool: 'Edit', input: { file_path: 'C:/p/fresh.txt', old_string: 'hi', new_string: 'bye' } }, allow);
+    assert.equal(editAfterWrite.decision, 'allow', 'an Edit following a Write must not be denied by the plugin');
   }
 
   // --- 4. the key computed at tool.call equals the key computed at tool.check for one call ---

@@ -2,8 +2,13 @@
  * Installed `rule` artifacts, applied at tool.check.
  *
  * A rule is the strongest layer available: it costs no standing tokens and cannot be talked
- * around. `read-before-edit` is built in because it is the discovered doctrine's top clause,
- * and a clause a mechanism can enforce should not be a paragraph.
+ * around. There is no built-in read-before-edit rule here: a live test proved Claude Code's own
+ * engine already refuses an Edit/Write of a file that has not been read this session ("File has
+ * not been read yet"), and it runs before this plugin ever sees the call. A plugin-side copy of
+ * that check only added failure modes on top of an enforcement that already existed -- every
+ * Edit denied, every new-file Write denied, and a Write-then-Edit denied even though the Write
+ * itself supplied the read the plugin's tracker never recorded. This module now only carries
+ * rules the engine does not already enforce (installed artifacts, `repeat-call`).
  */
 
 export type Rule = {
@@ -37,7 +42,6 @@ export type SessionRule = {
 };
 
 export type SessionState = {
-  readPaths: Set<string>;
   /** How many times each exact tool+input call has already been allowed this session. */
   callCounts: Map<string, number>;
   /** Calls the human has explicitly rejected this session, keyed by callKey, valued by a
@@ -99,14 +103,10 @@ export function callKey(event: { tool?: string; input?: Record<string, unknown> 
  */
 export const DEFAULT_REPEAT_THRESHOLD = 4;
 
-export const BUILT_IN_RULES: Rule[] = [
-  {
-    artifactId: 'read-before-edit',
-    kind: 'read-before-edit',
-    tools: ['Edit', 'Write'],
-    reason: 'Read this file in the session before editing it: an edit written from an assumption about its contents lands in the wrong place.',
-  },
-];
+/** No built-in rules ship: read-before-edit is the engine's job now (see the module doc above),
+ * and nothing else has earned a built-in yet. Kept as an array (rather than removed outright) so
+ * `loadRules` has one shape to spread regardless of how many built-ins eventually exist. */
+export const BUILT_IN_RULES: Rule[] = [];
 
 export type InstalledArtifact = {
   id: string;
@@ -187,12 +187,6 @@ export function evaluateRule(
       };
     }
     return { deny: false };
-  }
-
-  if (rule.kind === 'read-before-edit') {
-    const path = String((event.input as any)?.file_path ?? '');
-    if (!path || state.readPaths.has(path)) return { deny: false };
-    return { deny: true, reason: `${rule.reason} [${rule.artifactId}]` };
   }
 
   return { deny: false };

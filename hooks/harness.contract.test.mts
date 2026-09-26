@@ -141,8 +141,9 @@ async function main() {
     register(on as any, {} as any);
 
     // register() registers tool.call exactly ONCE: Claude Code's loader refuses a module that
-    // registers one event twice without a matcher. The observer, read-tracking and drift handlers
-    // are composed inside that one registration (`chain`), so the tool must still run once below.
+    // registers one event twice without a matcher. The observer, rejection-memory and drift
+    // handlers are composed inside that one registration (`chain`), so the tool must still run
+    // once below.
     assert.equal(handlers['tool.call']?.length ?? 0, 1, 'expected exactly one tool.call registration');
 
     let toolRuns = 0;

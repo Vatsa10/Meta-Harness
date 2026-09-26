@@ -8,8 +8,8 @@ words. Anything the model should see is attached as `context`, either on the use
 
 | Event | Job |
 |---|---|
-| `tool.call` | Append failures (error results, repeated identical calls) to the observation log; track reads for the read-before-edit check; remember calls the user rejected; count calls for the drift note |
-| `tool.check` | Deny a call the user already rejected this session (rejection memory), a call matching a session rule, an edit to a file not read first, or a call matching an installed `rule` artifact - each with the reason and its source |
+| `tool.call` | Append failures (error results, repeated identical calls) to the observation log; remember calls the user rejected; count calls for the drift note |
+| `tool.check` | Deny a call the user already rejected this session (rejection memory), a call matching a session rule, or a call matching an installed `rule` artifact - each with the reason and its source. Read-before-edit is not one of these: Claude Code's own engine already denies an Edit/Write of a file not read this session, before the plugin ever sees the call, so the plugin does not duplicate that check |
 | `prompt.submit` | Attach installed `injection` artifacts relevant to this turn; parse a human's "stop doing X" into a session rule; attach the one-time first-run line; reset the drift count when the user speaks |
 
 Only `rule` and `injection` artifacts are enforced here; `skill` and `doctrine` artifacts are
@@ -51,9 +51,9 @@ rejects the whole module otherwise ("the hook is not a function literal or the n
 - `guardBefore` runs handlers that call `next` themselves (`tool.check`, and the `prompt.submit`
   handlers for injection, session rules and the drift reset). A throw BEFORE `next` falls
   through to `next(event)`; `next` is never called a second time.
-- `guardAfter` runs observers that work after the tool (`tool.call` observation and read /
-  rejection tracking). `next` is called once, up front; a throw costs the observation, never a
-  re-run of the tool.
+- `guardAfter` runs observers that work after the tool (`tool.call` observation and rejection
+  tracking). `next` is called once, up front; a throw costs the observation, never a re-run of
+  the tool.
 - `guardAfterMap` is `guardAfter` for a handler that returns a replacement outcome (the drift note
   appended to a copy of the tool result). On a throw, core's outcome is returned untouched.
 - `safely`, `afterCall` and `afterCallMap` are the same guards as hook-returning wrappers, kept

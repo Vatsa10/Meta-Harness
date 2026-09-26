@@ -366,7 +366,7 @@ async function main() {
 
   // --- direct addSessionRule/evaluator sanity, independent of the parser ---
   {
-    const state: any = { readPaths: new Set(), callCounts: new Map(), rejected: new Map(), sessionRules: [] };
+    const state: any = { callCounts: new Map(), rejected: new Map(), sessionRules: [] };
     addSessionRule(state, { tool: 'Bash', pattern: 'rm -rf' });
     assert.equal(state.sessionRules.length, 1);
   }

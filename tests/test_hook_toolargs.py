@@ -1,8 +1,8 @@
 """tool.call readers must read the tool's arguments through `toolArgs`, never `event.input`.
 
 On `tool.call` Claude Code puts the arguments at the top level of the event; only `tool.check`
-nests them under `input`. Reading `event.input` on tool.call is always empty live: read-tracking
-recorded nothing and the built-in read-before-edit rule denied every Edit.
+nests them under `input`. Reading `event.input` on tool.call is always empty live: a prior bug
+here left the rejection-memory tracker recording nothing.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def direct_input_reads(src: str) -> list[str]:
 
 def test_no_tool_call_reader_reads_event_input_directly():
     src = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
-    assert len(tool_call_bodies(src)) >= 3, "expected the observer, read-tracking and drift tool.call hooks"
+    assert len(tool_call_bodies(src)) >= 3, "expected the observer, rejection-memory and drift tool.call hooks"
     assert direct_input_reads(src) == []
 
 
