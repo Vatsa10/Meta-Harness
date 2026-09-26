@@ -21,6 +21,8 @@ export type SessionState = {
   /** Calls the human has explicitly rejected this session, keyed by callKey, valued by a
    * searchable snippet of the input so a later mention of the same command can clear it. */
   rejected?: Map<string, string>;
+  /** "Stop doing X" rules added from the human's own words, in effect for this session only. */
+  sessionRules?: Array<{ tool: string; pattern: string }>;
 };
 
 /** The identity of one tool call, for counting exact repeats. Input order is whatever the
@@ -171,3 +173,31 @@ export function wasRejected(state: SessionState, tool: string, input: unknown): 
   return state.rejected.has(key);
 }
 
+/**
+ * A conservative leading-verb parse: only text that OPENS with "stop"/"don't"/"never" (optionally
+ * followed by a gerund like "running") is treated as an instruction. Matching anywhere in the
+ * text would catch ordinary questions and descriptions that merely contain the word "stop"
+ * somewhere, which is exactly the false-positive this must not produce.
+ */
+const STOP_INSTRUCTION = /^\s*(?:stop|don'?t|never)\s+(?:running|using|doing|calling)?\s*(.+)/i;
+
+/** Tools whose surface is a shell-like command line; anything else defaults to Bash, the most
+ * common subject of a "stop running X" instruction. */
+const EDIT_LIKE = /\b(writ(?:e|ing)|edit(?:ing)?)\b/i;
+
+/** Parses a "stop doing X" / "don't run X again" instruction out of free text, or returns null
+ * for anything that is not unambiguously such an instruction (a question, a description, etc). */
+export function parseStopInstruction(text: string): { tool: string; pattern: string } | null {
+  const match = STOP_INSTRUCTION.exec(text ?? '');
+  if (!match) return null;
+  const pattern = match[1]?.replace(/["'.?!]+$/g, '').trim();
+  if (!pattern) return null;
+  const tool = EDIT_LIKE.test(pattern) ? 'Edit' : 'Bash';
+  return { tool, pattern };
+}
+
+/** Adds a session-scoped rule parsed from the human's own words. Never touches the installed store. */
+export function addSessionRule(state: SessionState, rule: { tool: string; pattern: string }): void {
+  if (!state.sessionRules) state.sessionRules = [];
+  state.sessionRules.push(rule);
+}

@@ -7,10 +7,12 @@
 
 import type { On, PluginOptions, Register } from 'claude-code';
 import {
+  addSessionRule,
   callKey,
   evaluateRule,
   loadInstalled,
   loadRules,
+  parseStopInstruction,
   rememberRejection,
   type Rule,
   type SessionState,
@@ -212,6 +214,7 @@ export function registerRules(on: On): void {
     readPaths: new Set<string>(),
     callCounts: new Map<string, number>(),
     rejected: new Map<string, string>(),
+    sessionRules: [],
   };
   let rules: Rule[] | null = null;
 
@@ -235,8 +238,14 @@ export function registerRules(on: On): void {
     }
   }));
 
-  on('prompt.section', safely('prompt.section:rejection-clearing', async (dollar, event: any, next) => {
+  on('prompt.section', safely('prompt.section:nlrules', async (dollar, event: any, next) => {
     const text = String(event?.prompt ?? '');
+    const instruction = parseStopInstruction(text);
+    if (instruction) {
+      addSessionRule(state, instruction);
+      const path = `${harnessHome(dollar)}/pending-session-rules.json`;
+      await dollar.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
+    }
     if (text) {
       const lower = text.toLowerCase();
       for (const [key, snippet] of [...(state.rejected ?? new Map<string, string>()).entries()]) {
@@ -255,6 +264,16 @@ export function registerRules(on: On): void {
         decision: 'deny',
         reason: 'This exact call was already rejected earlier this session [rejection-memory]',
       };
+    }
+    for (const rule of state.sessionRules ?? []) {
+      if (rule.tool !== tool) continue;
+      const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
+      if (haystack.includes(rule.pattern.toLowerCase())) {
+        return {
+          decision: 'deny',
+          reason: `Session rule from this conversation: stop ${rule.pattern} [session-rule]`,
+        };
+      }
     }
     if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
     for (const rule of rules) {
