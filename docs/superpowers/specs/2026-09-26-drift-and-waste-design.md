@@ -35,6 +35,7 @@ that produced the baseline, against the same machine's transcripts.
 Measured from `~/.claude/projects/**/*.jsonl` on 2026-09-26, 344 sessions, 31,566 tool calls:
 
 - Error rate 3.7%, and most errors self-recover. Errors are cheap.
+- 1,167 `tool_error` episodes, all carrying full error text; only 20% classify to a named cause.
 - 98 corrections that followed at least three tool calls. Median 8 calls burned, p90 41, max 76.
 - 378 repeated identical failures. Top classes: re-proposing a rejected command (98), Chrome tab
   targeting (51), Bash quoting (24), read-before-edit (30, already fixed by a shipped rule).
@@ -83,14 +84,30 @@ transcripts (~/.claude/projects)
   [3] live control + surface     ---> rejection memory, NL rules, /harness commands
 ```
 
-### 3.1 The trace-fidelity defect, fixed first
+### 3.1 Cause coverage, fixed first
 
-`meta_harness/cc_history.py` writes failure episodes whose `matched` field is empty even under
-`--include-text`. The episode records `"Bash returned an error"` — a summary — and discards the
-error text. Every cause therefore classifies as `other`.
+An earlier draft of this spec claimed the miner discarded error text. That was wrong — measured
+2026-09-26, all 1,167 `tool_error` episodes carry the full error in `assistant_text`, and the
+claim came from reading the wrong field. The miner is sound and needs no repair.
 
-By Table 3 this is the losing ablation, implemented by accident. Every judge in Phase 2 depends
-on this text. It is fixed before anything is built on it.
+The real defect is narrower and still blocking. Feeding the correct field to
+`meta_harness.replay._cause` classifies only **234 of 1,167 episodes — 20%**. The remaining 80%
+fall to `other`, dominated by `Bash:other` at 617. `ERROR_PATTERNS` does not cover the classes
+that actually dominate this machine's history:
+
+| Uncovered class | Occurrences |
+|---|---|
+| Approval / permission required | 95 |
+| User rejected the call | 29 |
+| Shell quoting (unexpected EOF, expansion, brace-quote) | 23 |
+| Compound PowerShell / `Set-Location` in a compound | 39 |
+| Chrome tab targeting | 14 |
+
+A signature of `tool_error:Bash:other` collapses unrelated failures into one bucket, so the learn
+loop cannot tell them apart and the kNN judge in Phase 2 inherits a feature that is 80% noise.
+
+**Target: classification coverage of at least 85% of `tool_error` episodes**, measured by the
+same command on the same transcripts. The number is the task's acceptance test.
 
 ---
 
