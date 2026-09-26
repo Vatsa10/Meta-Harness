@@ -3,11 +3,12 @@
  * `node --experimental-strip-types --no-warnings --import ./hooks/loaders/preload.mjs hooks/harness.drift.test.mts`
  * (see tests/test_hook_drift.py, which shells out to it).
  *
- * Every event is shaped as claude-code-2.1.283.d.ts declares it: a PromptSubmitInput carries
- * text, wait and origin (and optionally attachments, turnId, context); a ToolCallInput carries
- * the tool and its arguments beside it; core's ToolCallResult is `{ ref, result, text }`. The
- * full plugin is registered through a CHAINING fake `on`, the way the engine composes listeners,
- * so the drift handlers run alongside the observer, rules, injection and bootstrap handlers.
+ * The note rides on a TOOL RESULT: the answered branch of ToolCallResult carries `context`,
+ * "what the model reads after the tool's result and the user never sees". Every event is shaped as
+ * claude-code-2.1.283.d.ts declares it: core's ToolCallResult is `{ ref, result, text }` (plus
+ * `isError`/`isReadOnly`) or `{ deny }`; a PromptSubmitInput carries text, wait and origin (and
+ * optionally attachments, turnId, context). The full plugin is registered through a CHAINING fake
+ * `on`, the way the engine composes listeners.
  */
 
 import assert from 'node:assert/strict';
@@ -16,12 +17,13 @@ import { loadDriftConfig, shouldWarn } from './drift.ts';
 
 const HOME = 'C:/fake-harness-home';
 const DRIFT = `${HOME}/drift.json`;
+const NOTE = 'meta-harness drift:';
 
 function makeFakeDollar(files: Map<string, string>) {
   return {
-    env: { get: (key: string) => (key === 'META_HARNESS_HOME' ? HOME : undefined) },
+    env: { get: (key: string) => (key === 'META_HARNESS_HOME' ? HOME : undefined) } as any,
     session: { id: async () => 'sess-drift' },
-    ui: { log: () => {} },
+    ui: { log: (_m: string) => {} },
     fs: {
       exists: async (path: string) => files.has(path),
       read: async (path: string) => {
@@ -51,31 +53,42 @@ function makeChainingOn() {
   return { on, fire, handlers };
 }
 
-/** A PromptSubmitInput as the engine raises it for the user's own Enter. */
 function userPrompt(text: string) {
   return { text, wait: false, origin: { kind: 'composer' } };
 }
 
-/** A PromptSubmitInput for a background task's notification delivered into a running turn. */
 function notification(text: string) {
   return { text, wait: false, origin: { kind: 'task-notification' }, turnId: 'turn-7' };
 }
 
-function coreResult(e: any) {
-  return { ref: 1, result: { stdout: `ran ${e.command ?? e.tool}` }, text: `ran ${e.command ?? e.tool}` };
+/** Core's answered ToolCallResult for a Bash call. */
+function answered(e: any) {
+  return { ref: 1, result: { stdout: `ran ${e.command}` }, text: `ran ${e.command}` };
 }
 
-/** Sets up the full plugin; returns helpers that fire real-shaped events through it. */
+const notesOf = (outcome: any): string[] =>
+  (Array.isArray(outcome?.context) ? outcome.context : []).filter((c: string) => c.startsWith(NOTE));
+
+/** The full plugin, with helpers that fire real-shaped events through it. */
 function plugin(files: Map<string, string>) {
   const dollar = makeFakeDollar(files);
   const { on, fire, handlers } = makeChainingOn();
   register(on as any, {} as any);
+  let toolRuns = 0;
   let coreCalls = 0;
-  const calls = async (n: number) => {
+  let serial = 0;
+  /** Fires n tool calls; returns each outcome as the caller (the engine) receives it. */
+  const calls = async (n: number, core: (e: any) => any = answered) => {
+    const outcomes: any[] = [];
     for (let i = 0; i < n; i += 1) {
-      await fire(dollar, 'tool.call', { tool: 'Bash', command: `echo ${i}`, tool_use_id: `tu-${i}` },
-        async (e: any) => coreResult(e));
+      serial += 1;
+      outcomes.push(await fire(dollar, 'tool.call', { tool: 'Bash', command: `echo ${serial}`, tool_use_id: `tu-${serial}` },
+        async (e: any) => {
+          toolRuns += 1;
+          return core(e);
+        }));
     }
+    return outcomes;
   };
   const submit = async (event: any) => {
     let seen: any = null;
@@ -86,96 +99,86 @@ function plugin(files: Map<string, string>) {
     });
     return seen;
   };
-  const notes = (seen: any) => (seen?.context ?? []).filter((c: string) => c.startsWith('meta-harness drift:'));
-  return { dollar, fire, handlers, calls, submit, notes, coreCalls: () => coreCalls };
+  return { dollar, fire, handlers, calls, submit, toolRuns: () => toolRuns, coreCalls: () => coreCalls };
 }
 
-async function main() {
-  // --- 1. enabled, min_calls 8, 10 calls: the next submit carries one line naming the count ---
-  {
-    const files = new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 8, judge: 'knn' })]]);
-    const p = plugin(files);
-    await p.calls(10);
-    const seen = await p.submit(userPrompt('carry on'));
-    const found = p.notes(seen);
-    assert.equal(found.length, 1, `expected exactly one drift note, got ${JSON.stringify(seen?.context)}`);
-    assert.ok(found[0].includes('10 tool calls'), `the note must name the count: ${found[0]}`);
-    assert.equal(p.coreCalls(), 1);
+/** Index of every outcome carrying a drift note. */
+const noted = (outcomes: any[]) => outcomes.flatMap((o, i) => (notesOf(o).length ? [i] : []));
 
-    // Under min_calls: nothing.
-    const quiet = plugin(new Map(files));
-    await quiet.calls(7);
-    assert.equal(quiet.notes(await quiet.submit(userPrompt('ok'))).length, 0, '7 calls is under min_calls 8');
+async function main() {
+  // --- 1 + (a). enabled, min_calls 8: the note is on the result of the call that crosses it,
+  //              names the count, and appears on no earlier result ---
+  {
+    const p = plugin(new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 8, judge: 'knn' })]]));
+    const outcomes = await p.calls(10);
+    assert.deepEqual(noted(outcomes), [7], `the note must be on call 8 exactly, got calls ${JSON.stringify(noted(outcomes))}`);
+    const [note] = notesOf(outcomes[7]);
+    assert.ok(note.includes('8 tool calls'), `the note must name the count: ${note}`);
+    assert.equal(notesOf(outcomes[7]).length, 1, 'one note, not several');
+    for (let i = 0; i < 7; i += 1) {
+      assert.deepEqual(outcomes[i], answered({ command: `echo ${i + 1}` }), `call ${i + 1} is before min_calls and must be untouched`);
+    }
+    assert.equal(p.toolRuns(), 10, 'each tool runs exactly once');
   }
 
-  // --- 2. the same stretch never produces a second line ---
+  // --- 2. the same stretch never produces a second note ---
   {
-    const files = new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 8 })]]);
-    const p = plugin(files);
-    await p.calls(10);
-    // A notification delivered into the running turn is not the user speaking: the stretch goes on.
-    const first = await p.submit(notification('task done'));
-    assert.equal(p.notes(first).length, 1, `first submit in the stretch must carry the note: ${JSON.stringify(first?.context)}`);
-    await p.calls(5);
-    const second = await p.submit(notification('another task done'));
-    assert.equal(p.notes(second).length, 0, `same stretch, second note: ${JSON.stringify(second?.context)}`);
-    // The user speaking ends that stretch without a second note for it.
-    const ends = await p.submit(userPrompt('thanks'));
-    assert.equal(p.notes(ends).length, 0, `the stretch was already noted: ${JSON.stringify(ends?.context)}`);
-    // A fresh stretch that runs long is noted again, once.
-    await p.calls(9);
-    const fresh = await p.submit(userPrompt('next'));
-    assert.equal(p.notes(fresh).length, 1, 'a new stretch past min_calls is noted');
-    assert.ok(p.notes(fresh)[0].includes('9 tool calls'), `the new stretch's own count: ${p.notes(fresh)[0]}`);
-    // And the user speaking reset the count: no carry-over into the next stretch.
-    await p.calls(3);
-    assert.equal(p.notes(await p.submit(userPrompt('more'))).length, 0, 'the count must reset when the user speaks');
+    const p = plugin(new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 8 })]]));
+    let all = await p.calls(10);
+    assert.deepEqual(noted(all), [7]);
+    // A notification is not the user speaking: the stretch goes on, and stays noted.
+    await p.submit(notification('task done'));
+    all = await p.calls(20);
+    assert.deepEqual(noted(all), [], `same stretch, second note on calls ${JSON.stringify(noted(all))}`);
+    // The user speaking ends the stretch and resets the count: the next note is on call 8 again.
+    await p.submit(userPrompt('thanks'));
+    all = await p.calls(7);
+    assert.deepEqual(noted(all), [], 'the count must reset when the user speaks');
+    all = await p.calls(3);
+    assert.deepEqual(noted(all), [0], 'a new stretch is noted once, at its own 8th call');
+    assert.ok(notesOf(all[0])[0].includes('8 tool calls'), notesOf(all[0])[0]);
   }
 
   // --- 3. enabled false: nothing, however many calls ---
   {
     const p = plugin(new Map([[DRIFT, JSON.stringify({ enabled: false, min_calls: 1 })]]));
-    await p.calls(60);
-    assert.equal(p.notes(await p.submit(userPrompt('go'))).length, 0);
-    await p.calls(60);
-    assert.equal(p.notes(await p.submit(notification('n'))).length, 0);
+    const outcomes = await p.calls(60);
+    assert.deepEqual(noted(outcomes), []);
+    assert.ok(outcomes.every((o, i) => o.context === undefined), 'a disabled drift adds no context at all');
   }
 
-  // --- 4. no drift.json (and an empty one): nothing ---
+  // --- 4. no drift.json (and an empty one): nothing, and nothing creates one ---
   {
     for (const files of [new Map<string, string>(), new Map([[DRIFT, '']]), new Map([[DRIFT, '   \n']])]) {
+      const before = files.get(DRIFT);
       const p = plugin(files);
-      await p.calls(40);
-      const seen = await p.submit(userPrompt('go'));
-      assert.equal(p.notes(seen).length, 0, `missing/empty drift.json must mean disabled: ${JSON.stringify(seen?.context)}`);
-      assert.equal(p.coreCalls(), 1);
-      assert.ok(!files.has(DRIFT) || files.get(DRIFT)!.trim() === '', 'nothing may create an enabling drift.json');
+      const outcomes = await p.calls(40);
+      assert.deepEqual(noted(outcomes), [], 'missing/empty drift.json must mean disabled');
+      assert.equal(files.get(DRIFT), before, 'nothing may create or change drift.json');
     }
     assert.equal(await loadDriftConfig(makeFakeDollar(new Map()), HOME), null);
     assert.equal(shouldWarn(1000, null), false);
   }
 
-  // --- 5. corrupt drift.json: nothing, and the turn proceeds exactly once ---
+  // --- 5. corrupt drift.json: nothing, and every call proceeds with core's outcome ---
   {
     const corrupt = ['{not json', '[]', 'null', '"enabled"', '{"enabled":"true","min_calls":8}',
       '{"enabled":true}', '{"enabled":true,"min_calls":"8"}', '{"enabled":true,"min_calls":0}',
       '{"enabled":true,"min_calls":8,"judge":"vibes"}'];
     for (const text of corrupt) {
       const p = plugin(new Map([[DRIFT, text]]));
-      await p.calls(20);
-      const seen = await p.submit(userPrompt('go'));
-      assert.ok(seen, `the turn must proceed with drift.json=${text}`);
-      assert.equal(seen.text, 'go');
-      assert.equal(p.notes(seen).length, 0, `corrupt drift.json ${text} must mean disabled`);
-      assert.equal(p.coreCalls(), 1, `core must see the prompt exactly once with drift.json=${text}`);
+      const outcomes = await p.calls(20);
+      assert.equal(p.toolRuns(), 20, `each call must run once with drift.json=${text}`);
+      assert.deepEqual(noted(outcomes), [], `corrupt drift.json ${text} must mean disabled`);
+      outcomes.forEach((o, i) => assert.deepEqual(o, answered({ command: `echo ${i + 1}` })));
     }
-    // An fs that throws on the drift read is also just "disabled".
     const throwing = makeFakeDollar(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
     throwing.fs.read = async () => { throw new Error('EACCES'); };
     assert.equal(await loadDriftConfig(throwing, HOME), null);
   }
 
-  // --- 6. the drift tool.call handler calls next exactly once and returns its outcome unchanged ---
+  // --- 6. the drift tool.call handler calls next exactly once; below the threshold or disabled it
+  //        returns next's outcome unchanged (the same object) ---
   {
     const { on, handlers } = makeChainingOn();
     registerDrift(on as any);
@@ -183,7 +186,7 @@ async function main() {
     assert.equal(handlers['prompt.submit'].length, 1, 'registerDrift registers exactly one prompt.submit handler');
     assert.equal(handlers['prompt.section'], undefined, 'drift must never listen on prompt.section');
     const handler = handlers['tool.call'][0];
-    const dollar = makeFakeDollar(new Map());
+    const dollar = makeFakeDollar(new Map([[DRIFT, '{"enabled":true,"min_calls":100}']]));
     for (const outcome of [
       { ref: 3, result: { stdout: 'hi' }, text: 'hi' },
       { ref: 4, result: 'boom', text: 'boom', isError: true },
@@ -199,7 +202,6 @@ async function main() {
       assert.equal(nextCalls, 1, 'tool.call must call next exactly once');
       assert.equal(got, outcome, 'tool.call must return the outcome of next unchanged (same object)');
     }
-    // A rejecting tool is not retried.
     let nextCalls = 0;
     await assert.rejects(() => handler(dollar, { tool: 'Bash', command: 'x' }, async () => {
       nextCalls += 1;
@@ -207,28 +209,55 @@ async function main() {
     }));
     assert.equal(nextCalls, 1, 'a rejecting next must not be re-entered');
 
-    // Through the full chain too: the tool runs once and its outcome reaches the caller intact.
+    // Next called once on the crossing call too, through the full chain.
     const p = plugin(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
-    let runs = 0;
-    const outcome = { ref: 9, result: { stdout: 'ok' }, text: 'ok' };
-    const got = await p.fire(p.dollar, 'tool.call', { tool: 'Bash', command: 'ls' }, async () => {
-      runs += 1;
-      return outcome;
-    });
-    assert.equal(runs, 1);
-    assert.deepEqual(got, outcome);
+    const [crossing] = await p.calls(1);
+    assert.equal(p.toolRuns(), 1);
+    assert.equal(notesOf(crossing).length, 1);
   }
 
-  // --- 7. a fully populated PromptSubmitInput through the drift handler: every field unchanged,
-  //        prior context ahead of the note ---
+  // --- (b). a deny is returned untouched even past the threshold; the note waits for the next
+  //          answered call ---
   {
-    const files = new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 2 })]]);
-    const dollar = makeFakeDollar(files);
-    const { on, handlers } = makeChainingOn();
-    registerDrift(on as any);
-    for (let i = 0; i < 3; i += 1) {
-      await handlers['tool.call'][0](dollar, { tool: 'Read', file_path: `f${i}` }, async () => ({ ref: i, result: {}, text: '' }));
+    const p = plugin(new Map([[DRIFT, '{"enabled":true,"min_calls":2}']]));
+    await p.calls(1);
+    const denies = [{ deny: 'refused once' }, { deny: 'refused twice' }];
+    const got: any[] = [];
+    for (const deny of denies) {
+      const [outcome] = await p.calls(1, () => deny);
+      got.push(outcome);
     }
+    got.forEach((outcome, i) => {
+      assert.equal(outcome, denies[i], `a deny past the threshold must come back as the same object, got ${JSON.stringify(outcome)}`);
+      assert.deepEqual(Object.keys(outcome), ['deny'], 'no field may be added to a deny');
+    });
+    const [next] = await p.calls(1);
+    assert.equal(notesOf(next).length, 1, 'the note goes on the first answered call past the threshold');
+    assert.ok(notesOf(next)[0].includes('4 tool calls'), notesOf(next)[0]);
+  }
+
+  // --- (c). every outcome field survives, prior context stays ahead of the note, and core's
+  //          object is never mutated ---
+  {
+    const p = plugin(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
+    const core = { ref: 12, result: { stdout: '', stderr: 'bad' }, text: 'bad', isError: true, isReadOnly: true,
+      context: ['an earlier reminder', 'a second reminder'] };
+    const snapshot = JSON.parse(JSON.stringify(core));
+    const [outcome] = await p.calls(1, () => core);
+    assert.notEqual(outcome, core, 'a noted outcome must be a copy, not core\'s object');
+    assert.deepEqual(core, snapshot, 'core\'s outcome object must not be mutated');
+    for (const field of ['ref', 'result', 'text', 'isError', 'isReadOnly'] as const) {
+      assert.deepEqual(outcome[field], snapshot[field], `${field} must survive, got ${JSON.stringify(outcome[field])}`);
+    }
+    assert.deepEqual(Object.keys(outcome).sort(), Object.keys(snapshot).sort(), 'no field added or dropped');
+    assert.deepEqual(outcome.context.slice(0, 2), snapshot.context, `prior context must come first: ${JSON.stringify(outcome.context)}`);
+    assert.equal(outcome.context.length, 3, `appended, not replaced: ${JSON.stringify(outcome.context)}`);
+    assert.ok(outcome.context[2].startsWith(NOTE));
+  }
+
+  // --- (d). no prompt.submit event gains context from drift, in any drift state or origin; a
+  //          fully populated PromptSubmitInput reaches core field-for-field ---
+  {
     const full = {
       text: 'what happened here?',
       attachments: [{ type: 'image', mediaType: 'image/png', filename: 'shot.png' }],
@@ -238,26 +267,33 @@ async function main() {
       context: ['an earlier context entry', 'a second earlier entry'],
     };
     const snapshot = JSON.parse(JSON.stringify(full));
+    for (const text of [null, '{"enabled":true,"min_calls":1}', '{"enabled":true,"min_calls":8}', '{"enabled":false}']) {
+      for (const kind of ['composer', 'task-notification']) {
+        const files = new Map<string, string>();
+        if (text !== null) files.set(DRIFT, text);
+        const p = plugin(files);
+        await p.calls(10);
+        const event = { ...JSON.parse(JSON.stringify(snapshot)), origin: { kind } };
+        const seen = await p.submit(event);
+        assert.equal(p.coreCalls(), 1);
+        assert.deepEqual(seen, event, `prompt.submit must reach core unchanged (drift=${text}, origin=${kind}): ${JSON.stringify(seen)}`);
+      }
+    }
+    // The drift prompt.submit handler alone passes the very same object through.
+    const { on, handlers } = makeChainingOn();
+    registerDrift(on as any);
+    const dollar = makeFakeDollar(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
+    for (let i = 0; i < 5; i += 1) await handlers['tool.call'][0](dollar, { tool: 'Read', file_path: `f${i}` }, async () => ({ ref: i, result: {}, text: '' }));
     let seen: any = null;
-    let coreCalls = 0;
-    const result = await handlers['prompt.submit'][0](dollar, full, async (e: any) => {
-      coreCalls += 1;
+    await handlers['prompt.submit'][0](dollar, full, async (e: any) => {
       seen = e;
       return { text: e.text, context: e.context };
     });
-    assert.equal(coreCalls, 1);
-    for (const field of ['text', 'attachments', 'origin', 'turnId', 'wait'] as const) {
-      assert.deepEqual(seen[field], snapshot[field], `${field} must reach core unchanged, got ${JSON.stringify(seen[field])}`);
-    }
-    assert.deepEqual(Object.keys(seen).sort(), Object.keys(snapshot).sort(), 'no field added or dropped');
-    assert.deepEqual(seen.context.slice(0, 2), snapshot.context, `prior context must come first: ${JSON.stringify(seen.context)}`);
-    assert.equal(seen.context.length, 3);
-    assert.ok(seen.context[2].includes('3 tool calls'), `the note comes after: ${seen.context[2]}`);
-    assert.deepEqual(result, { text: full.text, context: seen.context }, "core's answer is returned as is");
-    assert.deepEqual(full, snapshot, "the caller's event object must not be mutated");
+    assert.equal(seen, full, 'the drift prompt.submit handler must pass the event through as the same object');
+    assert.deepEqual(full, snapshot);
   }
 
-  // --- 8. core exactly once through the full register() chain on every path ---
+  // --- 8. exactly once on every path through the full register() chain ---
   {
     const states: Array<[string, string | null]> = [
       ['absent', null], ['disabled', '{"enabled":false,"min_calls":1}'],
@@ -265,35 +301,46 @@ async function main() {
     ];
     for (const [label, text] of states) {
       for (const origin of ['composer', 'task-notification']) {
-        // a resolving core
-        {
-          const files = new Map<string, string>();
-          if (text !== null) files.set(DRIFT, text);
-          const p = plugin(files);
-          await p.calls(4);
-          await p.submit({ text: 'go', wait: false, origin: { kind: origin } });
-          assert.equal(p.coreCalls(), 1, `core called ${p.coreCalls()} times (drift=${label}, origin=${origin})`);
-        }
-        // a rejecting core is never re-entered
-        {
-          const files = new Map<string, string>();
-          if (text !== null) files.set(DRIFT, text);
-          const p = plugin(files);
-          await p.calls(4);
-          let coreCalls = 0;
-          await assert.rejects(() => p.fire(p.dollar, 'prompt.submit', { text: 'go', wait: false, origin: { kind: origin } },
-            async () => {
-              coreCalls += 1;
-              throw new Error('core refused');
-            }));
-          assert.equal(coreCalls, 1, `rejecting core called ${coreCalls} times (drift=${label}, origin=${origin})`);
-        }
+        const files = new Map<string, string>();
+        if (text !== null) files.set(DRIFT, text);
+        const p = plugin(files);
+        await p.calls(4);
+        assert.equal(p.toolRuns(), 4, `tools ran ${p.toolRuns()} times for 4 calls (drift=${label})`);
+        await p.submit({ text: 'go', wait: false, origin: { kind: origin } });
+        assert.equal(p.coreCalls(), 1, `core called ${p.coreCalls()} times (drift=${label}, origin=${origin})`);
+
+        let coreCalls = 0;
+        await assert.rejects(() => p.fire(p.dollar, 'prompt.submit', { text: 'go', wait: false, origin: { kind: origin } },
+          async () => {
+            coreCalls += 1;
+            throw new Error('core refused');
+          }));
+        assert.equal(coreCalls, 1, `rejecting core called ${coreCalls} times (drift=${label}, origin=${origin})`);
+
+        let runs = 0;
+        await assert.rejects(() => p.fire(p.dollar, 'tool.call', { tool: 'Bash', command: 'x' }, async () => {
+          runs += 1;
+          throw new Error('tool crashed');
+        }));
+        assert.equal(runs, 1, `a crashing tool ran ${runs} times (drift=${label})`);
       }
     }
 
-    // A throwing drift handler: reading `origin` throws inside the drift handler (the other
-    // prompt.submit handlers never read it), so drift fails before next and must fall through to
-    // core exactly once with the event as it arrived.
+    // A throwing drift tool.call handler (harness home lookup explodes after the tool ran): the
+    // tool runs once and core's outcome reaches the caller intact.
+    {
+      const p = plugin(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
+      let logged = '';
+      p.dollar.ui.log = (m: string) => { logged += m; };
+      p.dollar.env = { get: () => { throw new Error('env exploded'); } };
+      const core = { ref: 5, result: { stdout: 'ok' }, text: 'ok' };
+      const [outcome] = await p.calls(1, () => core);
+      assert.equal(p.toolRuns(), 1, 'a throwing drift handler must not re-run the tool');
+      assert.equal(outcome, core, 'core\'s outcome must come back as it was');
+      assert.ok(logged.includes('tool.call:drift'), `the drift skip is logged: ${logged}`);
+    }
+
+    // A throwing drift prompt.submit handler: falls through to core once, event as it arrived.
     {
       const p = plugin(new Map([[DRIFT, '{"enabled":true,"min_calls":1}']]));
       await p.calls(5);
@@ -311,20 +358,6 @@ async function main() {
       assert.equal(coreCalls, 1, `a throwing drift handler must reach core exactly once, got ${coreCalls}`);
       assert.equal(seen, event, 'the throwing drift handler must pass the event through as it arrived');
       assert.ok(logged.includes('prompt.submit:drift'), `the drift skip is logged: ${logged}`);
-    }
-
-    // A throwing drift handler whose next rejects: still exactly one core call.
-    {
-      const { on, handlers } = makeChainingOn();
-      registerDrift(on as any);
-      const event: any = { text: 'go', wait: false };
-      Object.defineProperty(event, 'origin', { enumerable: false, get() { throw new Error('origin exploded'); } });
-      let coreCalls = 0;
-      await assert.rejects(() => handlers['prompt.submit'][0](makeFakeDollar(new Map()), event, async () => {
-        coreCalls += 1;
-        throw new Error('core refused');
-      }));
-      assert.equal(coreCalls, 1);
     }
   }
 

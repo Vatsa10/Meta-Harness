@@ -1,7 +1,7 @@
 /**
  * Live drift surfacing: counts tool calls in the current stretch (the calls since the user last
- * spoke) and, once a stretch passes `min_calls`, says so ONCE as model-only context on the next
- * `prompt.submit`.
+ * spoke) and, on the call that reaches `min_calls`, says so ONCE as model-only `context` on that
+ * tool's result, so the model reads it mid-stretch rather than after the user has spoken.
  *
  * Configured by `<harnessHome>/drift.json`, shaped
  * `{"enabled": boolean, "min_calls": number, "judge": "knn"|"overlap"|"model"}`. A missing,
@@ -57,7 +57,7 @@ export function driftNote(count: number): string {
 /**
  * Origins that mean the user themself spoke, which ends the stretch. A notification, peer
  * message, schedule or plugin submission does not: the stretch it lands in keeps counting, and
- * the once-per-stretch latch keeps it from carrying a second note. An absent or unrecognised
+ * its once-per-stretch latch stays set. An absent or unrecognised
  * origin is treated as the user speaking, the choice that produces fewer notes, not more.
  */
 const NON_USER_ORIGINS = new Set([
