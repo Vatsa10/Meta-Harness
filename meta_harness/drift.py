@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import collections
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -137,3 +137,41 @@ def judge_knn(stretch, at_call: int, index: Sequence[tuple["collections.Counter[
     drifting = fraction >= threshold
     reason = f"{len(neighbours)} neighbours, correction-weighted fraction={fraction:.2f}"
     return Verdict(drifting, fraction, reason)
+
+
+def judge_model(stretch, at_call: int, request: str,
+                 complete: Callable[[str], str] | None, fallback: Callable[[], Verdict]) -> Verdict:
+    """A model judge, injected never imported: `complete` is a callable this call never
+    creates, so tests need no real model. Degrades to `fallback` whenever the capability is
+    unverified - `complete` is None, raises, or answers with anything but a leading
+    ``DRIFT:``/``OK:`` token - which is what makes depending on it safe.
+
+    The prompt carries the request text, the tool-name sequence and distinct path BASENAMES
+    only - never file contents, never full paths.
+    """
+    if complete is None:
+        return fallback()
+
+    calls = stretch.calls[:at_call]
+    basenames = sorted({Path(p).name for p in stretch.paths[:at_call] if p})
+    prompt = (
+        "A coding agent is mid-task. Judge whether it has drifted off the original request.\n"
+        f"Request: {request}\n"
+        f"Tool calls so far: {', '.join(calls)}\n"
+        f"Files touched (names only): {', '.join(basenames)}\n"
+        "Answer with a leading 'DRIFT: <reason>' or 'OK: <reason>'."
+    )
+
+    try:
+        answer = complete(prompt)
+    except Exception:
+        return fallback()
+
+    if not isinstance(answer, str):
+        return fallback()
+
+    if answer.startswith("DRIFT:"):
+        return Verdict(True, 1.0, answer[len("DRIFT:"):].strip())
+    if answer.startswith("OK:"):
+        return Verdict(False, 0.0, answer[len("OK:"):].strip())
+    return fallback()
