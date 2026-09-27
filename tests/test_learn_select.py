@@ -65,3 +65,28 @@ def test_select_returns_none_when_nothing_is_left(tmp_path: Path):
 def test_a_failure_class_keeps_its_episodes(tmp_path: Path):
     sessions = [_error_session(tmp_path, "a", "Bash", "UnicodeDecodeError: charmap", 2)]
     assert len(rank_failures(sessions)[0].episodes) == 2
+
+
+def test_select_never_targets_the_catch_all_other_cause(tmp_path: Path):
+    # `other` groups unrelated errors that matched no known cause; there is no single failure
+    # there for an artifact to fix, however often it appears.
+    store = HarnessStore(tmp_path / "store")
+    sessions = [
+        _error_session(tmp_path, "a", "Bash", "something nobody has a pattern for", 5),
+        _error_session(tmp_path, "b", "Read", "Permission denied", 1),
+    ]
+    assert rank_failures(sessions)[0].signature == "tool_error:Bash:other"
+    assert select_target(sessions, store).signature == "tool_error:Read:permission"
+
+
+def test_select_never_targets_a_permission_decision(tmp_path: Path):
+    # A human rejecting a call is not an agent mistake, and a headless replay has no human to
+    # reproduce it - a replay that cannot fail would stage a meaningless artifact as proven.
+    store = HarnessStore(tmp_path / "store")
+    sessions = [
+        _error_session(tmp_path, "a", "Bash",
+                       "The user doesn't want to proceed with this tool use. The tool use was rejected", 6),
+        _error_session(tmp_path, "b", "Bash", "This command requires approval", 4),
+        _error_session(tmp_path, "c", "Read", "Permission denied", 1),
+    ]
+    assert select_target(sessions, store).signature == "tool_error:Read:permission"

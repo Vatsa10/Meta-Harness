@@ -185,8 +185,16 @@ MAX_REPLAY_FILE_CHARS = 8000
 
 
 def _request_before(session: Session, turn_index: int) -> str:
+    """The human's last request before `turn_index`.
+
+    Harness-injected user-role text (a skill's body, a task notification, a command marker) is
+    not a request; replaying it would ask the agent to act on a document, not on the user.
+    """
+    from .waste import _is_harness_text  # waste imports replay; import here to avoid a cycle
+
     asks = [turn.text for turn in session.turns
-            if turn.role == "user" and turn.text and turn.index < turn_index]
+            if turn.role == "user" and turn.text and turn.index < turn_index
+            and not _is_harness_text(turn.text.lstrip())]
     return asks[-1] if asks else ""
 
 

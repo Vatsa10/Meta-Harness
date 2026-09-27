@@ -172,6 +172,16 @@ def _signature_weights(sessions: Sequence[Session]) -> dict[str, float]:
     return {signature: totals[signature] / counts[signature] for signature in totals}
 
 
+# Causes `learn` never targets. `other` is the catch-all: unrelated errors grouped only because
+# none matched a known pattern, so there is no one failure for an artifact to fix. The rest are
+# permission decisions, not agent mistakes: a headless replay has no human to reject a call or
+# answer an approval prompt, so it could never reproduce them, and a replay that cannot fail
+# would stage a meaningless artifact as proven. Rejection memory handles re-proposals live.
+UNLEARNABLE_CAUSES = frozenset({
+    "other", "user-rejected", "needs-approval", "blocked-policy", "permission-denied-tool",
+})
+
+
 def select_target(sessions: Sequence[Session], store: HarnessStore,
                   home: Path | None = None) -> FailureClass | None:
     """The most frequent failure not already covered by an installed artifact or a tombstone.
@@ -186,6 +196,8 @@ def select_target(sessions: Sequence[Session], store: HarnessStore,
     covered = store.covered()
     weights = _signature_weights(sessions)
     for failure in merge_failures(observed_failures(home), rank_failures(sessions), weights=weights):
+        if failure.signature.rsplit(":", 1)[-1] in UNLEARNABLE_CAUSES:
+            continue
         if failure.signature not in covered:
             return failure
     return None

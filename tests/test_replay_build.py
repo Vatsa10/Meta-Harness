@@ -89,3 +89,22 @@ def test_correction_episodes_are_not_mechanically_replayable(tmp_path: Path):
                              turn_index=2, tools=["Edit"], user_text="that's wrong")
     # No mechanical expectation exists, so there is nothing to verify without a human.
     assert build_replay(episode, _session(tmp_path), home=tmp_path / "claude") is None
+
+
+def test_replay_instruction_skips_harness_injected_text(tmp_path: Path):
+    # A skill loading injects its body as a user-role message. That is not the user's request,
+    # and replaying it would ask the agent to act on a document.
+    path = _transcript(tmp_path / "proj" / "s3.jsonl", [
+        _human("make the parser handle empty input"),
+        _human("Base directory for this skill: C:\plugins\skills\writing-plans\n\n# Writing Plans"),
+        _assistant(tools=["Bash"]),
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t0", "is_error": True,
+             "content": "UnicodeDecodeError: charmap"}]}},
+    ])
+    episode = FailureEpisode(session_id="s3", project="proj", kind="tool_error", turn_index=10,
+                             tools=["Bash"], assistant_text="UnicodeDecodeError: charmap")
+    replay = build_replay(episode, parse_session(path, include_text=True), home=tmp_path / "claude")
+    assert replay is not None
+    assert "parser" in replay["instruction"]
+    assert "Base directory for this skill" not in replay["instruction"]
