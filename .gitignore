@@ -11,3 +11,7 @@ fast-jev-compaction/
 
 # Isolated worktrees created for parallel agents
 .claude/worktrees/
+
+# Written by Claude Code when it loads the hooks module
+/tsconfig.json
+.claude-plugin/types/
