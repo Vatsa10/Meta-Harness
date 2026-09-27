@@ -41,8 +41,9 @@ python -m meta_harness learn --accept <id>
 Three layers. **Observe:** a `tool.call` hook records tool errors and repeated calls to a
 per-session log. **Learn:** the CLI above ranks those failures together with ones mined from past
 transcripts, proposes one artifact at the strongest layer that can carry it, and replays it.
-**Enforce:** a `tool.check` hook applies accepted rules and a `prompt.section` hook injects
-accepted context.
+**Enforce:** a `tool.check` hook applies accepted rules and a `prompt.submit` hook attaches
+accepted injections to the user's turn as context. The plugin listens only on `tool.call`,
+`tool.check` and `prompt.submit`; nothing rewrites the system prompt.
 
 An artifact is staged only if it fixes the failure it was born from; one whose origin replay
 still fails is archived with the verdict that killed it. With `--tasks`, it must also score no
@@ -50,10 +51,51 @@ worse than the baseline on that task set, with context cost as the tiebreak; wit
 that check does not run and the recorded verdict says so. Nothing installs itself.
 
 Artifacts sit at four layers, strongest first: `rule` (a `tool.check`, costing no standing
-tokens and not ignorable) > `injection` (a prompt section, paid every turn) > `skill` >
-`doctrine`. Only `rule` and `injection` are enforced by the hooks today. That ordering is an
-argued design claim, not a measured one — `tools/prose_vs_rule.py` is the experiment that would
-test it, and it has not been run here.
+tokens and not ignorable) > `injection` (context attached to a matching turn, paid when it fires) > `skill` >
+`doctrine`. Only `rule` and `injection` are enforced by the hooks today. **That ordering is this
+project's own design position — it appears nowhere in `paper.pdf`.** `tools/prose_vs_rule.py` is
+the experiment that would test it against a measured baseline, and it has not been run here.
+
+What the paper does establish (Table 3, online text classification, median/best score): a
+proposer given scores only reaches 34.6/41.3, scores plus an LLM summary reaches 34.9/38.7, and
+full raw execution traces reach 50.0/56.7. Raw trace access is the paper's key ingredient — a
+summary "may even hurt by compressing away diagnostically useful details." Appendix A.2 adds a
+second, independently evidenced principle: on TerminalBench-2 the proposer regressed six
+consecutive iterations while editing prompts and control flow, diagnosed the shared prompt edit
+as the confound, and then won with a purely additive change. Additive beats invasive.
+
+One measured negative result of our own: the paper's winning TerminalBench-2 discovery was an
+environment snapshot injected before the first model call. That does not transfer to a
+developer's own repository, where the environment is already known — 50 orientation calls across
+344 sessions on this machine. We do not build it.
+
+### Waste, and what the hooks do inside a session
+
+`python -m meta_harness waste` (add `--json`, `--this-project`, `--since`, `--limit`) reads your
+transcripts and reports stretches of tool calls that ended with you correcting course, the calls
+they burned, and identical failures retried. It also writes `<harness_home>/waste.json`. Its
+correction count is a keyword heuristic: in a hand-labelled audit, 11 of the 21 flagged stretches
+audited were genuine corrections, and recall is unmeasured. The report carries that caveat itself;
+treat the numbers as an estimate, not an audit.
+
+Beyond enforcing artifacts, the hooks add (details in [hooks/README.md](hooks/README.md)):
+
+- **Rejection memory** - a call you rejected is denied if retried identically in the same session.
+- **"Stop doing X" session rules** - a human's own prompt like "stop running pytest" denies
+  matching calls immediately, for the rest of that session only. Prompts from plugins, peers,
+  schedules or notifications never create one. Nothing makes a rule permanent yet.
+- **A first-run line** - once, a hedged estimate of calls that went to later-corrected work. It
+  needs a prior `meta-harness waste` run; nothing mines your history in the background.
+- **A drift note - built, tested, and shipped disabled.** It would say once when a long stretch
+  of calls has run since you last spoke. The ship gate refused every judge (word-overlap
+  precision about 0.01; the kNN judge never fired; the model judge was never evaluated), so it is
+  off unless `drift.json` enables it, and "enabled" then means a plain call-count threshold: the
+  config's `judge` field is validated but never run.
+- **`/harness waste | pending | why`** - the report, what is staged or pending, and why the last
+  denial happened.
+
+Mined failures are weighted by recency and by Claude Code version (`version_weight`). On the
+current data the version weight is inert: every session shares Claude Code minor 2.1.
 
 The hooks need Claude Code's function-hook surface, which is early access:
 
@@ -195,7 +237,9 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
 - `meta_harness/replay.py` — failure signatures, and the replay a proposed artifact is scored on.
 - `meta_harness/learn.py` — ranking, proposal, and the retention decision.
 - `meta_harness/harness_store.py` — staged and installed artifacts, and the accept/reject gate.
-- `hooks/` — the function-hook layer: observe, enforce, inject. Fails open by construction.
+- `hooks/` — the function-hook layer: observe, enforce, inject, rejection memory, session rules,
+  first-run line, drift note (disabled). Fails open by construction.
+- `meta_harness/waste.py` — the waste report behind `meta-harness waste`.
 - `tools/prose_vs_rule.py` — the prose-versus-mechanism experiment (built, not yet run).
 - `docs/plugin.md` — the Claude Code plugin: skills, agent, install, Haiku defaults.
 - `docs/using-with-coding-agents.md` — Claude Code as proposer, optimizing agent harnesses,
@@ -209,5 +253,5 @@ Seven working examples live in `baselines/`; the exact contract handed to the pr
 python -m pytest -q
 ```
 
-252 tests, no network calls. The hook layer is covered by Node tests under `hooks/` that the
+No network calls. The hook layer is covered by Node tests under `hooks/` that the
 Python suite shells out to; they are skipped, with the reason stated, when `node` is absent.

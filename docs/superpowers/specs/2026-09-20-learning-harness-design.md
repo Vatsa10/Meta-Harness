@@ -1,5 +1,10 @@
 # Learning Harness Design
 
+> **Corrected by [2026-09-26-drift-and-waste-design.md](2026-09-26-drift-and-waste-design.md).**
+> §4 below labels the artifact layer ordering `rule > injection > skill > doctrine` as a claim of
+> `paper.pdf`. It is not: the ordering is this project's own design position and appears nowhere
+> in the paper. Where this document and the newer one disagree, the newer one wins.
+
 A Claude Code harness that improves at coding from its own failures, where every change is
 scored against the failure that produced it before it is adopted, and adopted changes are
 enforced by mechanism rather than suggested in prose.

@@ -1,61 +1,160 @@
 /**
  * Meta-Harness function hooks: observe failures, enforce learned artifacts.
  *
- * Every handler is wrapped in `safely`, which swallows errors and falls through to `next`.
- * A learning system that can break a session is worse than no learning system.
+ * Every handler fails open: most run inside `guardBefore`, `guardAfter` or `guardAfterMap`, all of which swallow a
+ * throw and fall through to `next` rather than break the turn — and none ever calls `next` a
+ * second time once it has been called. `registerBootstrap` does its fail-open handling by hand,
+ * so its post-`next` marker write is swallowed locally instead of reaching any wrapper at all. A learning system that can break a session, or submit the
+ * human's prompt twice, is worse than no learning system.
+ *
+ * Per-turn features (rejection memory, session rules, injections, the first-run message) live on
+ * `prompt.submit`, never `prompt.section`. `prompt.section` fires once per NAMED SECTION of the
+ * system prompt, its sections are cached for the whole session, and returning `{ text }` REPLACES
+ * that section — there is no `event.prompt`/`event.text` carrying the user's words on it, and a
+ * handler with no section-name filter fires for and can overwrite every section that exists,
+ * including ones it has never heard of. `prompt.submit` carries the user's actual turn as
+ * `e.text`, and a hook adds anything the model should see via `next({ ...e, context: [...] })`
+ * without touching the system prompt at all.
  */
 
 import type { On, PluginOptions, Register } from 'claude-code';
-import { callKey, evaluateRule, loadInstalled, loadRules, type Rule, type SessionState } from './rules.js';
+import {
+  addSessionRule,
+  callKey,
+  evaluateRule,
+  loadInstalled,
+  loadRules,
+  parseStopInstruction,
+  rememberRejection,
+  stableStringify,
+  toolArgs,
+  type Rule,
+  type SessionState,
+  wasRejected,
+} from './rules.js';
+import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
 
-export type Fallible<E, R> = (dollar: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
+export type Fallible<E, R> = (io: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
-/** Wrap a handler so a throw becomes a pass-through instead of a broken turn. */
-export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    try {
-      return await handler(dollar, event, next);
-    } catch (error) {
-      try {
-        dollar.ui.log(
-          `meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`,
-        );
-      } catch {
-        // logging must never be the thing that breaks the turn either
-      }
-      return next(event);
-    }
-  };
+/** Log a skip the same way everywhere, without ever risking a second throw of its own. */
+function logSkip(io: any, name: string, error: unknown): void {
+  try {
+    io.ui.log(`meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`);
+  } catch {
+    // logging must never be the thing that breaks the turn either
+  }
 }
 
 /**
- * Wrap a handler whose work happens AFTER the tool has already run.
- *
- * `safely` recovers by calling `next(event)`, which is correct only for a handler that calls
- * `next` last: for a post-`next` handler that would run the tool a SECOND time, duplicating the
- * side effect of a Bash or Write. Here `next` is called exactly once, up front, and the fallible
- * work is what gets swallowed — so an observer that throws costs an observation, never a repeated
- * command.
+ * Why the guards below take `(name, io, event, next, handler)` and are CALLED from inside a
+ * function literal instead of returning a hook: Claude Code's hooks loader rejects any `on(...)`
+ * whose hook argument is not a function literal (or the name of one) written in the call — a
+ * wrapper call such as `on('tool.call', afterCall(...))` fails the whole module, so no hook runs.
+ * Every registration is therefore `on('<event>', async ($, e, next) => guardX(..., $, e, next, ...))`;
+ * tests/test_hook_literals.py enforces that statically.
  */
+
+/**
+ * Runs a handler that may call `next` itself, so a throw becomes a pass-through instead of a
+ * broken turn. `next` is the rest of the chain (for prompt.submit, the human's prompt reaching
+ * core; for tool.check, the tool running). Recovering a throw by calling it again is only safe if
+ * the handler never reached it: once it has, a second call submits the prompt twice or runs the
+ * tool twice. So once `next` has been called, its own outcome stands on every path.
+ */
+export async function guardBefore<E, R>(
+  name: string,
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (next: (e: E) => Promise<R>) => Promise<R>,
+): Promise<R> {
+  let called = false;
+  let settled: { ok: true; value: R } | { ok: false; error: unknown } | null = null;
+  const once = async (e: E): Promise<R> => {
+    called = true;
+    try {
+      const value = await next(e);
+      settled = { ok: true, value };
+      return value;
+    } catch (error) {
+      settled = { ok: false, error };
+      throw error;
+    }
+  };
+  try {
+    return await handler(once);
+  } catch (error) {
+    logSkip(io, name, error);
+    if (!called) return next(event);
+    const outcome = settled as { ok: true; value: R } | { ok: false; error: unknown } | null;
+    if (outcome?.ok) return outcome.value;
+    throw outcome ? outcome.error : error;
+  }
+}
+
+/**
+ * Runs a handler whose work happens AFTER the tool has already run. `guardBefore` recovers a
+ * throw that happened before `next` by calling `next(event)`: for a post-`next` handler that
+ * would run the tool a SECOND time, duplicating the side effect of a Bash or Write. Here `next` is
+ * called exactly once, up front (a rejection propagates once, untouched), and the fallible work is
+ * what gets swallowed — so an observer that throws costs an observation, never a repeated command.
+ */
+export async function guardAfter<E, R>(
+  name: string,
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<void>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    await handler(outcome);
+  } catch (error) {
+    logSkip(io, name, error);
+  }
+  return outcome;
+}
+
+/**
+ * Like `guardAfter`, for a handler that may return a REPLACEMENT outcome (a copy of `next`'s with
+ * something appended). `next` is called exactly once, up front; if the handler throws, core's
+ * outcome is returned as it came, never a second call to `next`.
+ */
+export async function guardAfterMap<E, R>(
+  name: string,
+  io: any,
+  event: E,
+  next: (e: E) => Promise<R>,
+  handler: (outcome: R) => Promise<R>,
+): Promise<R> {
+  const outcome = await next(event);
+  try {
+    return await handler(outcome);
+  } catch (error) {
+    logSkip(io, name, error);
+    return outcome;
+  }
+}
+
+/** `guardBefore` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
+export function safely<E, R>(name: string, handler: Fallible<E, R>): Fallible<E, R> {
+  return (io, event, next) => guardBefore(name, io, event, next, (once) => handler(io, event, once));
+}
+
+/** `guardAfter` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
 export function afterCall<E, R>(
   name: string,
-  handler: (dollar: any, event: E, outcome: R) => Promise<void>,
+  handler: (io: any, event: E, outcome: R) => Promise<void>,
 ): Fallible<E, R> {
-  return async (dollar, event, next) => {
-    const outcome = await next(event);
-    try {
-      await handler(dollar, event, outcome);
-    } catch (error) {
-      try {
-        dollar.ui.log(
-          `meta-harness ${name} skipped (${error instanceof Error ? error.message : String(error)})`,
-        );
-      } catch {
-        // logging must never be the thing that breaks the turn either
-      }
-    }
-    return outcome;
-  };
+  return (io, event, next) => guardAfter(name, io, event, next, (outcome) => handler(io, event, outcome));
+}
+
+/** `guardAfterMap` as a hook-returning wrapper, for tests. Never pass its result to `on` directly. */
+export function afterCallMap<E, R>(
+  name: string,
+  handler: (io: any, event: E, outcome: R) => Promise<R>,
+): Fallible<E, R> {
+  return (io, event, next) => guardAfterMap(name, io, event, next, (outcome) => handler(io, event, outcome));
 }
 
 const REPEAT_WINDOW = 6;
@@ -64,16 +163,34 @@ const REPEAT_THRESHOLD = 4;
 type Recent = { tool: string; key: string };
 
 /** The harness's home directory: overridable for tests, otherwise under the user's profile. */
-function harnessHome(dollar: any): string {
-  const override = dollar.env?.get?.('META_HARNESS_HOME');
-  return override || `${dollar.env?.get?.('USERPROFILE') || dollar.env?.get?.('HOME')}/.claude/harness`;
+async function harnessHome(io: any): Promise<string> {
+  // `$.env.get` answers with a Promise in Claude Code; awaiting also accepts a plain value.
+  const override = await io.env?.get?.('META_HARNESS_HOME');
+  if (override) return override;
+  const profile = (await io.env?.get?.('USERPROFILE')) || (await io.env?.get?.('HOME'));
+  return `${profile}/.claude/harness`;
 }
 
 /**
  * Mirrors meta_harness.replay.ERROR_PATTERNS: same regex text and slug, in the same order, so a
  * `cause` recorded here dedupes against what Python's `_cause()` computes from the same text.
- * `tests/test_hook_assets.py::test_ts_cause_patterns_match_python_error_patterns` asserts this
- * list and the Python one cannot drift apart silently.
+ *
+ * Every backslash in these patterns is doubled (`\\d`, `\\[`, `\\(`, ...). These are plain JS
+ * string literals fed to `new RegExp(pattern, 'i')` below, and a JS string literal silently
+ * drops a backslash in front of any character it does not recognize as an escape -- `\d`, `\S`,
+ * `\[`, `\]`, `\(` and `\)` are NOT recognized string escapes (only `\n`, `\r`, `\t`, `\'`, `\\`,
+ * etc. are), so a single backslash here compiles to a regex with a missing metacharacter escape
+ * (`\d+` -> a literal-`d` character class, `\(...\)` -> an unescaped group, and so on). A prior
+ * version of this file used single backslashes throughout, which type-checked and passed a
+ * test that only compared source text, while classifying 235 of 1,167 real failure texts
+ * differently from the Python side. Regex literals (`/.../i`) would not have this problem, but
+ * would need a parallel array-of-RegExp construction; doubling the backslash here keeps this
+ * array's shape (string, string) identical to ERROR_PATTERNS's (str, str), which is what the
+ * parity test below relies on to generate its own fixtures programmatically in the future.
+ *
+ * `tests/test_hook_assets.py::test_ts_and_python_cause_agree_on_fixtures` actually EXECUTES both
+ * classifiers over `tests/cause_fixtures.py::CAUSE_FIXTURES` (via node) and asserts identical
+ * slugs -- not a source-text comparison, which cannot detect this class of bug.
  *
  * UnicodeEncodeError must stay ordered before the decode/charmap/cp1252 pattern: an encode
  * failure's message can also contain the word "decode" in surrounding text, so checking decode
@@ -89,6 +206,39 @@ const CAUSE_PATTERNS: ReadonlyArray<readonly [string, string]> = [
   ['has not been read yet|must read.*before', 'unread-edit'],
   ['String to replace not found|old_string', 'edit-mismatch'],
   ['SyntaxError|unterminated', 'syntax'],
+  ['contains multiple operations|Compound command changes working directory', 'compound-shell'],
+  ['requires approval|denied by the Claude Code auto mode classifier', 'needs-approval'],
+  ['doesn\'t want to proceed|tool use was rejected', 'user-rejected'],
+  ['Blocked:|blocked by a deny rule', 'blocked-policy'],
+  ['unexpected EOF while looking|simple_expansion|expansion obfuscation', 'shell-quoting'],
+  ['not in Claude\'s tab group|determine which page this action targets', 'tab-target'],
+  ['modified since read', 'stale-read'],
+  ['EISDIR|illegal operation on a directory', 'is-directory'],
+  ['Traceback \\(most recent call last\\)', 'python-traceback'],
+  ['Permission to (use|read).*has been denied', 'permission-denied-tool'],
+  ['File does not exist', 'missing-path'],
+  ['is temporarily unavailable', 'model-unavailable'],
+  ['InputValidationError|Workflow script file not found|No task found with ID|Invalid workflow script|scriptPath must be a script path|Unknown skill:|Task ID is required', 'workflow-error'],
+  ['Failed to execute JavaScript|JavaScript execution error', 'js-error'],
+  ['Error capturing screenshot|actions\\[\\d+\\][^\\n]*failed|Failed to find element|Failed to execute action|Error capturing zoomed screenshot|is not a supported form input|Can\'t interact with browser-internal', 'browser-action-failed'],
+  ['No such tool available', 'unknown-tool'],
+  ['hook did not respond before|tool did not respond in time', 'hook-timeout'],
+  ['Found \\d+ matches of the string', 'edit-mismatch'],
+  ['Python was not found|pdftoppm is not installed', 'missing-command'],
+  ['node:internal/modules/(package_json_reader|run_main)|Cannot find module|ERR_MODULE_NOT_FOUND', 'module-not-found'],
+  ['"error":\\{"name":"(HttpException|McpError)"|already exists in local config', 'api-error'],
+  ['fatal: (pathspec|detected dubious ownership|ambiguous argument|.*is outside repository)|ignored by one of your \\.gitignore|docker: Error response from daemon', 'git-error'],
+  ['On branch \\S+\\r?\\nYour branch is (up to date|ahead of)|warning: in the working copy of', 'git-noise'],
+  ['npm error code|npm warn exec', 'npm-error'],
+  ['exceeds maximum allowed tokens', 'output-too-large'],
+  ['ConnectionRefusedError|connection refused|ECONNREFUSED', 'connection-refused'],
+  ['was blocked\\. For security|is blocked\\. This path is protected|denied by your permission', 'blocked-policy'],
+  ['=+ FAILURES =+|ERROR at setup of|\\bAssertionError\\b|FAILED \\S+::', 'test-failure'],
+  ['tab group no longer exists|Missing required parameter tabId', 'tab-target'],
+  ['needs design-system authorization', 'needs-approval'],
+  ['ENAMETOOLONG', 'path-too-long'],
+  ['error TS\\d+|imported but unused', 'ts-error'],
+  ['not logged into any GitHub hosts', 'gh-auth-error'],
 ];
 
 /** Classifies failure text into the same slug meta_harness.replay._cause() would produce. */
@@ -101,9 +251,9 @@ export function cause(text: string): string {
 }
 
 /** This session's id, or 'unknown' when the engine cannot supply one; never throws. */
-async function currentSessionId(dollar: any): Promise<string> {
+async function currentSessionId(io: any): Promise<string> {
   try {
-    const id = await dollar.session?.id?.();
+    const id = await io.session?.id?.();
     return id ? String(id) : 'unknown';
   } catch {
     return 'unknown';
@@ -119,15 +269,34 @@ async function currentSessionId(dollar: any): Promise<string> {
  * it; a reader globs `observed-*.jsonl` under the harness home. `$.fs.write` creates missing
  * parent directories itself, so a fresh harness home on a new machine needs no separate mkdir.
  */
-async function observe(dollar: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
-  const path = `${harnessHome(dollar)}/observed-${sessionId}.jsonl`;
+async function observe(io: any, sessionId: string, record: Record<string, unknown>): Promise<void> {
+  const path = `${(await harnessHome(io))}/observed-${sessionId}.jsonl`;
   const line = `${JSON.stringify({ ts: new Date().toISOString(), ...record })}\n`;
-  const existing = (await dollar.fs.exists(path)) ? await dollar.fs.read(path) : '';
-  await dollar.fs.write(path, existing + line);
+  const existing = (await io.fs.exists(path)) ? await io.fs.read(path) : '';
+  await io.fs.write(path, existing + line);
 }
 
 function resultText(result: unknown): string {
   return typeof result === 'string' ? result : JSON.stringify(result ?? '');
+}
+
+/**
+ * The text of a real `tool.call` outcome (ToolCallResult) worth checking for a rejection
+ * announcement — and ONLY when the outcome actually says the call was refused or errored.
+ *
+ * The `deny` branch's `deny` string always counts: a hook or core only sets it on an actual
+ * refusal. The answered branch's `text`/`result` count ONLY when `isError` is true — `text` and
+ * `result` are present on every SUCCESSFUL call too (a normal Read's file contents are `result`,
+ * and its `text` is the same content joined for the model), so checking them unconditionally
+ * means a Read of any file that happens to CONTAIN the phrase "tool use was rejected" — this very
+ * file, for one — gets recorded as a rejection and denied for the rest of the session. Gating on
+ * `isError`/`deny` is what keeps a successful result's mere text out of consideration entirely.
+ */
+function rejectionAnnouncement(outcome: any): string {
+  if (typeof outcome?.deny === 'string' && outcome.deny.length > 0) return outcome.deny;
+  if (outcome?.isError !== true) return '';
+  const parts = [outcome?.text, resultText(outcome?.result)];
+  return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
 }
 
 /**
@@ -149,67 +318,206 @@ function isError(result: unknown): boolean {
   const text = resultText(result);
   // Otherwise only an error ANNOUNCED at the start of the result counts, plus a short list of
   // phrases a tool only ever emits when it refused.
-  return /^\s*"?(error|[A-Za-z.]*Error:|Traceback \(most recent call last\))/i.test(text)
+  return /^\s*"?(error|[A-Za-z.]*Error:|Traceback \(most recent call last\))/i.test(text)
     || ERROR_PHRASES.test(text);
 }
 
+/**
+ * Launchers stripped from the front of a Bash command before a session rule's pattern is
+ * compared: `python -m`, `python3 -m`, `py -m`, `npx`, `uv run`, `poetry run`, `pipx run`, plus a
+ * leading `env` and any `VAR=value` assignments. Takes lower-cased whitespace tokens.
+ */
+export function stripLaunchers(tokens: string[]): string[] {
+  let rest = tokens;
+  for (;;) {
+    if (rest[0] === 'env' || /^[a-z_][a-z0-9_]*=/.test(rest[0] ?? '')) {
+      rest = rest.slice(1);
+    } else if (['python', 'python3', 'py'].includes(rest[0] ?? '') && rest[1] === '-m') {
+      rest = rest.slice(2);
+    } else if (rest[0] === 'npx') {
+      rest = rest.slice(1);
+    } else if (['uv', 'poetry', 'pipx'].includes(rest[0] ?? '') && rest[1] === 'run') {
+      rest = rest.slice(2);
+    } else {
+      return rest;
+    }
+  }
+}
+
+/** The deny reason for a session rule, saying what the matching actually does. */
+export function sessionRuleReason(tool: string, rule: { pattern: string; requires?: string; flag?: string }): string {
+  const head = 'Session rule from this conversation: this blocks any';
+  if (tool !== 'Bash') {
+    return `${head} ${tool} call whose input contains "${rule.pattern}" [session-rule]`;
+  }
+  const what = `${head} Bash command whose first words are "${rule.pattern}" `
+    + '(after any launcher such as python -m, npx, uv run, poetry run, pipx run, env or VAR=x)';
+  if (rule.requires) return `${what} unless "${rule.requires}" is one of its words [session-rule]`;
+  if (rule.flag) return `${what} and "${rule.flag}" is one of its words [session-rule]`;
+  return `${what}, whatever its arguments [session-rule]`;
+}
+
 /** Observes tool.call outcomes: records errors and repeated identical calls to observed-<session>.jsonl. */
-export function registerObserver(on: On): void {
+export function registerObserver(add: On): void {
   const recent: Recent[] = [];
 
-  // afterCall, not safely: this handler's work runs after the tool has already executed, so a
+  // guardAfter, not guardBefore: this handler's work runs after the tool has already executed, so a
   // recovery that re-entered next() would run the tool twice.
-  on('tool.call', afterCall('tool.call', async (dollar, event: any, outcome: any) => {
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call', io, event, next, async (outcome: any) => {
     const tool = String(event?.tool ?? 'unknown');
-    const key = `${tool}:${JSON.stringify(event?.input ?? {}).slice(0, 200)}`;
+    const args = toolArgs(event);
+    const key = `${tool}:${stableStringify(args).slice(0, 200)}`;
 
     recent.push({ tool, key });
     if (recent.length > REPEAT_WINDOW) recent.shift();
     const repeats = recent.filter((entry) => entry.key === key).length;
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     if (repeats >= REPEAT_THRESHOLD) {
-      await observe(dollar, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: event?.input });
+      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: args });
     }
     const text = resultText((outcome as any)?.result);
     if (isError((outcome as any)?.result)) {
-      await observe(dollar, sessionId, {
+      await observe(io, sessionId, {
         kind: 'tool_error',
         tool,
         cause: cause(text),
-        input: event?.input,
+        input: args,
         text: text.slice(0, 400),
       });
     }
   }));
 }
 
+/** Unambiguous phrases the engine emits when the human declines a tool call outright, as opposed
+ * to the tool itself failing. Recording on these two phrases only (never a bare "no" in the
+ * conversation) keeps rejection memory from firing on an ordinary declined suggestion in prose. */
+const REJECTION_PATTERN = /doesn't want to proceed|tool use was rejected/i;
+
 /**
- * Enforces installed `rule` artifacts at tool.check: the layer that costs no standing tokens
- * and cannot be talked around, because it runs before the tool call, not as prose in a prompt.
+ * Enforces installed `rule` artifacts at tool.check: the layer that costs no standing tokens and
+ * cannot be talked around, because it runs before the tool call, not as prose in a prompt.
  *
- * Registers two independent `tool.call`/`tool.check` handlers alongside registerObserver's own
- * `tool.call` handler above. Each handler here calls `next` unconditionally (the read-tracking
- * one always; the tool.check one on every path that does not deny), so the two compose in
- * either registration order: a handler that always forwards never depends on what ran before it.
+ * Also carries this session's rejection memory (task 13) and session-scoped "stop doing X" rules
+ * (task 14), both stored on the same `SessionState` so `tool.check` can consult them ahead of the
+ * installed-rule loop. Rejection detection lives in its own `tool.call` handler below; there is
+ * no read-tracking handler here, since read-before-edit is the engine's job, not this plugin's
+ * (see hooks/rules.ts). Claude Code refuses a second registration of one event without a matcher, so these
+ * hooks are added to `register`'s per-event list and chained inside its single `on` per event.
+ * `prompt.submit` (not `prompt.section`) is where the human's own words
+ * are read, since only `prompt.submit`'s event carries `text`.
  */
-export function registerRules(on: On): void {
-  const state: SessionState = { readPaths: new Set<string>(), callCounts: new Map<string, number>() };
+export function registerRules(add: On): void {
+  const state: SessionState = {
+    callCounts: new Map<string, number>(),
+    rejected: new Map<string, string>(),
+    sessionRules: [],
+  };
   let rules: Rule[] | null = null;
 
-  on('tool.call', safely('tool.call:read-tracking', async (dollar, event: any, next) => {
-    if (event?.tool === 'Read') {
-      const path = String(event?.input?.file_path ?? '');
-      if (path) state.readPaths.add(path);
+  // guardAfter, not guardBefore: rejection detection reads the outcome, which only exists AFTER the
+  // tool has already run (or been denied), so a `guardBefore` recovery re-entering next() would run
+  // the tool a second time. `next` resolves before this handler's own body runs at all.
+  //
+  // There is no read-tracking hook here any more: a live test proved Claude Code's own engine
+  // already denies an Edit/Write of a file not read this session ("File has not been read yet"),
+  // and it runs before this plugin ever sees the call. The plugin-side copy of that check (a
+  // `read-before-edit` rule plus this handler's read-tracking) is retired -- see hooks/rules.ts.
+  add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call:rejection-memory', io, event, next, async (outcome: any) => {
+    const text = rejectionAnnouncement(outcome);
+    if (text && REJECTION_PATTERN.test(text)) {
+      rememberRejection(state, String(event?.tool ?? ''), toolArgs(event));
+    }
+  }));
+
+  // prompt.submit, not prompt.section: only prompt.submit's event carries the human's actual
+  // words (`e.text`). This handler mutates session state only (never the model-visible prompt),
+  // so it always passes `event` through to `next` unchanged.
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:nlrules', io, event, next, async (next) => {
+    const text = String(event?.text ?? '');
+    // Only a human's own prompt may create a denying rule: a peer, plugin, scheduled trigger or
+    // notification saying "don't run pytest" is not the user asking. Same origin rule the drift
+    // note uses to decide who spoke (`userSpoke`, hooks/drift.ts).
+    const instruction = userSpoke(event) ? parseStopInstruction(text) : null;
+    if (instruction) {
+      addSessionRule(state, instruction);
+      const path = `${(await harnessHome(io))}/pending-session-rules.json`;
+      await io.fs.write(path, JSON.stringify(state.sessionRules, null, 2));
+    }
+    if (text) {
+      const lower = text.toLowerCase();
+      for (const [key, snippet] of [...(state.rejected ?? new Map<string, string>()).entries()]) {
+        if (snippet && lower.includes(snippet.toLowerCase())) {
+          state.rejected!.delete(key);
+        }
+      }
     }
     return next(event);
   }));
 
-  on('tool.check', safely('tool.check', async (dollar, event: any, next) => {
-    if (rules === null) rules = await loadRules(dollar, harnessHome(dollar));
+  add('tool.check', async (io: any, event: any, next: any) => guardBefore('tool.check', io, event, next, async (next) => {
+    const tool = String(event?.tool ?? '');
+    if (wasRejected(state, tool, event?.input)) {
+      return {
+        decision: 'deny',
+        reason: 'This exact call was already rejected earlier this session [rejection-memory]',
+      };
+    }
+    for (const rule of state.sessionRules ?? []) {
+      if (rule.tool !== tool) continue;
+      // Bash rules match the command string, tokenised on whitespace — never a substring of the
+      // whole JSON input, or a rule for "git push" would also fire on `git status` (which merely
+      // contains the token "git") or on an unrelated call whose description happens to mention
+      // the pattern. Non-Bash rules (Edit-like verbs) have no `command` field to tokenise, so
+      // they fall back to the same JSON-substring check as before.
+      const command = tool === 'Bash' ? String((event?.input as any)?.command ?? '') : '';
+      const commandTokens = command.split(/\s+/).filter(Boolean).map((t) => t.toLowerCase());
+      const patternTokens = rule.pattern.toLowerCase().split(/\s+/).filter(Boolean);
+
+      // The pattern is matched against the command's first words AFTER any launcher, so a rule
+      // about `pytest` also covers `python -m pytest`, `uv run pytest`, `FOO=1 pytest`, ...
+      const programTokens = stripLaunchers(commandTokens);
+      let matches: boolean;
+      if (tool === 'Bash') {
+        matches = patternTokens.length > 0
+          && patternTokens.every((t, i) => programTokens[i] === t);
+      } else {
+        const haystack = JSON.stringify(event?.input ?? {}).toLowerCase();
+        matches = haystack.includes(rule.pattern.toLowerCase());
+      }
+      if (!matches) continue;
+
+      // A "without <flag>" qualifier IS representable: the rule allows the call when that flag
+      // is present, so "stop running pytest without -q" denies `pytest tests/` but ALLOWS
+      // `pytest -q` — the exact command the human asked to keep, not the command they asked to
+      // stop. Matched as a whole token of the command string, not a substring of the JSON input
+      // (a substring match would let "--quick" satisfy a "-q" requirement it does not).
+      if (rule.requires) {
+        const required = String(rule.requires).toLowerCase();
+        const present = tool === 'Bash'
+          ? commandTokens.includes(required)
+          : JSON.stringify(event?.input ?? {}).toLowerCase().includes(required);
+        if (present) continue;
+      }
+
+      // The opposite polarity: a flag named directly in the object ("git push --force") means
+      // the rule denies ONLY calls that also carry that flag as a whole token — a plain
+      // "git push origin main" must stay allowed.
+      if (rule.flag) {
+        const flag = String(rule.flag).toLowerCase();
+        const present = tool === 'Bash'
+          ? commandTokens.includes(flag)
+          : JSON.stringify(event?.input ?? {}).toLowerCase().includes(flag);
+        if (!present) continue;
+      }
+
+      return { decision: 'deny', reason: sessionRuleReason(tool, rule) };
+    }
+    if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
-      if (verdict.deny) return { decision: 'deny', reason: verdict.reason };
+      if (!verdict.deny) continue;
+      return { decision: 'deny', reason: verdict.reason };
     }
     // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this
     // exact call has already been allowed. Counting at tool.check rather than after the result
@@ -246,8 +554,8 @@ function truncate(text: string, limit: number): string {
 }
 
 /** Installed `injection` artifacts only: a `rule`, `skill` or `doctrine` row is never surfaced here. */
-async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
-  const artifacts = await loadInstalled(dollar, home, 'injection');
+async function loadInjections(io: any, home: string): Promise<Injection[]> {
+  const artifacts = await loadInstalled(io, home, 'injection');
   return artifacts.map((artifact) => ({
     artifactId: String(artifact.id),
     triggers: (artifact.origin as any)?.triggers ?? [],
@@ -256,36 +564,237 @@ async function loadInjections(dollar: any, home: string): Promise<Injection[]> {
 }
 
 /**
- * Injects installed `injection` artifacts into the prompt: the layer below `rule`, paid in
- * standing tokens only on the turns where it actually fires. Returning `{text: null}` (rather
- * than omitting the field) leaves the section out entirely, so an irrelevant turn pays nothing.
- * The hook itself knows what it placed, so use is recorded by construction via `observe`
- * instead of asking the model to self-report a retrieval it might forget.
+ * Injects installed `injection` artifacts as model-only context on `prompt.submit`: the layer
+ * below `rule`, paid in standing tokens only on the turns where it actually fires.
+ *
+ * This used to live on `prompt.section` and return `{ text }` to replace a system-prompt
+ * section — with no section-name filter, that both matched triggers against the WRONG text (the
+ * system prompt's own section content, not the human's turn) and, the moment one injection
+ * artifact was ever installed, deleted or overwrote every other section of the system prompt on
+ * every turn it didn't match. `prompt.submit` fixes both: triggers match `e.text` (the human's
+ * actual words) and a match is ATTACHED via `next({ ...e, context: [...] })`, never a
+ * replacement. The hook itself knows what it attached, so use is recorded by construction via
+ * `observe` instead of asking the model to self-report a retrieval it might forget.
  */
-export function registerInjection(on: On): void {
+export function registerInjection(add: On): void {
   let injections: Injection[] | null = null;
 
-  on('prompt.section', safely('prompt.section', async (dollar, event: any, next) => {
-    if (injections === null) injections = await loadInjections(dollar, harnessHome(dollar));
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:injection', io, event, next, async (next) => {
+    if (injections === null) injections = await loadInjections(io, (await harnessHome(io)));
     if (injections.length === 0) return next(event);
 
-    const haystack = JSON.stringify(event ?? {}).toLowerCase();
+    const haystack = String(event?.text ?? '').toLowerCase();
     const matched = injections.filter((injection) =>
       injection.triggers.some((trigger) => haystack.includes(String(trigger).toLowerCase())));
-    if (matched.length === 0) return { text: null };
+    if (matched.length === 0) return next(event);
 
-    const sessionId = await currentSessionId(dollar);
+    const sessionId = await currentSessionId(io);
     for (const injection of matched) {
-      await observe(dollar, sessionId, { kind: 'injected', artifactId: injection.artifactId });
+      await observe(io, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
-    const joined = matched.map((injection) => injection.text).join('\n\n');
-    return { text: truncate(joined, INJECTION_TOTAL_CAP) };
+    const joined = truncate(matched.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
+    return next({ ...event, context: [...(event?.context ?? []), joined] });
   }));
 }
 
+/**
+ * Says once per stretch, on the result of the tool call that crosses `min_calls`, that a stretch
+ * of tool calls has run long: the note rides in the result's `context` ("what the model reads
+ * after the tool's result and the user never sees"), so the model reads it mid-stretch, BEFORE
+ * the user would notice, not after the user has already spoken.
+ *
+ * Disabled unless `<harnessHome>/drift.json` explicitly enables it (see `hooks/drift.ts`); the
+ * ship gate refused every judge, so by default this counts calls and says nothing.
+ *
+ * `tool.call` uses `guardAfterMap`: `next` is called exactly once, up front, and the note is
+ * appended to a COPY of the answered outcome; a throw anywhere after `next` returns core's
+ * outcome untouched, never re-running the tool. A `{ deny }` outcome is never given context (its
+ * type forbids it): past the threshold the note waits for the next answered call. The latch is
+ * set only once the note is actually attached.
+ *
+ * `prompt.submit` only resets the stretch when the user speaks (see `userSpoke`); it attaches
+ * nothing and passes the event through unchanged, under `guardBefore`, which calls `next` once.
+ * Nothing here listens on `prompt.section`, whose return replaces a system-prompt section.
+ */
+export function registerDrift(add: On): void {
+  let count = 0;
+  let warned = false;
+  let config: DriftConfig | null | undefined;
+
+  add('tool.call', async (io: any, event: any, next: any) => guardAfterMap('tool.call:drift', io, event, next, async (outcome: any) => {
+    count += 1;
+    if (warned) return outcome;
+    if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
+    if (config === undefined) config = await loadDriftConfig(io, (await harnessHome(io)));
+    if (!shouldWarn(count, config)) return outcome;
+    const context = Array.isArray(outcome.context) ? outcome.context : [];
+    warned = true;
+    return { ...outcome, context: [...context, driftNote(count)] };
+  }));
+
+  add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:drift', io, event, next, async (next) => {
+    if (userSpoke(event)) {
+      count = 0;
+      warned = false;
+      config = undefined; // re-read per stretch, so an edited drift.json takes effect
+    }
+    return next(event);
+  }));
+}
+
+/**
+ * Says once, on the first `prompt.submit` after install, what wrong-direction work has cost so
+ * far, then never again: `<harnessHome>/bootstrap.json` is the marker. Presence of that file
+ * (not any in-memory flag) is the only thing that gates the message, so it stays correct across
+ * every session after the first, not just within the process that happened to write it.
+ *
+ * The numbers come from the report `meta-harness waste` (with or without `--json`) writes to
+ * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
+ * `meta_harness/waste.py`'s `waste_report()`). This hook never runs that command and nothing
+ * runs it in the background: until someone has run `meta-harness waste` (or `/harness waste`)
+ * once, there is no report and no line. A report with `sessions: 0` is skipped, unmarked.
+ *
+ * Handles its own failures rather than relying on `safely`: this handler calls `next` in the
+ * MIDDLE, then does one more fallible thing afterward (writing the marker). Under the old
+ * `safely`, a marker write that threw, or `next(...)` itself rejecting, reached a catch that
+ * called `next` a SECOND time — submitting the human's prompt twice, the second time with no
+ * line attached (every turn, on a read-only harness home). `safely` no longer does that either,
+ * but here the rule is explicit: `next` is called exactly once on every path, a failure before
+ * it falls back to the unmodified event, and a failed marker write is swallowed locally.
+ *
+ * The marker is written ONLY after the line has actually been attached via `next(...)` and that
+ * call has resolved: a missing `waste.json` means "no report yet, try again next turn", not
+ * "never again", and a transient read/parse failure before `next` is swallowed locally (falling
+ * back to the unmodified event) rather than suppressing the line for good — either way nothing
+ * is marked done, so the question keeps being asked (at most once per turn, which costs nothing
+ * on a turn with no report to show) until it can actually be answered once.
+ */
+export function registerBootstrap(add: On): void {
+  add('prompt.submit', async (io: any, event: any, next: any) => {
+    let outboundEvent = event;
+    let markDone = false;
+
+    try {
+      const home = (await harnessHome(io));
+      const bootstrapPath = `${home}/bootstrap.json`;
+      if (!(await io.fs.exists(bootstrapPath))) {
+        const wastePath = `${home}/waste.json`;
+        if (await io.fs.exists(wastePath)) {
+          const waste: any = JSON.parse(await io.fs.read(wastePath));
+          const sessions = waste?.sessions;
+          const callsBurned = waste?.corrections?.calls_burned;
+          // A report over zero sessions (an empty or mis-pointed transcript store) says nothing
+          // worth saying once and for good: skip it and leave the marker unwritten.
+          if (typeof sessions === 'number' && sessions > 0 && callsBurned != null) {
+            // Hedged on purpose: the count comes from a keyword heuristic whose hand-labelled
+            // precision is about half, so the line is an estimate, never a statement of fact.
+            const line = `Across ${sessions} past sessions, an estimated ~${callsBurned} tool calls may have gone `
+              + 'to work you later corrected (a rough heuristic, roughly half of its flags are genuine). '
+              + '`/harness waste` for the breakdown and how reliable it is.';
+            outboundEvent = { ...event, context: [...(event?.context ?? []), line] };
+            markDone = true;
+          }
+        }
+      }
+    } catch (error) {
+      logSkip(io, 'prompt.submit:bootstrap', error);
+      outboundEvent = event; // fail open: send the turn through exactly as it arrived
+      markDone = false;
+    }
+
+    // Called exactly once, unconditionally, on every path above — the one and only next() call
+    // this handler ever makes.
+    const result = await next(outboundEvent);
+
+    if (markDone) {
+      try {
+        await io.fs.write(`${(await harnessHome(io))}/bootstrap.json`, JSON.stringify({ shown: new Date().toISOString() }));
+      } catch (error) {
+        // Swallowed locally, never recovered by calling next() again: a failed marker write
+        // just means the question is asked again next turn, not that the turn breaks or the
+        // prompt is submitted twice.
+        logSkip(io, 'prompt.submit:bootstrap', error);
+      }
+    }
+    return result;
+  });
+}
+
+type AnyHook = (io: any, event: any, next: (e: any) => Promise<any>) => Promise<any>;
+
+/**
+ * Runs `hooks` as one chain, first outermost, the way separate registrations would nest: each
+ * hook's `next` is the rest of the chain, and the last one's `next` is core.
+ */
+export function chain(hooks: AnyHook[], io: any, event: any, next: (e: any) => Promise<any>): Promise<any> {
+  const run = (index: number, e: any): Promise<any> =>
+    index === hooks.length ? next(e) : hooks[index](io, e, (inner: any) => run(index + 1, inner));
+  return run(0, event);
+}
+
+/**
+ * Registers each event ONCE. Claude Code's loader refuses a module that registers one event twice
+ * without a matcher ("on(\"tool.call\") is registered twice without a matcher"), so the features
+ * above add their hooks to a per-event list here and each event gets a single literal that runs
+ * that list in the order the features were added (observer, rules, injection, bootstrap, drift).
+ */
 export const register: Register = (on: On, options: PluginOptions) => {
   void options;
-  registerObserver(on);
-  registerRules(on);
-  registerInjection(on);
+  const hooks: Record<string, AnyHook[]> = {};
+  const add = ((event: string, hook: AnyHook) => {
+    (hooks[event] ??= []).push(hook);
+  }) as unknown as On;
+  registerObserver(add);
+  registerRules(add);
+  registerInjection(add);
+  registerBootstrap(add);
+  registerDrift(add);
+  on('tool.call', async ($: any, event: any, next: any) => chain(hooks['tool.call'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('tool.check', async ($: any, event: any, next: any) => chain(hooks['tool.check'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
+  on('prompt.submit', async ($: any, event: any, next: any) => chain(hooks['prompt.submit'] ?? [], {
+    fs: {
+      read: (path: string) => $.fs.read(path),
+      write: (path: string, text: string) => $.fs.write(path, text),
+      exists: (path: string) => $.fs.exists(path),
+    },
+    // $.env.get takes a literal name (the loader lists what a module reads), so one call per name.
+    env: {
+      get: (name: string) => (name === 'META_HARNESS_HOME' ? $.env.get('META_HARNESS_HOME')
+        : name === 'USERPROFILE' ? $.env.get('USERPROFILE')
+        : name === 'HOME' ? $.env.get('HOME')
+        : Promise.resolve(undefined)),
+    },
+    session: { id: () => $.session.id() },
+    ui: { log: (text: string) => $.ui.log(text) },
+  }, event, next));
 };

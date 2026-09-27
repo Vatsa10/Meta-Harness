@@ -1,6 +1,7 @@
 # Drift and Waste Design
 
-Status: approved for planning, 2026-09-26.
+Status: approved for planning, 2026-09-26. Corrected 2026-09-27 to the final measured baseline and
+to what shipped; each correction says what the earlier text claimed.
 
 Supersedes nothing. Extends `2026-09-20-learning-harness-design.md`, and corrects two claims
 that document makes about `paper.pdf`. Where the two disagree, this document wins.
@@ -13,16 +14,27 @@ that was going the wrong way**, using evidence already sitting on their machine.
 ## 1. Goal
 
 A developer working with Claude Code loses turns in three ways. Ranked by measured cost on this
-machine, across 344 sessions and 31,566 tool calls:
+machine, across 249 human sessions and 31,166 tool calls (final measurement, fixed detector):
 
 | Loss | Measured |
 |---|---|
-| Wrong-direction work before a human intervenes | **1,463 calls across 98 corrections** — median 8 before the human spoke, p90 41, max 76 |
-| Repeated identical failures | 378 wasted retries, concentrated in 24 of 344 sessions |
-| Environment rediscovery | 50 calls across 344 sessions |
+| Wrong-direction work before a human intervenes | **22 corrections flagged, 298 calls burned** — median 6 before the human spoke, p75 18, p90 39, max 65. A hand-labelled audit found 11 of the 21 audited flags genuine; recall is unmeasured |
+| Repeated identical failures | 476 wasted retries, in 22 sessions |
+| Environment rediscovery | 50 calls across 344 sessions (original measurement, not re-run) |
 
-The first is an order of magnitude larger than the others and nothing in the Claude Code
-ecosystem addresses it. It is invisible because **every call in a drifting stretch succeeds** —
+**Correction to the original baseline.** This table first read "1,463 calls across 98
+corrections, median 8, p90 41, max 76" over 344 sessions. That figure was inflated. Code review
+of the detector found it treated harness-injected user-role text (`<task-notification>`,
+`<command-name>`, local-command caveats, skill bodies loaded as user messages, "[Request
+interrupted by user]") as the human speaking, and matched keywords without a trailing word
+boundary ("stop" matched "stopped" in a subagent status). The 344 sessions also included ~90
+headless harness-search runs with no human. Filtering harness text took 98 to 64; a reviewer
+then hand-read every firing, the labels became a gold set, and the detector was tightened against
+it (pasted content stripped, the vocabulary anchored to the opening of the human's own words) to
+the 22 above. Roughly half of those 22 are still false, so every waste figure is an estimate.
+
+Wrong-direction work was expected to dwarf the other losses; on the corrected numbers it is the
+same order as repeated failures, and nothing in the Claude Code ecosystem addresses it. It is invisible because **every call in a drifting stretch succeeds** —
 there is no error to catch. The system detects that stretch and says so, early.
 
 Success is a measurable fall in the correction-lag median and p90, computed by the same command
@@ -32,12 +44,19 @@ that produced the baseline, against the same machine's transcripts.
 
 ## 2. Evidence this is built on
 
-Measured from `~/.claude/projects/**/*.jsonl` on 2026-09-26, 344 sessions, 31,566 tool calls:
+Final baseline (fixed detector, 249 human sessions, 31,166 tool calls): 22 corrections flagged,
+median 6, p75 18, p90 39, max 65, 298 calls burned; 476 wasted retries in 22 sessions. In a
+hand-labelled audit 11 of the 21 audited flags were genuine corrections; recall is unmeasured.
+
+The bullets below are the ORIGINAL measurement, from `~/.claude/projects/**/*.jsonl` on
+2026-09-26 over 344 sessions (including ~90 headless ones) and 31,566 tool calls. The error and
+orientation figures were not re-run; the correction and retry figures are superseded above:
 
 - Error rate 3.7%, and most errors self-recover. Errors are cheap.
 - 1,167 `tool_error` episodes, all carrying full error text; only 20% classify to a named cause.
-- 98 corrections that followed at least three tool calls. Median 8 calls burned, p90 41, max 76.
-- 378 repeated identical failures. Top classes: re-proposing a rejected command (98), Chrome tab
+- (superseded) corrections that followed at least three tool calls - see §1 for why the
+  original count was inflated.
+- 378 repeated identical failures (superseded: 476 on the fixed code). Top classes: re-proposing a rejected command, Chrome tab
   targeting (51), Bash quoting (24), read-before-edit (30, already fixed by a shipped rule).
 - Orientation commands: 50 across all sessions.
 - Sessions span Claude Code `2.1.233` through `2.1.278`.
@@ -154,9 +173,13 @@ Decay parameters live in config, not code.
 
 ### 4.3 First-run bootstrap
 
-On first session after install, mine existing history in the background and emit exactly one
-line naming the measured cost and the command to see detail. It runs once, is silent on every
-later session, and never blocks a turn.
+On first session after install, emit exactly one line naming the estimated cost and the command
+to see detail. It runs once, is silent on every later session, and never blocks a turn.
+
+As built: nothing mines history in the background. The line reads `<harness_home>/waste.json`,
+which only `meta-harness waste` (or `/harness waste`) writes, so it needs a prior run; a report
+over zero sessions is skipped. The line is hedged as an estimate, because the detector behind it
+is right about half the time.
 
 ---
 
@@ -166,7 +189,7 @@ later session, and never blocks a turn.
 
 A checkpoint is considered when a stretch crosses a configured length. The judges decide.
 
-**Temporal kNN (default).** Retrieve the k most similar past stretches by tool-sequence shape and
+**Temporal kNN (proposed default; not the working default - see §5.3).** Retrieve the k most similar past stretches by tool-sequence shape and
 score by how many ended in a correction. No model call. Uses raw history, which is the paper's
 actual finding.
 
@@ -179,12 +202,16 @@ targets — never file contents. If the capability is absent it falls back to th
 `claude-code` type declarations are not present on this machine, so its availability is assumed,
 not verified; the fallback is what makes that safe.
 
-Selection is config. Default is kNN with heuristic fallback. The model judge is off by default.
+Selection was to be config, defaulting to kNN with heuristic fallback. As built, no judge runs
+live: `drift.json`'s `judge` field is validated but unused, and "enabled" means a plain call-count
+threshold (`min_calls`). By default the note is disabled.
 
 ### 5.2 How it surfaces
 
-One line injected through `prompt.section` on the following turn, naming how many calls have
-passed and what the work has moved toward.
+As built: one note appended to the tool result of the call that crosses the threshold, via
+`ToolCallResult.context`, once per stretch, naming how many calls have run since the user spoke.
+Never `prompt.section`, whose return replaces a cached system-prompt section; the original text
+proposed it and was wrong.
 
 It never blocks a tool call. It never interrupts mid-tool. It does not depend on
 `turn.complete`, which `hooks/README.md` records as sketched and unimplemented.
@@ -193,7 +220,7 @@ It never blocks a tool call. It never interrupts mid-tool. It does not depend on
 
 Replay every judge over the 344 sessions:
 
-- **Recall**: of the 98 corrections, how many would have fired before the human spoke, and how
+- **Recall**: of the gold-labelled genuine corrections, how many would have fired before the human spoke, and how
   many calls earlier.
 - **Precision**: how often it fires in stretches that did not end in a correction.
 
@@ -201,8 +228,13 @@ Thresholds live in config. A judge ships **only** if it clears a precision bar s
 and fires meaningfully earlier than the human did. A judge that cannot is reported as not
 shipping, not tuned until it passes.
 
-n = 98 is thin. The plan states the bar in advance, and no judge speaks to a user until it clears
-it on this data.
+The sample is thin (about a dozen genuine corrections). The plan states the bar in advance, and
+no judge speaks to a user until it clears it on this data. Judges were tuned and gated against the
+hand-labelled gold set, never the heuristic's own labels.
+
+**Outcome: the gate refused every judge.** Word-overlap precision was about 0.01; the kNN judge
+never fired; the model judge was never evaluated. The drift note is built and tested but ships
+disabled, and nothing writes an enabling `drift.json`.
 
 ---
 
@@ -210,7 +242,8 @@ it on this data.
 
 ### 6.1 Rejection memory
 
-The largest single repeated failure is re-proposing a rejected call: 98 wasted retries. The
+Re-proposing a rejected call was the largest repeated-failure class in the original measurement
+(not re-measured on the fixed code). The
 observer records the rejection signature; `tool.check` denies an immediate re-proposal and cites
 the earlier rejection. Memory clears when the user raises that command again, so changing their
 mind works. No model, no tuning.
@@ -220,6 +253,11 @@ mind works. No model, no tuning.
 "Stop doing X" / "don't run that again" takes effect **immediately and for this session only**.
 At session end the user is asked once whether to keep it. Nothing becomes permanent without that
 answer.
+
+As built: the rule takes effect immediately and only a human's own prompt creates one (not a
+plugin, peer, scheduled or notification prompt). It is written to `pending-session-rules.json`
+as a record, but the end-of-session prompt is **not implemented** and nothing reads that file
+back, so no rule outlives its session.
 
 ### 6.3 Commands
 
@@ -255,8 +293,8 @@ artifact.
 
 ## 8. Out of scope
 
-- Temporal graph learning, sequence models, embedding stores. The signal is 98 corrections;
-  lexical and structural similarity beats anything learned at this scale.
+- Temporal graph learning, sequence models, embedding stores. The signal is about a dozen genuine
+  corrections; lexical and structural similarity beats anything learned at this scale.
 - Environment bootstrap. Measured not to transfer (§2.1).
 - `skill` and `doctrine` enforcement. Still scored and recorded, still not enforced by any hook.
 - Running the prose-versus-mechanism experiment. It remains built and unrun.
@@ -266,7 +304,8 @@ artifact.
 
 ## 9. Risks
 
-- **n = 98 is thin for tuning.** Mitigated by stating the bar before tuning and by the ship gate.
+- **The labelled sample is thin for tuning.** Mitigated by stating the bar before tuning and by
+  the ship gate - which then refused every judge; drift ships disabled.
 - **False positives end adoption faster than misses.** Mitigated by biasing toward long silent
   stretches, by a single injected line rather than a block, and by `/harness why` making every
   intervention explainable and reversible.

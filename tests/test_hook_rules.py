@@ -13,11 +13,14 @@ def test_rules_module_exists_and_exports_the_evaluator():
     assert "export async function loadRules" in source
 
 
-def test_read_before_edit_is_a_built_in_rule():
+def test_no_built_in_read_before_edit_rule_ships():
+    # A live test proved Claude Code's own engine already denies an Edit/Write of a file not
+    # read this session, before the plugin ever sees the call. A plugin-side copy of that check
+    # only added failure modes (every Edit denied, every new-file Write denied, Write-then-Edit
+    # denied) on top of an enforcement that already existed, so it is retired.
     source = (ROOT / "hooks" / "rules.ts").read_text(encoding="utf-8")
-    # This is the discovered doctrine's top clause, expressed as a mechanism.
-    assert "read-before-edit" in source
-    assert "Edit" in source and "Read" in source
+    assert "kind: 'read-before-edit'" not in source
+    assert "readPaths" not in source
 
 
 def test_deny_carries_a_reason_and_the_artifact_id():
@@ -29,7 +32,7 @@ def test_deny_carries_a_reason_and_the_artifact_id():
 def test_tool_check_is_registered_and_wrapped():
     source = (ROOT / "hooks" / "harness.ts").read_text(encoding="utf-8")
     assert "'tool.check'" in source
-    assert "safely('tool.check'" in source
+    assert "guardBefore('tool.check'" in source
 
 
 def test_rules_behaviour_via_node():

@@ -50,7 +50,7 @@ python -m meta_harness learn --reject <id> --wrong  # archive and never propose 
 ```
 
 Accepting records the artifact in `installed.json`. Only `rule` and `injection` artifacts are
-enforced from there today, by the `tool.check` and `prompt.section` hooks; an accepted `skill` or
+enforced from there today, by the `tool.check` hook (rules) and a `prompt.submit` hook that attaches injections as context; an accepted `skill` or
 `doctrine` artifact is recorded and scored but has no automatic enforcement path yet, so treat it
 as a note to apply by hand.
 
@@ -71,12 +71,22 @@ memorisation, and it will not transfer.
 A fix expressed as a rule costs nothing per turn and cannot be talked around. Prefer the
 strongest layer that can carry the fix; reach for doctrine only when no mechanism can.
 
-This ordering is an argued design claim, not a measured one. `tools/prose_vs_rule.py` sets up the
-comparison it would take to measure it, but ships as two pure functions with no live execution
-wired up — the experiment has not been run in this repo. Where the paper reports numbers for
-prose-vs-mechanism framing, they are the paper's numbers, not a result produced here.
+This ordering is this project's own design position, not the paper's — `paper.pdf` contains no
+such layer ordering. `tools/prose_vs_rule.py` sets up the comparison it would take to measure it
+against a baseline, but ships as two pure functions with no live execution wired up — the
+experiment has not been run in this repo.
 
-Function hooks (`tool.call`, `tool.check`, `prompt.section`) are early access in Claude Code and
+The paper's own findings, by contrast, are measured and specific. Table 3 (online text
+classification, median/best): scores-only 34.6/41.3, scores plus an LLM summary 34.9/38.7, full
+raw execution traces 50.0/56.7 — raw traces beat summaries, which "may even hurt by compressing
+away diagnostically useful details." Appendix A.2: six consecutive regressions on
+TerminalBench-2 while editing prompts and control flow, resolved by an additive change instead —
+additive beats invasive. Appendix B.3's winning discovery, an environment snapshot injected
+before the first model call, is a measured negative result here: it does not transfer to a
+developer's own repository, where the environment is already known (50 orientation calls across
+344 sessions on this machine).
+
+Function hooks (the plugin listens on `tool.call`, `tool.check` and `prompt.submit` only) are early access in Claude Code and
 need `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; see `hooks/README.md`.
 
 **REQUIRED BACKGROUND:** `optimizing-harnesses` - the three laws this cycle enforces.
