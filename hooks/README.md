@@ -28,8 +28,8 @@ scored and recorded, but no hook installs them into a session.
   is not implemented.
 - **First-run line.** On the first turn after install, if `<harness_home>/waste.json` exists and
   covers at least one session, one hedged line is attached: an estimated count of calls that may
-  have gone to work the user later corrected, pointing at `/harness waste`. That file is written
-  only by running `meta-harness waste` (or `/harness waste`); nothing runs it in the background,
+  have gone to work the user later corrected, pointing at `/meta-harness:harness waste`. That file is written
+  only by running `meta-harness waste` (or `/meta-harness:harness waste`); nothing runs it in the background,
   so without a prior run there is no line. Shown once, gated by `<harness_home>/bootstrap.json`.
 - **Drift note - built, tested, ships DISABLED.** Counts tool calls since the user last spoke and,
   on the call that reaches `min_calls`, appends one note to that tool result. The ship gate

@@ -651,7 +651,7 @@ export function registerDrift(add: On): void {
  * The numbers come from the report `meta-harness waste` (with or without `--json`) writes to
  * `<harnessHome>/waste.json` (`{ sessions, corrections: { calls_burned, ... }, ... }`, per
  * `meta_harness/waste.py`'s `waste_report()`). This hook never runs that command and nothing
- * runs it in the background: until someone has run `meta-harness waste` (or `/harness waste`)
+ * runs it in the background: until someone has run `meta-harness waste` (or `/meta-harness:harness waste`)
  * once, there is no report and no line. A report with `sessions: 0` is skipped, unmarked.
  *
  * Handles its own failures rather than relying on `safely`: this handler calls `next` in the
@@ -690,7 +690,7 @@ export function registerBootstrap(add: On): void {
             // precision is about half, so the line is an estimate, never a statement of fact.
             const line = `Across ${sessions} past sessions, an estimated ~${callsBurned} tool calls may have gone `
               + 'to work you later corrected (a rough heuristic, roughly half of its flags are genuine). '
-              + '`/harness waste` for the breakdown and how reliable it is.';
+              + '`/meta-harness:harness waste` for the breakdown and how reliable it is.';
             outboundEvent = { ...event, context: [...(event?.context ?? []), line] };
             markDone = true;
           }

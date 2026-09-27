@@ -13,7 +13,7 @@ def test_the_command_file_exists_with_frontmatter():
 def test_all_three_modes_are_documented():
     text = COMMAND.read_text(encoding="utf-8")
     for mode in ("waste", "pending", "why"):
-        assert f"/harness {mode}" in text
+        assert f"/meta-harness:harness {mode}" in text
 
 
 def test_every_command_it_names_exists_in_the_cli():

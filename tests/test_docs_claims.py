@@ -111,7 +111,7 @@ def test_readme_states_no_stale_test_count():
 def test_readme_documents_what_shipped():
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     for needle in ("meta_harness waste", "Rejection memory", "session rules", "first-run line",
-                   "/harness waste | pending | why", "version_weight", "`judge` field"):
+                   "/meta-harness:harness waste | pending | why", "version_weight", "`judge` field"):
         assert needle in text, needle
     assert "11 of the 21" in text and "recall is unmeasured" in text
 
@@ -144,3 +144,16 @@ def test_drift_and_waste_spec_carries_the_final_measured_baseline_and_outcome():
                    "ToolCallResult.context", "not implemented"):
         assert needle in text, needle
     assert "kNN (default)" not in text
+
+
+def test_no_user_facing_text_points_at_an_unqualified_harness_command():
+    # Claude Code namespaces plugin commands: `/harness` is "Unknown command", the real name is
+    # `/meta-harness:harness`. The first-run line shipped pointing at the wrong one.
+    import re
+    targets = [ROOT / "README.md", ROOT / "hooks" / "README.md", ROOT / "docs" / "plugin.md",
+               ROOT / "commands" / "harness.md", ROOT / "hooks" / "harness.ts"]
+    pattern = re.compile(r"(?<![\w:-])/harness\b(?!\.\w)")
+    for target in targets:
+        text = target.read_text(encoding="utf-8")
+        hits = [m.group(0) for m in pattern.finditer(text)]
+        assert not hits, f"{target.name} points at the unqualified /harness command"

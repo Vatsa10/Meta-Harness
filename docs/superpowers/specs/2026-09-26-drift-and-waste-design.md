@@ -100,7 +100,7 @@ transcripts (~/.claude/projects)
   [2] drift detection (3 judges) ---> tuned offline, silent until it clears the gate
         |
         v
-  [3] live control + surface     ---> rejection memory, NL rules, /harness commands
+  [3] live control + surface     ---> rejection memory, NL rules, /meta-harness:harness commands
 ```
 
 ### 3.1 Cause coverage, fixed first
@@ -177,7 +177,7 @@ On first session after install, emit exactly one line naming the estimated cost 
 to see detail. It runs once, is silent on every later session, and never blocks a turn.
 
 As built: nothing mines history in the background. The line reads `<harness_home>/waste.json`,
-which only `meta-harness waste` (or `/harness waste`) writes, so it needs a prior run; a report
+which only `meta-harness waste` (or `/meta-harness:harness waste`) writes, so it needs a prior run; a report
 over zero sessions is skipped. The line is hedged as an estimate, because the detector behind it
 is right about half the time.
 
@@ -263,9 +263,9 @@ back, so no rule outlives its session.
 
 Three, deliberately:
 
-- `/harness waste` — the report
-- `/harness pending` — review and accept what has been learned
-- `/harness why` — explain the note or block just seen, and retire the artifact behind it
+- `/meta-harness:harness waste` — the report
+- `/meta-harness:harness pending` — review and accept what has been learned
+- `/meta-harness:harness why` — explain the note or block just seen, and retire the artifact behind it
 
 Natural-language triggers carry the rest: asking why Claude keeps failing runs the report; asking
 whether you are on track runs a drift check; asking why something was blocked explains the
@@ -307,7 +307,7 @@ artifact.
 - **The labelled sample is thin for tuning.** Mitigated by stating the bar before tuning and by
   the ship gate - which then refused every judge; drift ships disabled.
 - **False positives end adoption faster than misses.** Mitigated by biasing toward long silent
-  stretches, by a single injected line rather than a block, and by `/harness why` making every
+  stretches, by a single injected line rather than a block, and by `/meta-harness:harness why` making every
   intervention explainable and reversible.
 - **The correction detector is a keyword heuristic.** It will miscount. The command says so in
   its output, and the tuning set inherits that noise.

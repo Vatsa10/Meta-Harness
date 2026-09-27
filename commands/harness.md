@@ -3,12 +3,12 @@ description: Inspect the harness itself - wasted work, staged/pending changes aw
 argument-hint: waste | pending | why
 ---
 
-# /harness
+# /meta-harness:harness
 
 One command, three modes. Pick the mode from `$ARGUMENTS`; if none is given, ask which of
 `waste`, `pending`, or `why` is wanted.
 
-## `/harness waste`
+## `/meta-harness:harness waste`
 
 Run:
 
@@ -25,7 +25,7 @@ This also refreshes `<harness_home>/waste.json` as a side effect, which other to
 If the user wants the wider history (not just this project), drop `--this-project` and consider
 `--since` or `--limit`.
 
-## `/harness pending`
+## `/meta-harness:harness pending`
 
 Everything here is a proposal. Nothing listed is installed or applied - list what exists and how
 to accept or discard each one:
@@ -55,7 +55,7 @@ Report all three lists together (staged artifacts, retirement candidates, sessio
 when one is empty, and say explicitly for each what accepting or discarding it would take (for a
 session rule: nothing - it ends with the session).
 
-## `/harness why`
+## `/meta-harness:harness why`
 
 Explain the most recent denial or drift note Claude saw in this session. Denials come from one
 of three sources in the plugin:

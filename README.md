@@ -91,7 +91,7 @@ Beyond enforcing artifacts, the hooks add (details in [hooks/README.md](hooks/RE
   precision about 0.01; the kNN judge never fired; the model judge was never evaluated), so it is
   off unless `drift.json` enables it, and "enabled" then means a plain call-count threshold: the
   config's `judge` field is validated but never run.
-- **`/harness waste | pending | why`** - the report, what is staged or pending, and why the last
+- **`/meta-harness:harness waste | pending | why`** - the report, what is staged or pending, and why the last
   denial happened.
 
 Mined failures are weighted by recency and by Claude Code version (`version_weight`). On the

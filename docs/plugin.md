@@ -95,7 +95,7 @@ once enabled. They listen only on `tool.call`, `tool.check` and `prompt.submit` 
 `prompt.section` - and add: installed rules and injections, rejection memory, "stop doing X"
 session rules (session-scoped, immediate, created only by a human's prompt), a one-time hedged
 first-run line (needs a prior `meta-harness waste` run), and a drift note that is built and tested
-but ships disabled because its ship gate refused every judge. `/harness waste | pending | why`
+but ships disabled because its ship gate refused every judge. `/meta-harness:harness waste | pending | why`
 inspects them; `meta-harness waste` carries its own caveat (roughly half of flagged corrections
 were genuine in a hand-labelled audit; recall unmeasured).
 
