@@ -25,19 +25,22 @@ def test_expectation_for_thrash_carries_window_and_threshold():
 
 
 def test_tool_error_expectation_fails_when_the_error_recurs():
-    steps = _steps({"role": "tool_result", "content": "UnicodeDecodeError: charmap codec"})
+    steps = _steps({"role": "tool_use", "name": "Bash"},
+                   {"role": "tool_result", "content": "UnicodeDecodeError: charmap codec"})
     assert verify_expectation({"no_tool_error": {"tool": "Bash", "cause": "unicode-decode"}},
                               steps) is False
 
 
 def test_tool_error_expectation_passes_when_it_does_not():
-    steps = _steps({"role": "tool_result", "content": "ok"})
+    steps = _steps({"role": "tool_use", "name": "Bash"},
+                   {"role": "tool_result", "content": "ok"})
     assert verify_expectation({"no_tool_error": {"tool": "Bash", "cause": "unicode-decode"}},
                               steps) is True
 
 
 def test_an_unrelated_error_does_not_fail_the_expectation():
-    steps = _steps({"role": "tool_result", "content": "Permission denied"})
+    steps = _steps({"role": "tool_use", "name": "Bash"},
+                   {"role": "tool_result", "content": "Permission denied"})
     # The replay asks whether THIS fault recurred, not whether the run was flawless.
     assert verify_expectation({"no_tool_error": {"tool": "Bash", "cause": "unicode-decode"}},
                               steps) is True
@@ -67,3 +70,12 @@ def test_load_agent_steps_reads_only_agent_step_payloads(tmp_path: Path):
 
 def test_empty_expectation_is_vacuously_true():
     assert verify_expectation({}, []) is True
+
+
+def test_a_replay_that_never_called_the_tool_is_not_evidence():
+    # A run that never used Bash could not have hit a Bash quoting error, with or without the
+    # artifact. Scoring that as "fixed" staged an unproven rule as proven on a live run.
+    steps = _steps({"role": "tool_use", "name": "Read"},
+                   {"role": "tool_result", "content": "file contents"})
+    assert verify_expectation({"no_tool_error": {"tool": "Bash", "cause": "shell-quoting"}},
+                              steps) is None

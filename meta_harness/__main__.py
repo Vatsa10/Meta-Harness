@@ -290,6 +290,19 @@ def _command_run(args) -> int:
     return 0
 
 
+
+def _enforces(artifact) -> str:
+    """What the plugin will actually do with this artifact once installed - not what its payload
+    claims. A rule is enforced by the hook's matcher, which never executes the payload."""
+    origin = artifact.origin or {}
+    if artifact.type == "rule":
+        tools = ", ".join(origin.get("tools") or []) or "no tool"
+        kind = origin.get("rule_kind") or "no matcher"
+        return f"tool.check {kind} on {tools} (the payload text is description only, never executed)"
+    if artifact.type == "injection":
+        return "context attached to prompts matching its triggers"
+    return f"{artifact.type}: recorded, not enforced by any hook"
+
 def _command_learn(args) -> int:
     store = HarnessStore(harness_home())
 
@@ -300,7 +313,8 @@ def _command_learn(args) -> int:
         print(json.dumps({
             "home": str(store.root),
             "staged": [{"id": a.id, "type": a.type, "signature": a.signature,
-                        "scores": a.scores} for a in store.list_staged()],
+                        "enforces": _enforces(a), "scores": a.scores}
+                       for a in store.list_staged()],
             "installed": [{"id": a.id, "type": a.type, "signature": a.signature}
                           for a in store.list_installed()],
             "tombstones": sorted(store.tombstones()),
@@ -398,6 +412,7 @@ def _command_learn(args) -> int:
                           "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
         return 0
     print(json.dumps({"staged": artifact.id, "type": artifact.type, "path": str(staged),
+                      "enforces": _enforces(artifact),
                       "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
     return 0
 

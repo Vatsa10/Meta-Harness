@@ -148,13 +148,22 @@ def _pattern_for_cause(cause: str) -> str:
 
 
 def verify_expectation(expectation: Mapping[str, Any],
-                       steps: Sequence[Mapping[str, Any]]) -> bool:
-    """True when the failure this replay was built from did not recur."""
+                       steps: Sequence[Mapping[str, Any]]) -> bool | None:
+    """True when the failure this replay was built from did not recur.
+
+    None when the replay never exercised it: a run that never called the tool the failure came
+    from cannot show the failure is gone. Absence of an error the run could not have produced
+    is not evidence, and a retention gate fed it would stage artifacts as proven on nothing.
+    """
     if not expectation:
         return True
 
     spec = expectation.get("no_tool_error")
     if spec:
+        tool = spec.get("tool")
+        if tool and not any(step.get("role") == "tool_use" and step.get("name") == tool
+                            for step in steps):
+            return None
         pattern = _pattern_for_cause(str(spec.get("cause", "")))
         if not pattern:
             return True

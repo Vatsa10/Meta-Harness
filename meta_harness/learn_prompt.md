@@ -10,6 +10,11 @@ Express the fix at the STRONGEST layer that can carry it. The ordering is bindin
 | `doctrine` | a paragraph in CLAUDE.md, paid every turn forever | Yes |
 
 Choose `rule` when the failure is decidable from the call and the session state alone.
+A `rule` is enforced by the plugin's own matcher, never by code in your payload: the plugin
+does not execute the payload. Today that matcher denies a tool call repeated past a
+threshold in one session. Write a `rule` payload that describes exactly that behaviour and
+nothing more; if the fix needs logic the matcher cannot run (parsing a command, checking
+a file), choose `injection` instead.
 Choose `injection` when the agent needs a fact at a particular moment.
 Choose `skill` or `doctrine` only when no mechanism can express the fix.
 
