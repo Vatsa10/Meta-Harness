@@ -193,14 +193,39 @@ def select_target(sessions: Sequence[Session], store: HarnessStore,
     current a Claude Code version each signature's evidence was seen, so a failure class fixed
     long ago stops outranking one seen this week.
     """
+    return next(iter(candidate_targets(sessions, store, home)), None)
+
+
+def candidate_targets(sessions: Sequence[Session], store: HarnessStore,
+                      home: Path | None = None) -> list[FailureClass]:
+    """Every learnable, uncovered failure class, best first - select_target's ranking in full,
+    so a caller can move on when the best one cannot be reproduced."""
     covered = store.covered()
     weights = _signature_weights(sessions)
-    for failure in merge_failures(observed_failures(home), rank_failures(sessions), weights=weights):
-        if failure.signature.rsplit(":", 1)[-1] in UNLEARNABLE_CAUSES:
-            continue
-        if failure.signature not in covered:
-            return failure
-    return None
+    return [failure for failure in
+            merge_failures(observed_failures(home), rank_failures(sessions), weights=weights)
+            if failure.signature.rsplit(":", 1)[-1] not in UNLEARNABLE_CAUSES
+            and failure.signature not in covered]
+
+
+def reproduces(replay: Mapping[str, Any], workspace_root: Path, binary: str = "claude",
+               timeout: float = 900.0, runner: Callable[..., Any] = run_claude_code) -> bool | None:
+    """Replay the episode with NO artifact and report whether the original failure recurs.
+
+    True: it recurred, so an artifact's replay can show a real before-and-after. False: it did
+    not recur, so "fixed" would be meaningless. None: the run never exercised the tool at all.
+    Only True makes an episode worth proposing against - without this, a replay that could
+    never have failed credits whatever artifact is attached to it.
+    """
+    task = {"instruction": replay.get("instruction", ""), "files": replay.get("files", {})}
+    workspace = prepare_workspace(task, workspace_root)
+    origin = replay.get("_origin") or {}
+    tag = hashlib.sha256(f"{origin.get('session')}|{origin.get('turn')}".encode("utf-8")).hexdigest()[:8]
+    trace_path = Path(workspace_root) / f"probe-{tag}.jsonl"
+    with TraceRecorder(trace_path) as trace:
+        runner(workspace, AgentConfig(), task, trace, binary=binary, timeout=timeout)
+    fixed = verify_expectation(replay.get("expect") or {}, load_agent_steps(trace_path))
+    return None if fixed is None else (not fixed)
 
 
 def build_proposal_prompt(failure: FailureClass, replay: Mapping[str, Any],

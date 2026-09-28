@@ -19,8 +19,9 @@ from .cc_history import (compare_reports, draft_tasks, harness_report, load_sess
 from .demo import run as run_demo
 from .harness_store import Artifact, HarnessStore, harness_home
 from .cc_harness import AgentConfig
-from .learn import (config_with, decide_retention, merge_failures, observed_failures,
-                    propose_artifact, rank_failures, run_replay, score_task_set, select_target)
+from .learn import (candidate_targets, config_with, decide_retention, merge_failures,
+                    observed_failures, propose_artifact, rank_failures, reproduces, run_replay,
+                    score_task_set, select_target)
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
 from .replay import build_replay
@@ -129,6 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="with --reject: tombstone the signature so it is never re-proposed")
     learn.add_argument("--limit", type=int, default=60, help="sessions of history to read")
     learn.add_argument("--dry-run", action="store_true", help="select a target, propose nothing")
+    learn.add_argument("--max-probes", type=int, default=3,
+                       help="live replays to try, without any artifact, to find a failure that "
+                            "actually recurs before proposing against it")
     learn.add_argument("--tasks", metavar="PATH",
                        help="JSON task set the artifact must not regress; without it, only the "
                             "origin replay gates retention")
@@ -344,34 +348,63 @@ def _command_learn(args) -> int:
         return 0
 
     sessions = load_sessions(limit=args.limit, include_text=True)
-    failure = select_target(sessions, store)
-    if failure is None:
+    targets = candidate_targets(sessions, store)
+    if not targets:
         print("no uncovered failure class found")
         return 0
-    print(f"target: {failure.signature} ({failure.count} occurrences)")
-
-    replay = None
     by_session = {s.session_id: s for s in sessions}
-    for episode in failure.episodes:
-        session = by_session.get(episode.session_id)
-        if session is not None:
-            replay = build_replay(episode, session)
-            if replay:
-                break
-    if replay is None:
-        print("no replayable episode for this failure class")
-        return 1
-    if args.dry_run:
-        print(json.dumps({"signature": failure.signature, "replay": replay}, indent=2))
-        return 0
 
-    model = model_from_environment(args.provider, args.model)
-    artifact = propose_artifact(failure, replay,
-                               [a.id for a in store.list_installed()], model)
+    def replays_for(failure):
+        for episode in failure.episodes:
+            session = by_session.get(episode.session_id)
+            replay = build_replay(episode, session) if session is not None else None
+            if replay:
+                yield replay
+
+    if args.dry_run:
+        # Free: selects and shows the first replayable episode, and runs nothing.
+        for failure in targets:
+            replay = next(replays_for(failure), None)
+            if replay:
+                print(f"target: {failure.signature} ({failure.count} occurrences)")
+                print(json.dumps({"signature": failure.signature, "replay": replay}, indent=2))
+                return 0
+        print("no replayable episode for any failure class")
+        return 1
+
     # The brief's snippet gated this on hasattr(args, "root"), but the learn subparser has no
     # --root argument, so that check is always false and confusing. Use a plain default.
     workspace_root = Path(".meta-harness-workspaces")
     workspace_root.mkdir(parents=True, exist_ok=True)
+
+    # Propose only against a failure a replay without any artifact actually reproduces. A replay
+    # that cannot fail would otherwise credit whatever artifact is attached to it.
+    failure = replay = None
+    probes = 0
+    for candidate in targets:
+        for candidate_replay in replays_for(candidate):
+            if probes >= args.max_probes:
+                break
+            probes += 1
+            recurred = reproduces(candidate_replay, workspace_root)
+            outcome = {True: "reproduced", False: "did not reproduce",
+                       None: "never exercised the tool"}[recurred]
+            origin = candidate_replay.get("_origin") or {}
+            print(f"probe {probes}/{args.max_probes}: {candidate.signature} "
+                  f"(session {str(origin.get('session', ''))[:8]}, turn {origin.get('turn')}): {outcome}")
+            if recurred:
+                failure, replay = candidate, candidate_replay
+                break
+        if failure is not None or probes >= args.max_probes:
+            break
+    if failure is None:
+        print(f"no failure reproduced within {probes} probe(s); nothing proposed")
+        return 0
+    print(f"target: {failure.signature} ({failure.count} occurrences)")
+
+    model = model_from_environment(args.provider, args.model)
+    artifact = propose_artifact(failure, replay,
+                               [a.id for a in store.list_installed()], model)
     # workspace_root is passed explicitly to run_replay below, which passes it explicitly to
     # prepare_workspace; nothing on this path reads it from the environment, so it is not set
     # here. Do not reintroduce an os.environ[...] assignment for it.

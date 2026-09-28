@@ -65,7 +65,8 @@ def _stub_learn_cycle(monkeypatch, origin_fixed):
                            episodes=[episode])
     monkeypatch.setattr(cli, "load_sessions",
                         lambda **kw: [Session(session_id="s1", project="p", path="x")])
-    monkeypatch.setattr(cli, "select_target", lambda *a, **kw: failure)
+    monkeypatch.setattr(cli, "candidate_targets", lambda *a, **kw: [failure])
+    monkeypatch.setattr(cli, "reproduces", lambda *a, **kw: True)
     monkeypatch.setattr(cli, "build_replay", lambda *a, **kw: {
         "instruction": "go", "files": {}, "expect": {},
         "_origin": {"kind": "thrash", "session": "s1", "turn": 3, "signature": "thrash:Bash"}})
@@ -114,3 +115,60 @@ def test_an_unscored_rule_is_not_reported_as_a_score(tmp_path: Path, monkeypatch
     out = json.loads(capsys.readouterr().out.split("target:", 1)[1].split("\n", 1)[1])
     assert out["origin_fixed"] is None
     assert out["verdict"]["reason"] == "origin replay was not scored"
+
+
+def _fake_targets(monkeypatch, outcomes):
+    """Two candidate failures, each with one replayable episode; `reproduces` answers from
+    `outcomes` in order. propose_artifact must only be reached for a reproduced one."""
+    from meta_harness.learn import FailureClass
+
+    from meta_harness.cc_history import FailureEpisode
+
+    e1 = FailureEpisode(session_id="e1", project="p", kind="tool_error", turn_index=1, tools=["Bash"])
+    e2 = FailureEpisode(session_id="e2", project="p", kind="tool_error", turn_index=2, tools=["Edit"])
+    targets = [FailureClass(signature="tool_error:Bash:shell-quoting", kind="tool_error",
+                            tool="Bash", count=8, episodes=[e1]),
+               FailureClass(signature="tool_error:Edit:edit-mismatch", kind="tool_error",
+                            tool="Edit", count=3, episodes=[e2])]
+    monkeypatch.setattr(cli, "load_sessions", lambda **kw: [])
+    monkeypatch.setattr(cli, "candidate_targets", lambda sessions, store: targets)
+    replays = {"e1": {"_origin": {"session": "s1", "turn": 1}, "expect": {}},
+               "e2": {"_origin": {"session": "s2", "turn": 2}, "expect": {}}}
+    monkeypatch.setattr(cli, "build_replay", lambda episode, session: replays[episode.session_id])
+    answers = iter(outcomes)
+    calls = []
+    monkeypatch.setattr(cli, "reproduces", lambda replay, root: (calls.append(replay), next(answers))[1])
+    proposed = []
+    monkeypatch.setattr(cli, "model_from_environment", lambda *a, **k: None)
+    def fake_propose(failure, replay, installed, model):
+        proposed.append((failure.signature, replay["_origin"]["session"]))
+        raise SystemExit(0)  # stop once proposing is reached; the rest is tested elsewhere
+    monkeypatch.setattr(cli, "propose_artifact", fake_propose)
+    return calls, proposed
+
+
+def test_learn_proposes_only_against_a_reproduced_failure(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("META_HARNESS_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    # The session dict lookup needs the episode's session to exist.
+    monkeypatch.setattr(cli, "load_sessions", lambda **kw: [])
+    calls, proposed = _fake_targets(monkeypatch, [False, True])
+    monkeypatch.setattr(cli, "load_sessions",
+                        lambda **kw: [type("S", (), {"session_id": sid})() for sid in ("e1", "e2")])
+    import pytest
+    with pytest.raises(SystemExit):
+        cli.main(["learn"])
+    out = capsys.readouterr().out
+    assert "did not reproduce" in out and "reproduced" in out
+    assert proposed == [("tool_error:Edit:edit-mismatch", "s2")]
+
+
+def test_learn_proposes_nothing_when_no_failure_reproduces(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("META_HARNESS_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    calls, proposed = _fake_targets(monkeypatch, [None, False])
+    monkeypatch.setattr(cli, "load_sessions",
+                        lambda **kw: [type("S", (), {"session_id": sid})() for sid in ("e1", "e2")])
+    assert cli.main(["learn"]) == 0
+    assert proposed == []
+    assert "nothing proposed" in capsys.readouterr().out
