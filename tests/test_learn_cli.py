@@ -172,3 +172,19 @@ def test_learn_proposes_nothing_when_no_failure_reproduces(tmp_path: Path, monke
     assert cli.main(["learn"]) == 0
     assert proposed == []
     assert "nothing proposed" in capsys.readouterr().out
+
+
+def test_an_unbuildable_probe_is_skipped_not_fatal(tmp_path: Path, monkeypatch, capsys):
+    from meta_harness.cc_harness import AgentRunError
+
+    monkeypatch.setenv("META_HARNESS_HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    calls, proposed = _fake_targets(monkeypatch, [False, False])
+    monkeypatch.setattr(cli, "load_sessions",
+                        lambda **kw: [type("S", (), {"session_id": sid})() for sid in ("e1", "e2")])
+    def boom(replay, root):
+        raise AgentRunError("task file escapes the workspace: D:/elsewhere/x")
+    monkeypatch.setattr(cli, "reproduces", boom)
+    assert cli.main(["learn"]) == 0
+    assert "could not be run" in capsys.readouterr().out
+    assert proposed == []

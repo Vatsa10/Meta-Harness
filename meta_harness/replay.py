@@ -221,6 +221,11 @@ def build_replay(episode: FailureEpisode, session: Session, home: Path | None = 
     for version in read_file_history(session.session_id, home):
         if version.previous_content is None or not version.tracking_path:
             continue
+        path = version.tracking_path.replace("\\", "/")
+        # A tracking path that is absolute (or climbs out) belongs to another project: seeding
+        # it would make the workspace builder refuse to write outside its sandbox. Skip it.
+        if path.startswith("/") or ":" in path or ".." in path.split("/"):
+            continue
         seeded.setdefault(version.tracking_path, version.previous_content)
     smallest = sorted(seeded.items(), key=lambda kv: len(kv[1]))[:max_files]
 

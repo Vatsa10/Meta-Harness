@@ -108,3 +108,23 @@ def test_replay_instruction_skips_harness_injected_text(tmp_path: Path):
     assert replay is not None
     assert "parser" in replay["instruction"]
     assert "Base directory for this skill" not in replay["instruction"]
+
+
+def test_replay_does_not_seed_files_from_another_project(tmp_path: Path):
+    # A file-history entry with an absolute path belongs to another project; seeding it made the
+    # workspace builder refuse the whole replay and crashed a live `learn` run.
+    home = tmp_path / "claude"
+    _transcript(home / "projects" / "proj" / "s1.jsonl", [
+        {"type": "file-history-delta", "trackingPath": "D:/Files/Other/pyproject.toml",
+         "backup": repr({"backupFileName": "h1@v2", "version": 2}),
+         "timestamp": "2026-09-20T10:00:00Z"},
+        {"type": "file-history-delta", "trackingPath": "src/a.py",
+         "backup": repr({"backupFileName": "h2@v2", "version": 2}),
+         "timestamp": "2026-09-20T10:00:00Z"},
+    ])
+    for name, body in (("h1@v2", "foreign"), ("h2@v2", "original body")):
+        blob = home / "file-history" / "s1" / name
+        blob.parent.mkdir(parents=True, exist_ok=True)
+        blob.write_text(json.dumps(body), encoding="utf-8")
+    replay = build_replay(_episode(), _session(tmp_path), home=home)
+    assert list(replay["files"]) == ["src/a.py"]

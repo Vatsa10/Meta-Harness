@@ -19,6 +19,7 @@ from .cc_history import (compare_reports, draft_tasks, harness_report, load_sess
 from .demo import run as run_demo
 from .harness_store import Artifact, HarnessStore, harness_home
 from .cc_harness import AgentConfig
+from .cc_harness import AgentRunError
 from .learn import (candidate_targets, config_with, decide_retention, merge_failures,
                     observed_failures, propose_artifact, rank_failures, reproduces, run_replay,
                     score_task_set, select_target)
@@ -386,9 +387,12 @@ def _command_learn(args) -> int:
             if probes >= args.max_probes:
                 break
             probes += 1
-            recurred = reproduces(candidate_replay, workspace_root)
-            outcome = {True: "reproduced", False: "did not reproduce",
-                       None: "never exercised the tool"}[recurred]
+            try:
+                recurred = reproduces(candidate_replay, workspace_root)
+                outcome = {True: "reproduced", False: "did not reproduce",
+                           None: "never exercised the tool"}[recurred]
+            except AgentRunError as error:
+                recurred, outcome = None, f"could not be run ({error})"
             origin = candidate_replay.get("_origin") or {}
             print(f"probe {probes}/{args.max_probes}: {candidate.signature} "
                   f"(session {str(origin.get('session', ''))[:8]}, turn {origin.get('turn')}): {outcome}")
