@@ -65,3 +65,15 @@ def test_equal_rates_is_no_measurable_effect():
 def test_user_driven_sources_never_get_a_verdict():
     rows = [r(f"s{i}", 1, "acted", artifact=None, source="session-rule") for i in range(30)]
     assert summarize(attribute(rows, []))[0]["verdict"] == "no control arm"
+
+
+def test_hook_shaped_observations_take_their_session_from_the_file_name(tmp_path):
+    import json
+    from meta_harness.receipts import load_observations, load_receipts
+    rec = {"session": "s1", "call": 5, "decision": "acted", "artifact": "a1",
+           "source": "learned-rule", "signature": "tool_error:Bash:x"}
+    obs = {"call": 7, "kind": "tool_error", "tool": "Bash", "cause": "x"}   # no session field
+    (tmp_path / "receipts-s1.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    (tmp_path / "observed-s1.jsonl").write_text(json.dumps(obs) + "\n", encoding="utf-8")
+    out = attribute(load_receipts(tmp_path), load_observations(tmp_path))
+    assert out[0]["recurred"] is True

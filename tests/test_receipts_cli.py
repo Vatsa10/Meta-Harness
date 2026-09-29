@@ -19,8 +19,8 @@ def test_report_json_prints_the_summary_table(tmp_path, monkeypatch, capsys):
     _seed(tmp_path)
     assert cli.main(["receipts", "report", "--json"]) == 0
     table = json.loads(capsys.readouterr().out)
-    assert table[0]["artifact"] == "a1" and table[0]["verdict"] == "no control arm" or \
-        table[0]["verdict"] == "not enough data"
+    assert table[0]["artifact"] == "a1"
+    assert table[0]["verdict"] == "not enough data"
     assert table[0]["acted"] == 1 and table[0]["acted_rate"] == 1.0
 
 

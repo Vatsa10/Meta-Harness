@@ -16,7 +16,7 @@ Z = 1.96
 USER_DRIVEN = {"session-rule", "rejection-memory"}
 
 
-def _read_jsonl(paths) -> list[dict[str, Any]]:
+def _read_jsonl(paths, session_prefix: str = "") -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for path in paths:
         try:
@@ -29,6 +29,9 @@ def _read_jsonl(paths) -> list[dict[str, Any]]:
             except ValueError:
                 continue
             if isinstance(row, dict):
+                if session_prefix and path.stem.startswith(session_prefix):
+                    # The hook keeps the session in the file name, not in the record.
+                    row.setdefault("session", path.stem[len(session_prefix):])
                 rows.append(row)
     return rows
 
@@ -38,7 +41,7 @@ def load_receipts(home: Path) -> list[dict[str, Any]]:
 
 
 def load_observations(home: Path) -> list[dict[str, Any]]:
-    return _read_jsonl(sorted(Path(home).glob("observed-*.jsonl"))) if Path(home).exists() else []
+    return _read_jsonl(sorted(Path(home).glob("observed-*.jsonl")), "observed-") if Path(home).exists() else []
 
 
 def _signature(obs: dict[str, Any]) -> str | None:
