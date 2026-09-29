@@ -45,7 +45,7 @@ scored and recorded, but no hook installs them into a session.
 held-out decision, with the session's call number and no message text or tool input. A learned
 rule, an injection or the drift note is held out on a random share of occasions (default 0.1,
 from `<harness_home>/receipts.json` as `{"holdout_rate": x}`, clamped to 0-0.5, 0 disables): the
-hook records `held-out` and does nothing, so a held-out learned rule does not deny. Session rules
+hook records `held` and does nothing, so a held-out learned rule does not deny. Session rules
 and rejection memory are never held out. A receipt write failure is logged and never changes a
 decision. Read the result with `python -m meta_harness receipts report`.
 

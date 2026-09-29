@@ -78,6 +78,9 @@ def _verdict(source: str, acted: list, held: list) -> tuple[str, float | None, f
         return "no control arm", acted_rate, held_rate
     if len(acted) < MIN_PER_ARM or len(held) < MIN_PER_ARM:
         return "not enough data", acted_rate, held_rate
+    if not any(r.get("signature") for r in acted + held) or not any(
+            r["recurred"] for r in acted + held):
+        return "not enough data", acted_rate, held_rate    # nothing measurable to compare
     pooled = (sum(r["recurred"] for r in acted) + sum(r["recurred"] for r in held)) / (len(acted) + len(held))
     se = math.sqrt(pooled * (1 - pooled) * (1 / len(acted) + 1 / len(held)))
     effect = held_rate - acted_rate

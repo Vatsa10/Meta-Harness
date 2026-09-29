@@ -62,6 +62,23 @@ def test_equal_rates_is_no_measurable_effect():
     assert summarize(attribute(acted + held, obs))[0]["verdict"] == "no measurable effect"
 
 
+def test_drift_note_without_a_signature_is_not_enough_data():
+    rows = ([r(f"a{i}", 1, "acted", artifact=None, source="drift-note", sig=None) for i in range(5)]
+            + [r(f"h{i}", 1, "held", artifact=None, source="drift-note", sig=None) for i in range(5)])
+    assert summarize(attribute(rows, []))[0]["verdict"] == "not enough data"
+
+
+def test_no_recurrences_in_either_arm_is_not_enough_data_and_not_retired():
+    from types import SimpleNamespace
+    from meta_harness.temporal import retirement_candidates
+    rows = ([r(f"a{i}", 1, "acted") for i in range(5)] + [r(f"h{i}", 1, "held") for i in range(5)])
+    table = summarize(attribute(rows, []))
+    assert table[0]["verdict"] == "not enough data"
+    art = SimpleNamespace(id="a1", origin={}, created="")
+    verdicts = {row["artifact"]: row["verdict"] for row in table}
+    assert retirement_candidates([art], set(), verdicts=verdicts) == []
+
+
 def test_user_driven_sources_never_get_a_verdict():
     rows = [r(f"s{i}", 1, "acted", artifact=None, source="session-rule") for i in range(30)]
     assert summarize(attribute(rows, []))[0]["verdict"] == "no control arm"

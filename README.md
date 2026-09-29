@@ -72,14 +72,14 @@ developer's own repository, where the environment is already known — 50 orient
 ### Decision receipts, and the holdout
 
 A receipt is one line the hooks write each time a learned rule, an injection, a session rule or
-the drift note acts on a call or a prompt: which artifact, what it did (`acted`, or `held-out`),
+the drift note acts on a call or a prompt: which artifact, what it did (`acted`, or `held`),
 and the call number in the session. It carries no message text and no tool input. Receipts go to
 `<harness_home>/receipts-<session>.jsonl`, next to the observations, which now record the same
 call number so the two can be matched.
 
 To find out whether an artifact does anything, the harness needs something to compare against. So
 a learned rule, an injection or the drift note is held out on a random 10% of the occasions it
-would have acted: the hook records a `held-out` receipt and does nothing. The cost is real: a
+would have acted: the hook records a `held` receipt and does nothing. The cost is real: a
 held-out learned rule does not deny that call, so about one time in ten the failure it exists to
 prevent is allowed through. Session rules and rejection memory are never held out: they are
 something you said, and they always apply.
@@ -91,7 +91,7 @@ Set the rate in `<harness_home>/receipts.json`:
 ```
 
 The value is clamped to 0 through 0.5; a missing or unreadable file means 0.1. Set it to 0 to
-switch the holdout off entirely (receipts are still written, but then there is no control arm).
+switch the holdout off entirely (receipts are still written, but nothing is held, so learned artifacts stay "not enough data").
 
 ```bash
 python -m meta_harness receipts report            # add --json for the raw rows
@@ -104,8 +104,10 @@ with the artifact acting versus held out. Verdicts:
 - **helps** - the failure recurred measurably less when the artifact acted.
 - **no measurable effect** - no difference either way. The harness proposes retiring the
   artifact (see `learn --status`); it never retires one itself.
-- **not enough data** - fewer than 5 receipts in an arm. No verdict is given.
-- **no control arm** - nothing was held out (a session rule, or a holdout rate of 0), so there
+- **not enough data** - fewer than 5 receipts in an arm, or no recurrence at all to compare. No
+  verdict is given. The drift note cannot reach a verdict yet either: its receipts carry no
+  failure signature to match against.
+- **no control arm** - a session rule or rejection memory, which are never held out, so there
   is nothing to compare against.
 
 Evidence accumulates slowly. At a 10% holdout an artifact needs many occasions before either arm
