@@ -78,8 +78,8 @@ The observer logs only failures, so "within the next K calls" needs a shared cou
 
 - **Recurred**: an observed `tool_error` with the receipt's `signature` in the same session at
   `call` in `(receipt.call, receipt.call + K]`, K = 10.
-- Secondary, reported but not used for verdicts: calls until the stretch ended, and whether the
-  stretch ended in a correction (from `meta_harness.waste`).
+- Deferred: secondary signals (calls until the stretch ended, whether it ended in a correction)
+  would be reported only, never used for a verdict. They are left out of the first build.
 
 Per artifact: acted count, held count, recurrence rate in each group, and the difference.
 
