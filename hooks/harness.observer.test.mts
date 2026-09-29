@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { cause, registerObserver, safely } from './harness.ts';
+import { currentCall } from './receipts.ts';
 
 // registerObserver only needs `safely` to exist as an import target; touch it so a bundler /
 // type-checker never flags it as unused if this file is ever compiled instead of stripped.
@@ -189,6 +190,26 @@ async function main() {
     const notFlagged = async () => ({ result: { is_error: false, content: 'Error: in a quoted log line' } });
     await handler2(dollar2, { tool: 'Bash', tool_use_id: 'toolu_x', command: 'cat log' }, notFlagged);
     assert.equal(files2.size, 0, 'is_error:false must win over error-looking text');
+  }
+
+  // --- three calls, the second fails: the observation names call 2 ---
+  {
+    const files = new Map<string, string>();
+    const dollar = { ...makeFakeDollar(files), session: { id: async () => 'sess-callseq' } };
+    let handler: any;
+    registerObserver((event: string, h: any) => {
+      if (event === 'tool.call') handler = h;
+    });
+    const ok = async () => ({ result: 'ok' });
+    const fail = async () => ({ result: 'No such file or directory: b.txt' });
+    await handler(dollar, { tool: 'Read', tool_use_id: 't1', file_path: 'a.txt' }, ok);
+    await handler(dollar, { tool: 'Read', tool_use_id: 't2', file_path: 'b.txt' }, fail);
+    await handler(dollar, { tool: 'Read', tool_use_id: 't3', file_path: 'c.txt' }, ok);
+    const observedRecords = files.get('C:/fake-harness-home/observed-sess-callseq.jsonl')!
+      .trim().split('\n').map((line) => JSON.parse(line));
+    assert.equal(observedRecords.length, 1);
+    assert.equal(observedRecords[0].call, 2, 'an observation carries its call number');
+    assert.equal(currentCall('sess-callseq'), 3, 'the counter advances on every call, error or not');
   }
 
   console.log('hooks/harness.observer.test.mts: all assertions passed');

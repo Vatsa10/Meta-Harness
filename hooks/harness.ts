@@ -33,6 +33,7 @@ import {
   wasRejected,
 } from './rules.js';
 import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
+import { bumpCall } from './receipts.js';
 
 export type Fallible<E, R> = (io: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -364,6 +365,9 @@ export function registerObserver(add: On): void {
   // guardAfter, not guardBefore: this handler's work runs after the tool has already executed, so a
   // recovery that re-entered next() would run the tool twice.
   add('tool.call', async (io: any, event: any, next: any) => guardAfter('tool.call', io, event, next, async (outcome: any) => {
+    // The one place the session's call counter advances: once per tool.call, error or not.
+    const sessionId = await currentSessionId(io);
+    const call = bumpCall(sessionId);
     const tool = String(event?.tool ?? 'unknown');
     const args = toolArgs(event);
     const key = `${tool}:${stableStringify(args).slice(0, 200)}`;
@@ -372,14 +376,14 @@ export function registerObserver(add: On): void {
     if (recent.length > REPEAT_WINDOW) recent.shift();
     const repeats = recent.filter((entry) => entry.key === key).length;
 
-    const sessionId = await currentSessionId(io);
     if (repeats >= REPEAT_THRESHOLD) {
-      await observe(io, sessionId, { kind: 'repeat', tool, cause: 'repeat', input: args });
+      await observe(io, sessionId, { kind: 'repeat', call, tool, cause: 'repeat', input: args });
     }
     const text = resultText((outcome as any)?.result);
     if (isError((outcome as any)?.result)) {
       await observe(io, sessionId, {
         kind: 'tool_error',
+        call,
         tool,
         cause: cause(text),
         input: args,
