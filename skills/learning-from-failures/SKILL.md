@@ -59,6 +59,13 @@ in every repository; the score justifies proposing it, never adopting it unseen.
 rule cannot deny legitimate work, and that doctrine names no file from the replay - naming one is
 memorisation, and it will not transfer.
 
+## Check whether an installed artifact helps
+
+Installed rules, injections and the drift note are held out on about 10% of occasions and each
+decision is written as a receipt. `python -m meta_harness receipts report` (or `learn --status`)
+shows a verdict per artifact: helps, no measurable effect, not enough data, or no control arm.
+Expect "not enough data" for weeks. "No measurable effect" only proposes retirement; you decide.
+
 ## The layer ordering
 
 | Type | Mechanism | Ignorable? |

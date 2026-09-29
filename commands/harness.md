@@ -67,6 +67,12 @@ of three sources in the plugin:
 A denial that says a file "has not been read yet" is not one of these - that check is Claude
 Code's own engine, not this plugin, and it runs before the plugin ever sees the call.
 
+If the last call was allowed when you expected a learned rule to deny it, the rule may have been
+held out: the harness deliberately lets a learned rule sit out a random share of occasions
+(10% by default, see `<harness_home>/receipts.json`) to measure whether it helps. A held-out
+learned rule does not deny; the call goes through and a `held-out` receipt is written to
+`<harness_home>/receipts-<session>.jsonl`. Session rules and rejection memory are never held out.
+
 Quote the denial reason text exactly as it was shown - that reason string is the only evidence
 available; do not invent a fuller justification than what the hook actually said. If nothing was
 denied in this session, say so rather than fabricating one. Then explain, in the user's terms,

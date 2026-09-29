@@ -65,7 +65,7 @@ def test_the_measured_negative_result_is_recorded():
 def test_plugin_version_bumped():
     import json
     manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.8.0"
 
 
 # --- final fix wave: user docs must describe the hooks that actually ship ---------------------
@@ -157,3 +157,45 @@ def test_no_user_facing_text_points_at_an_unqualified_harness_command():
         text = target.read_text(encoding="utf-8")
         hits = [m.group(0) for m in pattern.finditer(text)]
         assert not hits, f"{target.name} points at the unqualified /harness command"
+
+
+def _readme() -> str:
+    return (ROOT / "README.md").read_text(encoding="utf-8")
+
+
+def test_readme_documents_receipts_report_and_the_default_holdout():
+    text = _readme()
+    assert "receipts report" in text
+    assert re.search(r"10\s?%", text)
+    assert "receipts.json" in text
+    assert re.search(r"(configurable|set it|set (?:the )?(?:rate )?)[^.]{0,80}\b(to )?0\b|0 (turns|switches|disables)", text, re.I)
+
+
+def test_readme_says_session_rules_and_rejection_memory_are_never_held_out():
+    text = _readme()
+    assert re.search(r"never held out", text, re.I)
+    for paragraph in re.split(r"\n\s*\n", text):
+        if re.search(r"never held out", paragraph, re.I):
+            assert re.search(r"session rules?", paragraph, re.I)
+            assert re.search(r"rejection memory", paragraph, re.I)
+            return
+    raise AssertionError("no paragraph names both")
+
+
+def test_readme_explains_verdicts_and_that_evidence_takes_weeks():
+    text = _readme()
+    for verdict in ("helps", "no measurable effect", "not enough data", "no control arm"):
+        assert verdict in text
+    assert re.search(r"weeks", text, re.I)
+
+
+def test_why_command_notes_a_held_out_rule_does_not_deny():
+    text = (ROOT / "commands" / "harness.md").read_text(encoding="utf-8")
+    assert re.search(r"held[- ]out", text, re.I)
+    assert re.search(r"does not deny|did not deny|not denied|will not deny", text, re.I)
+
+
+def test_plugin_version_is_0_8_0():
+    import json
+    data = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert data["version"] == "0.8.0"
