@@ -22,6 +22,7 @@
 
 import assert from 'node:assert/strict';
 import { registerInjection, safely } from './harness.ts';
+import { setDraw } from './receipts.ts';
 
 void safely;
 
@@ -64,6 +65,8 @@ async function forwardingNext(event: any) {
 }
 
 async function main() {
+  // Holdout never fires unless a test says so.
+  setDraw(() => 0.99);
   // --- no installed injections: the event passes through next() completely unchanged ---
   {
     const files = new Map<string, string>();
@@ -263,6 +266,52 @@ async function main() {
     // 8 artifacts x 300 chars each would be 2400+ chars uncapped; the joined total must stay
     // bounded regardless of how many injections are installed, not just each one individually.
     assert.ok(attached.length < 1500, `expected the joined total to stay bounded, got ${attached.length}`);
+  }
+
+  // --- receipts and holdout for a matched injection ---
+  {
+    const HOME = 'C:/fake-harness-home';
+    for (const [drawValue, decision, id] of [[0.99, 'acted', 'sess-inj-acted'], [0.01, 'held', 'sess-inj-held']] as const) {
+      setDraw(() => drawValue);
+      const files = new Map<string, string>();
+      files.set(`${HOME}/installed.json`, JSON.stringify([
+        { id: 'timeout-tip', type: 'injection', signature: 'tool_error:Bash:timeout', accepted: '2026-01-01' },
+      ]));
+      files.set(`${HOME}/artifacts/timeout-tip/artifact.json`, JSON.stringify({
+        id: 'timeout-tip', type: 'injection', origin: { triggers: ['timeout'] },
+        payload: 'Long-running commands should pass an explicit timeout.',
+      }));
+      const dollar = { ...makeFakeDollar(files), session: { id: async () => id } };
+      const { on, handlers } = makeOn();
+      registerInjection(on as any);
+      const event = promptSubmit('the build hit a timeout again');
+      let forwarded: any = null;
+      let nextCalls = 0;
+      await handlers['prompt.submit'](dollar, event, async (e: any) => {
+        nextCalls += 1;
+        forwarded = e;
+        return forwardingNext(e);
+      });
+      assert.equal(nextCalls, 1);
+      if (decision === 'acted') {
+        assert.ok(forwarded.context?.[0]?.includes('explicit timeout'), 'an acted injection attaches its text');
+      } else {
+        assert.equal(forwarded, event, 'a held injection passes the event through unchanged');
+        assert.equal(forwarded.context, undefined, 'a held injection attaches no context');
+        assert.equal(files.has(`${HOME}/observed-${id}.jsonl`), false, 'a held injection is not recorded as injected');
+      }
+      const text = files.get(`${HOME}/receipts-${id}.jsonl`);
+      assert.ok(text, `${id}: a receipt must be written`);
+      const receipts = text!.trim().split('\n').map((line) => JSON.parse(line));
+      assert.equal(receipts.length, 1);
+      assert.equal(receipts[0].event, 'prompt.submit');
+      assert.equal(receipts[0].source, 'learned-injection');
+      assert.equal(receipts[0].decision, decision);
+      assert.equal(receipts[0].artifact, 'timeout-tip');
+      assert.equal(receipts[0].signature, 'tool_error:Bash:timeout');
+      assert.ok(!JSON.stringify(receipts[0]).includes('timeout again'), 'a receipt carries no message text');
+    }
+    setDraw(() => 0.99);
   }
 
   console.log('hooks/harness.injection.test.mts: all assertions passed');

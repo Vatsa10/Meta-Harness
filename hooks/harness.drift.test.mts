@@ -14,6 +14,7 @@
 import assert from 'node:assert/strict';
 import { register, registerDrift } from './harness.ts';
 import { loadDriftConfig, shouldWarn } from './drift.ts';
+import { setDraw } from './receipts.ts';
 
 const HOME = 'C:/fake-harness-home';
 const DRIFT = `${HOME}/drift.json`;
@@ -106,6 +107,8 @@ function plugin(files: Map<string, string>) {
 const noted = (outcomes: any[]) => outcomes.flatMap((o, i) => (notesOf(o).length ? [i] : []));
 
 async function main() {
+  // Holdout never fires unless a test says so.
+  setDraw(() => 0.99);
   // --- 1 + (a). enabled, min_calls 8: the note is on the result of the call that crosses it,
   //              names the count, and appears on no earlier result ---
   {
@@ -359,6 +362,48 @@ async function main() {
       assert.equal(seen, event, 'the throwing drift handler must pass the event through as it arrived');
       assert.ok(logged.includes('prompt.submit:drift'), `the drift skip is logged: ${logged}`);
     }
+  }
+
+  // --- receipts and holdout for the drift note ---
+  {
+    const receiptsOf = (files: Map<string, string>, id: string) => {
+      const text = files.get(`${HOME}/receipts-${id}.jsonl`);
+      return text ? text.trim().split('\n').map((line) => JSON.parse(line)) : [];
+    };
+    for (const [drawValue, decision, id] of [[0.99, 'acted', 'sess-drift-acted'], [0.01, 'held', 'sess-drift-held']] as const) {
+      setDraw(() => drawValue);
+      const files = new Map([[DRIFT, JSON.stringify({ enabled: true, min_calls: 2 })]]);
+      const dollar = { ...makeFakeDollar(files), session: { id: async () => id } };
+      const { on, handlers } = makeChainingOn();
+      registerDrift(on as any);
+      const handler = handlers['tool.call'][0];
+      const fire = async () => {
+        const outcome = { ref: 1, result: { stdout: 'x' }, text: 'x' };
+        return { outcome, got: await handler(dollar, { tool: 'Bash', command: 'echo', tool_use_id: 'tu' }, async () => outcome) };
+      };
+      await fire();
+      assert.equal(receiptsOf(files, id).length, 0, 'below min_calls: no receipt');
+      const crossing = await fire();
+      if (decision === 'acted') {
+        assert.equal(notesOf(crossing.got).length, 1, 'an acted drift note rides on the result');
+      } else {
+        assert.equal(crossing.got, crossing.outcome, 'a held drift note returns the outcome unchanged (same object)');
+      }
+      const receipts = receiptsOf(files, id);
+      assert.equal(receipts.length, 1, `${id}: exactly one receipt`);
+      assert.equal(receipts[0].event, 'tool.call');
+      assert.equal(receipts[0].source, 'drift-note');
+      assert.equal(receipts[0].decision, decision);
+      assert.equal(receipts[0].artifact, null);
+      assert.equal(receipts[0].signature, null);
+      assert.equal(receipts[0].tool, 'Bash');
+      // The latch is set either way: even with a draw that would act, no second note this stretch.
+      setDraw(() => 0.99);
+      const after = await fire();
+      assert.equal(notesOf(after.got).length, 0, `${id}: no second note in the same stretch`);
+      assert.equal(receiptsOf(files, id).length, 1, `${id}: no second receipt in the same stretch`);
+    }
+    setDraw(() => 0.99);
   }
 
   console.log('hooks/harness.drift.test.mts: all assertions passed');

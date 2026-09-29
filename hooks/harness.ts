@@ -549,7 +549,7 @@ export function registerRules(add: On): void {
   }));
 }
 
-type Injection = { artifactId: string; triggers: string[]; text: string };
+type Injection = { artifactId: string; triggers: string[]; text: string; signature: string };
 
 /**
  * Per-artifact injected-text cap, matching the `reason` cap the rules layer already applies
@@ -581,6 +581,7 @@ async function loadInjections(io: any, home: string): Promise<Injection[]> {
     artifactId: String(artifact.id),
     triggers: (artifact.origin as any)?.triggers ?? [],
     text: truncate(String(artifact.payload ?? ''), INJECTION_TEXT_CAP),
+    signature: String(artifact.signature ?? ''),
   }));
 }
 
@@ -601,7 +602,8 @@ export function registerInjection(add: On): void {
   let injections: Injection[] | null = null;
 
   add('prompt.submit', async (io: any, event: any, next: any) => guardBefore('prompt.submit:injection', io, event, next, async (next) => {
-    if (injections === null) injections = await loadInjections(io, (await harnessHome(io)));
+    const home = await harnessHome(io);
+    if (injections === null) injections = await loadInjections(io, home);
     if (injections.length === 0) return next(event);
 
     const haystack = String(event?.text ?? '').toLowerCase();
@@ -610,10 +612,21 @@ export function registerInjection(add: On): void {
     if (matched.length === 0) return next(event);
 
     const sessionId = await currentSessionId(io);
+    // Each matched injection draws independently; a held one behaves as if it were not installed.
+    const acted: Injection[] = [];
     for (const injection of matched) {
+      const held = shouldHold(await holdoutRate(io, home));
+      await writeReceipt(io, home, sessionId, {
+        event: 'prompt.submit', source: 'learned-injection', artifact: injection.artifactId,
+        signature: injection.signature, tool: '', decision: held ? 'held' : 'acted',
+      });
+      if (!held) acted.push(injection);
+    }
+    if (acted.length === 0) return next(event);
+    for (const injection of acted) {
       await observe(io, sessionId, { kind: 'injected', artifactId: injection.artifactId });
     }
-    const joined = truncate(matched.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
+    const joined = truncate(acted.map((injection) => injection.text).join('\n\n'), INJECTION_TOTAL_CAP);
     return next({ ...event, context: [...(event?.context ?? []), joined] });
   }));
 }
@@ -631,7 +644,8 @@ export function registerInjection(add: On): void {
  * appended to a COPY of the answered outcome; a throw anywhere after `next` returns core's
  * outcome untouched, never re-running the tool. A `{ deny }` outcome is never given context (its
  * type forbids it): past the threshold the note waits for the next answered call. The latch is
- * set only once the note is actually attached.
+ * set once the note is decided: attached, or held out by the receipts holdout (a held note
+ * returns core's outcome unchanged and is still receipted).
  *
  * `prompt.submit` only resets the stretch when the user speaks (see `userSpoke`); it attaches
  * nothing and passes the event through unchanged, under `guardBefore`, which calls `next` once.
@@ -646,10 +660,18 @@ export function registerDrift(add: On): void {
     count += 1;
     if (warned) return outcome;
     if (outcome === null || typeof outcome !== 'object' || 'deny' in outcome) return outcome;
-    if (config === undefined) config = await loadDriftConfig(io, (await harnessHome(io)));
+    const home = await harnessHome(io);
+    if (config === undefined) config = await loadDriftConfig(io, home);
     if (!shouldWarn(count, config)) return outcome;
-    const context = Array.isArray(outcome.context) ? outcome.context : [];
+    // The latch is set whether the note acts or is held: one decision per stretch either way.
     warned = true;
+    const held = shouldHold(await holdoutRate(io, home));
+    await writeReceipt(io, home, await currentSessionId(io), {
+      event: 'tool.call', source: 'drift-note', artifact: null, signature: null,
+      tool: String(event?.tool ?? ''), decision: held ? 'held' : 'acted',
+    });
+    if (held) return outcome;
+    const context = Array.isArray(outcome.context) ? outcome.context : [];
     return { ...outcome, context: [...context, driftNote(count)] };
   }));
 
