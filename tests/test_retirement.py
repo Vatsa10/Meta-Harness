@@ -37,3 +37,24 @@ def test_an_artifact_with_an_unparseable_created_date_is_not_proposed():
     stray = Artifact(id="a3", type="rule", origin={"signature": "s"}, payload="x",
                      replay={}, scores={}, sources=[], created="not-a-date")
     assert retirement_candidates([stray], set(), now=NOW) == []
+
+
+def test_a_no_effect_verdict_proposes_retirement_citing_receipts():
+    young = artifact("a1", "tool_error:Bash:x", NOW - timedelta(days=5))
+    got = retirement_candidates([young], {"tool_error:Bash:x"}, now=NOW,
+                                verdicts={"a1": "no measurable effect"})
+    assert [a.id for a, _ in got] == ["a1"]
+    assert "receipts" in got[0][1]
+
+
+def test_helps_and_not_enough_data_verdicts_do_not_propose_retirement():
+    young = artifact("a1", "tool_error:Bash:x", NOW - timedelta(days=5))
+    for verdict in ("helps", "not enough data", "no control arm"):
+        assert retirement_candidates([young], {"tool_error:Bash:x"}, now=NOW,
+                                     verdicts={"a1": verdict}) == []
+
+
+def test_an_artifact_quiet_and_no_effect_is_proposed_once():
+    old = artifact("a1", "tool_error:Bash:x", NOW - timedelta(days=200))
+    got = retirement_candidates([old], set(), now=NOW, verdicts={"a1": "no measurable effect"})
+    assert [a.id for a, _ in got] == ["a1"]

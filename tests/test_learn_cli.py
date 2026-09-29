@@ -188,3 +188,56 @@ def test_an_unbuildable_probe_is_skipped_not_fatal(tmp_path: Path, monkeypatch, 
     assert cli.main(["learn"]) == 0
     assert "could not be run" in capsys.readouterr().out
     assert proposed == []
+
+
+def _seed_receipts(home: Path, artifact_id: str, *, acted_recur: int, held_recur: int, n: int = 20):
+    receipts, obs = [], []
+    for arm, recur in (("acted", acted_recur), ("held", held_recur)):
+        for i in range(n):
+            session = f"{arm}{i}"
+            receipts.append({"session": session, "call": 1, "decision": arm,
+                             "artifact": artifact_id, "source": "learned-rule",
+                             "signature": "tool_error:Bash:x"})
+            if i < recur:
+                obs.append({"session": session, "call": 3, "kind": "tool_error",
+                            "tool": "Bash", "cause": "x"})
+    (home / "receipts-all.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in receipts) + "\n", encoding="utf-8")
+    (home / "observed-all.jsonl").write_text(
+        "\n".join(json.dumps(o) for o in obs) + "\n", encoding="utf-8")
+
+
+def _install(home: Path, monkeypatch):
+    monkeypatch.setenv("META_HARNESS_HOME", str(home))
+    monkeypatch.setattr(cli, "load_sessions", lambda **kw: [])
+    store = HarnessStore(home)
+    store.stage(Artifact(id="a1", type="rule", origin={"signature": "tool_error:Bash:x"},
+                         payload="p", replay={}))
+    store.accept("a1")
+
+
+def test_status_carries_the_receipt_verdict_and_proposes_a_no_effect_artifact(
+        tmp_path: Path, monkeypatch, capsys):
+    _install(tmp_path, monkeypatch)
+    _seed_receipts(tmp_path, "a1", acted_recur=10, held_recur=10)
+    assert cli.main(["learn", "--status"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"][0]["receipt_verdict"] == "no measurable effect"
+    assert [c["id"] for c in payload["retirement_candidates"]] == ["a1"]
+    assert "receipts" in payload["retirement_candidates"][0]["reason"]
+
+
+def test_status_keeps_an_artifact_that_helps(tmp_path: Path, monkeypatch, capsys):
+    _install(tmp_path, monkeypatch)
+    _seed_receipts(tmp_path, "a1", acted_recur=0, held_recur=16)
+    assert cli.main(["learn", "--status"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"][0]["receipt_verdict"] == "helps"
+    assert payload["retirement_candidates"] == []
+
+
+def test_status_with_no_receipts_has_no_verdict(tmp_path: Path, monkeypatch, capsys):
+    _install(tmp_path, monkeypatch)
+    assert cli.main(["learn", "--status"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["installed"][0]["receipt_verdict"] is None

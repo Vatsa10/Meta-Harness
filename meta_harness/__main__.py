@@ -320,17 +320,22 @@ def _command_learn(args) -> int:
         sessions = load_sessions(limit=args.limit, include_text=False)
         live_signatures = {f.signature for f in
                            merge_failures(observed_failures(), rank_failures(sessions))}
+        from .receipts import attribute, load_observations, load_receipts, summarize
+        verdicts = {str(row["artifact"]): row["verdict"] for row in summarize(attribute(
+            load_receipts(store.root), load_observations(store.root))) if row["artifact"]}
         print(json.dumps({
             "home": str(store.root),
             "staged": [{"id": a.id, "type": a.type, "signature": a.signature,
                         "enforces": _enforces(a), "scores": a.scores}
                        for a in store.list_staged()],
-            "installed": [{"id": a.id, "type": a.type, "signature": a.signature}
+            "installed": [{"id": a.id, "type": a.type, "signature": a.signature,
+                           "receipt_verdict": verdicts.get(a.id)}
                           for a in store.list_installed()],
             "tombstones": sorted(store.tombstones()),
             "retirement_candidates": [
                 {"id": a.id, "reason": reason}
-                for a, reason in retirement_candidates(store.list_installed(), live_signatures)
+                for a, reason in retirement_candidates(store.list_installed(), live_signatures,
+                                                  verdicts=verdicts)
             ],
         }, indent=2))
         return 0
