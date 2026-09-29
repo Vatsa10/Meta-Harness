@@ -147,6 +147,11 @@ def build_parser() -> argparse.ArgumentParser:
     waste.add_argument("--limit", type=int, default=None, help="most recent N sessions")
     waste.add_argument("--json", action="store_true", help="print the report as JSON")
     waste.add_argument("--home", default="", help="transcript root (defaults to ~/.claude/projects)")
+
+    receipts = sub.add_parser("receipts", help="what the harness's decisions did, measured against a holdout")
+    receipts.add_argument("action", choices=["report", "export"])
+    receipts.add_argument("--json", action="store_true", help="report: print the table as JSON")
+    receipts.add_argument("--out", default="", help="export: write here instead of stdout")
     return parser
 
 
@@ -521,6 +526,41 @@ def _command_waste(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_rate(rate) -> str:
+    return "-" if rate is None else f"{rate:.0%}"
+
+
+def _command_receipts(args) -> int:
+    from .receipts import K, MIN_EFFECT, MIN_PER_ARM, attribute, load_observations, load_receipts, summarize
+
+    home = harness_home()
+    receipts = load_receipts(home)
+    attributed = attribute(receipts, load_observations(home))
+    if args.action == "export":
+        lines = "".join(json.dumps(row, sort_keys=True) + chr(10) for row in attributed)
+        if args.out:
+            Path(args.out).write_text(lines, encoding="utf-8")
+        else:
+            sys.stdout.write(lines)
+        return 0
+    table = summarize(attributed)
+    if args.json:
+        print(json.dumps(table, indent=2))
+        return 0
+    if not table:
+        print("no receipts yet")
+        return 0
+    for row in table:
+        name = row["artifact"] or "(no artifact)"
+        print(f"{row['source']} {name}: {row['verdict']} - acted {row['acted']} "
+              f"(recurred {_fmt_rate(row['acted_rate'])}), held {row['held']} "
+              f"(recurred {_fmt_rate(row['held_rate'])})")
+    print(f"recurrence = the same failure within K={K} calls of the decision, same session; "
+          f"a verdict needs MIN_PER_ARM={MIN_PER_ARM} per arm and an effect of at least "
+          f"{MIN_EFFECT:.0%}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "demo":
@@ -548,6 +588,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _command_learn(args)
     if args.command == "waste":
         return _command_waste(args)
+    if args.command == "receipts":
+        return _command_receipts(args)
     experience = FilesystemExperience(args.root)
     frontier_file = experience.root / "frontier.json"
     print(json.dumps({
