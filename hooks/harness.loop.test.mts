@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import nodePath from 'node:path';
 import { registerInjection, registerRules } from './harness.ts';
+import { setDraw } from './receipts.ts';
 
 const home = process.argv[2];
 assert.ok(home, 'a harness home built by the Python producer must be passed as argv[2]');
@@ -48,6 +49,8 @@ function makeOn() {
 }
 
 async function main() {
+  // Holdout never fires here: these assertions are about the decision, not the draw.
+  setDraw(() => 0.99);
   // --- the produced `rule` artifact actually denies at tool.check ---
   {
     const dollar = makeDollar();

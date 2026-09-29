@@ -13,6 +13,7 @@
 import assert from 'node:assert/strict';
 import { registerRules, safely } from './harness.ts';
 import { callKey, evaluateRule, loadRules } from './rules.ts';
+import { setDraw } from './receipts.ts';
 
 void safely;
 
@@ -45,6 +46,9 @@ function makeOn() {
 }
 
 async function main() {
+  // Never hold unless a test says so: holdout draws must not make these assertions flaky.
+  setDraw(() => 0.99);
+
   // --- the plugin never denies an Edit of an unread file: that is the engine's job, not
   //     rules.ts/harness.ts's. A live test proved Claude Code's own "File has not been read
   //     yet" check already runs before this plugin, so a plugin-side copy only added failure
@@ -208,6 +212,113 @@ async function main() {
     const verdict = evaluateRule(rule, { tool: 'Bash', input: { command: 'ls' } }, state as any);
     assert.equal(verdict.deny, true);
     assert.ok(verdict.reason!.includes('[my-repeat]'));
+  }
+
+  // --- receipts and holdout at tool.check ---
+  {
+    const HOME = 'C:/fake-harness-home';
+    const receiptsOf = (files: Map<string, string>, session: string) => {
+      const text = files.get(`${HOME}/receipts-${session}.jsonl`);
+      return text ? text.trim().split('\n').map((line) => JSON.parse(line)) : [];
+    };
+    const withRule = (files: Map<string, string>) => {
+      files.set(`${HOME}/installed.json`, JSON.stringify([
+        { id: 'no-thrash', type: 'rule', signature: 'repeat:Bash:ls', accepted: '2026-01-01' },
+      ]));
+      files.set(`${HOME}/artifacts/no-thrash/artifact.json`, JSON.stringify({
+        id: 'no-thrash', type: 'rule',
+        origin: { rule_kind: 'repeat-call', tools: ['Bash'], threshold: 2 },
+        payload: 'Stop repeating ls.',
+      }));
+    };
+    const session = (id: string, files: Map<string, string>) =>
+      ({ ...makeFakeDollar(files), session: { id: async () => id } });
+
+    // loadRules carries the registry row's signature, '' when absent
+    {
+      const files = new Map<string, string>();
+      withRule(files);
+      const rules = await loadRules(makeFakeDollar(files), HOME);
+      assert.equal(rules[0].signature, 'repeat:Bash:ls');
+      files.set(`${HOME}/installed.json`, JSON.stringify([{ id: 'no-thrash', type: 'rule' }]));
+      assert.equal((await loadRules(makeFakeDollar(files), HOME))[0].signature, '');
+    }
+
+    // draw 0.99, rate 0.1: denied, one 'acted' receipt naming the artifact and signature
+    for (const [drawValue, rate, expectDeny, expectDecision, id] of [
+      [0.99, null, true, 'acted', 'sess-acted'],
+      [0.01, null, false, 'held', 'sess-held'],
+      [0.0, 0, true, 'acted', 'sess-zero'],
+    ] as const) {
+      setDraw(() => drawValue);
+      const files = new Map<string, string>();
+      withRule(files);
+      if (rate !== null) files.set(`${HOME}/receipts.json`, JSON.stringify({ holdout_rate: rate }));
+      const dollar = session(id, files);
+      const { on, handlers } = makeOn();
+      registerRules(on as any);
+      let nextCalls = 0;
+      const next = async () => { nextCalls += 1; return { decision: 'allow' }; };
+      const event = { tool: 'Bash', input: { command: 'ls' } };
+      await handlers['tool.check'](dollar, event, next);
+      assert.equal(nextCalls, 1, 'the first identical call is never denied');
+      assert.equal(receiptsOf(files, id).length, 0, 'no decision, no receipt');
+      const result = await handlers['tool.check'](dollar, event, next);
+      if (expectDeny) {
+        assert.equal(result.decision, 'deny', `${id}: must deny`);
+        assert.equal(nextCalls, 1);
+      } else {
+        assert.equal(result.decision, 'allow', `${id}: a held rule lets the call proceed`);
+        assert.equal(nextCalls, 2, 'next called exactly once for the held call');
+      }
+      const receipts = receiptsOf(files, id);
+      assert.equal(receipts.length, 1, `${id}: exactly one receipt`);
+      assert.equal(receipts[0].event, 'tool.check');
+      assert.equal(receipts[0].source, 'learned-rule');
+      assert.equal(receipts[0].decision, expectDecision);
+      assert.equal(receipts[0].artifact, 'no-thrash');
+      assert.equal(receipts[0].signature, 'repeat:Bash:ls');
+      assert.equal(receipts[0].tool, 'Bash');
+      assert.equal('input' in receipts[0], false, 'a receipt carries no tool input');
+    }
+
+    // a session rule is never held out, whatever the draw
+    {
+      setDraw(() => 0.01);
+      const files = new Map<string, string>();
+      const dollar = session('sess-rule', files);
+      const { on, handlers } = makeOn();
+      registerRules(on as any);
+      await handlers['prompt.submit'](dollar, { text: 'stop running pytest' }, async (e: any) => e);
+      const result = await handlers['tool.check'](dollar, { tool: 'Bash', input: { command: 'pytest tests' } },
+        async () => ({ decision: 'allow' }));
+      assert.equal(result.decision, 'deny', 'a session rule must never be held');
+      const receipts = receiptsOf(files, 'sess-rule');
+      assert.equal(receipts.length, 1);
+      assert.equal(receipts[0].source, 'session-rule');
+      assert.equal(receipts[0].decision, 'acted');
+      assert.equal(receipts[0].artifact, null);
+      assert.equal(receipts[0].signature, null);
+    }
+
+    // rejection memory is never held out, whatever the draw
+    {
+      setDraw(() => 0.01);
+      const files = new Map<string, string>();
+      const dollar = session('sess-rej', files);
+      const { on, handlers } = makeOn();
+      registerRules(on as any);
+      await handlers['tool.call'](dollar, { tool: 'Bash', command: 'rm -rf build' },
+        async () => ({ deny: "The user doesn't want to proceed with this tool use. The tool use was rejected." }));
+      const result = await handlers['tool.check'](dollar, { tool: 'Bash', input: { command: 'rm -rf build' } },
+        async () => ({ decision: 'allow' }));
+      assert.equal(result.decision, 'deny', 'rejection memory must never be held');
+      const receipts = receiptsOf(files, 'sess-rej');
+      assert.equal(receipts.length, 1);
+      assert.equal(receipts[0].source, 'rejection-memory');
+      assert.equal(receipts[0].decision, 'acted');
+    }
+    setDraw(() => 0.99);
   }
 
   console.log('hooks/harness.rules.test.mts: all assertions passed');

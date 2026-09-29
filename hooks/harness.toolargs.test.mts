@@ -12,6 +12,7 @@
 
 import assert from 'node:assert/strict';
 import { register } from './harness.ts';
+import { setDraw } from './receipts.ts';
 import { callKey, toolArgs } from './rules.ts';
 
 const HOME = 'C:/fake-harness-home';
@@ -51,6 +52,8 @@ function callEvent(shape: 'real' | 'nested', tool: string, args: Record<string, 
 const allow = async () => ({ decision: 'allow' });
 
 async function main() {
+  // Holdout never fires here: these assertions are about the decision, not the draw.
+  setDraw(() => 0.99);
   for (const shape of ['real', 'nested'] as const) {
     // --- 1. the plugin never denies an Edit of an unread file itself: that check belongs to
     //     Claude Code's own engine, which runs before the plugin ever sees the call ---

@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { registerRules, safely } from './harness.ts';
+import { setDraw } from './receipts.ts';
 
 void safely;
 
@@ -56,6 +57,8 @@ async function runToolCall(handlers: Record<string, any[]>, dollar: any, event: 
 }
 
 async function main() {
+  // Holdout never fires here: these assertions are about the decision, not the draw.
+  setDraw(() => 0.99);
   // A rejection surfacing through `result`/`text` is only ever announced on the ERROR outcome
   // core produces for a declined call — a successful result never carries `isError: true` — so
   // every fixture below that means "the human rejected this" sets it explicitly.

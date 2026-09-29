@@ -41,6 +41,7 @@
 
 import assert from 'node:assert/strict';
 import { register, safely } from './harness.ts';
+import { setDraw } from './receipts.ts';
 
 const HOME = 'C:/fake-harness-home';
 const WASTE = JSON.stringify({ sessions: 12, corrections: { calls_burned: 340 } });
@@ -99,6 +100,8 @@ function makeChainingOn() {
 }
 
 async function main() {
+  // Holdout never fires here: these assertions are about the decision, not the draw.
+  setDraw(() => 0.99);
   // --- 1. register() must never let ANY prompt.section come back changed ---
   {
     const files = new Map<string, string>();

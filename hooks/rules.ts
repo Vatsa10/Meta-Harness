@@ -17,6 +17,8 @@ export type Rule = {
   tools: string[];
   reason: string;
   threshold?: number;
+  /** The failure signature from the artifact's `installed.json` row ('' when absent), for receipts. */
+  signature: string;
 };
 
 export type SessionRule = {
@@ -113,6 +115,8 @@ export type InstalledArtifact = {
   type: string;
   origin?: Record<string, unknown>;
   payload?: unknown;
+  /** Copied from the artifact's `installed.json` row; '' when that row has none. */
+  signature?: string;
 };
 
 /**
@@ -125,7 +129,7 @@ export type InstalledArtifact = {
 export async function loadInstalled(io: any, home: string, type: string): Promise<InstalledArtifact[]> {
   const registry = `${home}/installed.json`;
   if (!(await io.fs.exists(registry))) return [];
-  let entries: Array<{ id: string; type: string }> = [];
+  let entries: Array<{ id: string; type: string; signature?: unknown }> = [];
   try {
     entries = JSON.parse(await io.fs.read(registry));
   } catch {
@@ -137,7 +141,8 @@ export async function loadInstalled(io: any, home: string, type: string): Promis
     const path = `${home}/artifacts/${entry.id}/artifact.json`;
     if (!(await io.fs.exists(path))) continue;
     try {
-      out.push(JSON.parse(await io.fs.read(path)));
+      const artifact = JSON.parse(await io.fs.read(path));
+      out.push({ ...artifact, signature: typeof entry.signature === 'string' ? entry.signature : '' });
     } catch {
       continue;
     }
@@ -160,6 +165,7 @@ export async function loadRules(io: any, home: string): Promise<Rule[]> {
       tools: (artifact.origin as any)?.tools ?? [],
       reason: String(artifact.payload ?? '').slice(0, 400),
       threshold: Number((artifact.origin as any)?.threshold) || undefined,
+      signature: String(artifact.signature ?? ''),
     });
   }
   return rules;

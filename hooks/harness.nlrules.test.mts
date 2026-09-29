@@ -15,6 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { registerRules, safely } from './harness.ts';
+import { setDraw } from './receipts.ts';
 import { addSessionRule, parseStopInstruction } from './rules.ts';
 
 void safely;
@@ -53,6 +54,8 @@ function promptSubmit(text: string, extra: Record<string, unknown> = {}) {
 }
 
 async function main() {
+  // Holdout never fires here: these assertions are about the decision, not the draw.
+  setDraw(() => 0.99);
   // --- 1. the brief's literal example names Bash and a pattern that is exactly "pytest" ---
   // (not "pytest without -q" — that qualifier cannot be matched against a real Bash command, so
   // it is dropped rather than baked into a pattern that would deny nothing real).

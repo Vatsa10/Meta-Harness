@@ -33,7 +33,7 @@ import {
   wasRejected,
 } from './rules.js';
 import { type DriftConfig, driftNote, loadDriftConfig, shouldWarn, userSpoke } from './drift.js';
-import { bumpCall } from './receipts.js';
+import { bumpCall, holdoutRate, shouldHold, writeReceipt } from './receipts.js';
 
 export type Fallible<E, R> = (io: any, event: E, next: (e: E) => Promise<R>) => Promise<R>;
 
@@ -461,7 +461,13 @@ export function registerRules(add: On): void {
 
   add('tool.check', async (io: any, event: any, next: any) => guardBefore('tool.check', io, event, next, async (next) => {
     const tool = String(event?.tool ?? '');
+    const home = await harnessHome(io);
+    const sessionId = await currentSessionId(io);
     if (wasRejected(state, tool, event?.input)) {
+      // The user already said no: never held out, but still receipted for reporting.
+      await writeReceipt(io, home, sessionId, {
+        event: 'tool.check', source: 'rejection-memory', artifact: null, signature: null, tool, decision: 'acted',
+      });
       return {
         decision: 'deny',
         reason: 'This exact call was already rejected earlier this session [rejection-memory]',
@@ -515,12 +521,23 @@ export function registerRules(add: On): void {
         if (!present) continue;
       }
 
+      // The user's direct order: never held out, but still receipted for reporting.
+      await writeReceipt(io, home, sessionId, {
+        event: 'tool.check', source: 'session-rule', artifact: null, signature: null, tool, decision: 'acted',
+      });
       return { decision: 'deny', reason: sessionRuleReason(tool, rule) };
     }
-    if (rules === null) rules = await loadRules(io, (await harnessHome(io)));
+    if (rules === null) rules = await loadRules(io, home);
     for (const rule of rules) {
       const verdict = evaluateRule(rule, event, state);
       if (!verdict.deny) continue;
+      // A learned rule may be held out: a held rule behaves exactly as if it were not installed.
+      const held = shouldHold(await holdoutRate(io, home));
+      await writeReceipt(io, home, sessionId, {
+        event: 'tool.check', source: 'learned-rule', artifact: rule.artifactId,
+        signature: rule.signature, tool, decision: held ? 'held' : 'acted',
+      });
+      if (held) continue;
       return { decision: 'deny', reason: verdict.reason };
     }
     // Counted here, before the call proceeds, so a `repeat-call` rule sees how many times this
