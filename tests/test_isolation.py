@@ -337,3 +337,63 @@ class Harness:
     with IsolatedHarness(_harness(tmp_path, body)) as child:
         with pytest.raises(IsolationError, match=r"chat\(\) is unavailable under --isolation process"):
             child.run({"input": "x"}, Recorder(), Trace(), timeout=30.0)
+
+
+PROBE_FILES = """
+import importlib.util
+from pathlib import Path
+class Harness:
+    def run(self, task, model, trace):
+        out = []
+        for name in task["paths"]:
+            try:
+                with open(name, encoding="utf-8") as handle:
+                    out.append("read:" + handle.read().strip())
+            except PermissionError:
+                out.append("refused")
+        here = Path(__file__).resolve().parent / "helper.py"
+        out.append(here.parent.name)
+        if not here.is_file():
+            return {"output": ",".join(out)}
+        spec = importlib.util.spec_from_file_location("helper", here)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out.append(module.VALUE)
+        return {"output": ",".join(out)}
+"""
+
+
+def test_seed_beside_dotenv_runs_from_run_dir_copy_and_cannot_read_it(tmp_path):
+    from meta_harness.core import SearchConfig, SearchRunner
+
+    user_dir = tmp_path / "repo"
+    user_dir.mkdir()
+    (user_dir / ".env").write_text("FAKE_KEY=not-a-real-value\n", encoding="utf-8")
+    (user_dir / "notes.txt").write_text("repo file\n", encoding="utf-8")
+    seed = _harness(user_dir, PROBE_FILES, "my_harness.py")
+    seen = []
+
+    def metric(task, result):
+        seen.append(result["output"])
+        return 1.0
+
+    task = {"input": "x", "paths": [str(user_dir / ".env"), str(user_dir / "notes.txt")]}
+    evaluator = CandidateEvaluator(Recorder(), isolation="process", metric=metric)
+    runner = SearchRunner(SearchConfig(tmp_path / "store", iterations=0), evaluator, lambda *_: [])
+    runner.run([seed], [task])
+    # the repo dir is not an allowed root: neither its .env nor any other file opens
+    assert seen and set(seen) == {"refused,refused,initial-0000"}
+
+
+def test_dotenv_variants_refused_inside_candidate_dir_and_parent_not_allowed(tmp_path):
+    cand = tmp_path / "cand"
+    cand.mkdir()
+    (tmp_path / "outside.txt").write_text("parent file\n", encoding="utf-8")
+    names = (".env", ".env.local", ".Env.production")
+    for name in names:
+        (cand / name).write_text("FAKE=1\n", encoding="utf-8")
+    (cand / "helper.py").write_text("VALUE = 'h'\n", encoding="utf-8")
+    paths = [str(cand / n) for n in names] + [str(tmp_path / "outside.txt"), str(cand / "helper.py")]
+    with IsolatedHarness(_harness(cand, PROBE_FILES)) as child:
+        result = child.run({"input": "x", "paths": paths}, Recorder(), Trace(), timeout=30.0)
+    assert result["output"] == "refused,refused,refused,refused,read:VALUE = 'h',cand,h"
