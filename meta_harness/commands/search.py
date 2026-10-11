@@ -16,16 +16,16 @@ from ..chat_types import Usage
 from ..core import MAX_AUTOMATIC_RESUMES, CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
 from ..datasets import read_records, split_tasks
 from ..domains import get_domain, metric_for
-from ..optimizers import OptimizerContext, build as build_optimizer
+from ..optimizers import OptimizerContext, all_optimizers, build as build_optimizer
 from ..protocol import resolve_metric
-from ..providers import Price, ProviderError, cost_usd, model_from_environment, price_for
+from ..providers import PROVIDERS, Price, ProviderError, cost_usd, model_from_environment, price_for
 from ..redact import redact
 
 NAME = "search"
 HELP = "search for a better harness: seed harness files + a JSONL/JSON/CSV eval set + a metric"
 
-PROVIDERS = ("anthropic", "openai", "compatible", "unikey", "scripted")
-BASE_URL_PROVIDERS = ("compatible", "openai", "unikey")
+BASE_URL_PROVIDERS = tuple(p for p in PROVIDERS if p not in ("anthropic", "scripted"))
+DEFAULT_OPTIMIZER = "metaharness"
 DOMAINS = ("classification", "math", "generic", "terminal")
 
 
@@ -41,6 +41,9 @@ def add_arguments(p) -> None:
     data.add_argument("--search", help="explicit search split (with --test)")
     p.add_argument("--test", help="explicit held-out test split (with --search)")
     p.add_argument("--test-fraction", type=float, default=0.3)
+    p.add_argument("--protocol", choices=["plain", "online"], default=None,
+                   help="override the domain's protocol; online streams a train split disjoint "
+                        "from search and test, then scores frozen")
     p.add_argument("--train", help="online domains: explicit train split (disjoint from search and test)")
     p.add_argument("--train-fraction", type=float, default=0.4,
                    help="online domains with --data: share of the non-test rows used as the train split")
@@ -52,9 +55,13 @@ def add_arguments(p) -> None:
                    help="terminal domain: TerminalBench dataset version recorded in run.json")
     p.add_argument("--provider", choices=PROVIDERS, required=True, help="where the harness model runs")
     p.add_argument("--model", required=True, help="harness model id (scripted: the script path)")
-    p.add_argument("--base-url", help="API base URL for compatible/openai/unikey (default: environment)")
+    p.add_argument("--base-url", help="API base URL for an OpenAI-compatible provider (default: environment)")
     p.add_argument("--proposer-provider", choices=PROVIDERS, help="default: --provider")
     p.add_argument("--proposer-model", help="default: --model")
+    p.add_argument("--optimizer", choices=sorted(all_optimizers()), default=DEFAULT_OPTIMIZER,
+                   help="which registered optimizer proposes candidates (all share the same budget)")
+    p.add_argument("--max-evaluations", type=int, default=None,
+                   help="equal-budget cap on search-split harness evaluations, for any optimizer")
     p.add_argument("--iterations", type=int, default=10)
     p.add_argument("--candidates", type=int, default=1)
     p.add_argument("--repeats", type=int, default=1)
@@ -236,6 +243,8 @@ def _billed(budget, model: tuple[str, str], proposer_model: tuple[str, str],
 
 def _prepare(args):
     """Setup phase: validates everything and builds the runner; user errors raise here."""
+    if args.proposer_command and args.optimizer != DEFAULT_OPTIMIZER:
+        raise UsageError("--proposer-command replaces the optimizer; drop --optimizer")
     if args.test and not args.search:
         raise UsageError("--test needs --search")
     if not 0.0 < args.test_fraction < 1.0:
@@ -259,7 +268,7 @@ def _prepare(args):
     else:
         (metric_name, metric), metric_source = default_metric(args.domain, domain), "domain_default"
     search_tasks, test_tasks = _load_tasks(args, domain)
-    protocol = getattr(domain, "PROTOCOL", "plain")
+    protocol = args.protocol or getattr(domain, "PROTOCOL", "plain")
     train_tasks: list[dict] = []
     if protocol == "online":
         train_tasks, search_tasks = _train_tasks(args, domain, search_tasks)
@@ -267,7 +276,7 @@ def _prepare(args):
             raise UsageError("the online protocol needs a non-empty train split")
         assert_disjoint(train=train_tasks, search=search_tasks, test=test_tasks)
     elif args.train:
-        raise UsageError(f"--train applies only to online-protocol domains, not {args.domain!r}")
+        raise UsageError("--train applies only to the online protocol (domain default or --protocol online)")
     if resume and not args.force_resume:
         try:
             attempts = int((root / ".resume_attempts").read_text(encoding="utf-8").strip() or 0)
@@ -293,7 +302,8 @@ def _prepare(args):
 
     run_meta = {"provider": args.provider, "model": args.model,
                 "proposer_provider": proposer_provider, "proposer_model": proposer_model_name,
-                "optimizer": "command" if args.proposer_command else "metaharness",
+                "optimizer": "command" if args.proposer_command else args.optimizer,
+                "protocol": protocol,
                 "view": args.view, "domain": args.domain, "metric": metric_name,
                 "metric_source": metric_source, "isolation": args.isolation}
     if args.domain == "terminal":
@@ -303,7 +313,8 @@ def _prepare(args):
     config = SearchConfig(root=root, iterations=args.iterations, candidates_per_iteration=args.candidates,
                           validation_timeout=args.validation_timeout, repeats=args.repeats,
                           max_workers=args.max_workers, task_timeout=args.task_timeout,
-                          test_root=args.test_root, run_meta=run_meta)
+                          test_root=args.test_root, max_evaluations=args.max_evaluations,
+                          run_meta=run_meta)
     if args.proposer_command:
         proposer = CommandProposer(resolve_command(split_command(args.proposer_command)),
                                    timeout=args.proposer_timeout)
@@ -314,7 +325,7 @@ def _prepare(args):
         ctx = OptimizerContext.for_config(config, proposer_model, domain, view=args.view,
                                           max_tool_calls=args.max_tool_calls, seed=args.seed,
                                           summarizer=summarizer)
-        proposer = build_optimizer("metaharness", ctx)
+        proposer = build_optimizer(args.optimizer, ctx)
     evaluator = CandidateEvaluator(model, metric, task_timeout=args.task_timeout, protocol=protocol,
                                    train_tasks=train_tasks,
                                    harness_wrapper=getattr(domain, "HARNESS_WRAPPER", None),
