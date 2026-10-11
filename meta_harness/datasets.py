@@ -64,12 +64,24 @@ def terminal_tasks(records: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]
     return result
 
 
-def split_tasks(tasks: Sequence[Mapping[str, Any]], search_fraction: float = 0.7,
-                seed: int = 0) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Shuffle deterministically, then cut into a search split and a held-out test split."""
-    if not 0.0 < search_fraction < 1.0:
-        raise ValueError("search_fraction must be strictly between 0 and 1")
+def split_tasks(tasks: Sequence[Mapping[str, Any]], search_fraction: float | None = None,
+                seed: int = 0, *, test_fraction: float | None = None
+                ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Shuffle deterministically, then cut into a search split and a held-out test split.
+
+    Give either `test_fraction` (the held-out share, e.g. 0.3) or `search_fraction`; the default
+    holds out 30%.
+    """
+    if search_fraction is not None and test_fraction is not None:
+        raise ValueError("give search_fraction or test_fraction, not both")
+    if test_fraction is None:
+        test_fraction = 0.3 if search_fraction is None else 1.0 - search_fraction
+        if search_fraction is not None and not 0.0 < search_fraction < 1.0:
+            raise ValueError("search_fraction must be strictly between 0 and 1")
+    if not 0.0 < test_fraction < 1.0:
+        raise ValueError("test_fraction must be strictly between 0 and 1")
     items = [dict(task) for task in tasks]
     random.Random(seed).shuffle(items)
-    cut = max(1, min(len(items) - 1, round(len(items) * search_fraction)))
+    held = round(len(items) * test_fraction)
+    cut = max(1, min(len(items) - 1, len(items) - held))
     return items[:cut], items[cut:]

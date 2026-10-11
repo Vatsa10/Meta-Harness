@@ -28,7 +28,7 @@ def test_help_lists_engine_commands_only():
     assert completed.returncode == 0, completed.stderr
     for gone in ("learn", "waste", "receipts", "mine", "compare"):
         assert f" {gone} " not in completed.stdout and f"{{{gone}" not in completed.stdout
-    assert "run" in completed.stdout and "inspect" in completed.stdout
+    assert "search" in completed.stdout and "inspect" in completed.stdout
 
 
 def test_package_imports_without_claude_binary(monkeypatch):

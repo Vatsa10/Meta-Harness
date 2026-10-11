@@ -11,7 +11,7 @@ from meta_harness.optimizers import all_optimizers, extract_python
 
 
 def test_builtin_commands_are_discovered():
-    assert {"demo", "inspect", "models", "run"} <= set(all_commands())
+    assert {"demo", "inspect", "models", "search"} <= set(all_commands())
 
 
 def test_generic_domain_contract():
