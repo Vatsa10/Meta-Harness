@@ -185,3 +185,14 @@ in `.superpowers/pivot/refs-*.md`.
   matching `api_key`, `bearer ` or `sk-` becomes `[redacted]` in every log, trace and receipt.
 - **Read window** (keel): `read` returns numbered lines, ≤ 2000 lines, ≤ 2000 chars per line,
   ≤ 50 KB, with the exact total line count.
+- **From "An Empirical Study of Harness Design for Coding Agents"** (arXiv:2609.20804; notes
+  `refs-coding-agent-harness-paper.md`): paired McNemar + Benjamini–Hochberg significance on every
+  comparison report; stuck detection (reminder at 5 identical calls, stop at 8 identical failures,
+  `stop_reason="stuck"`) in Terminus seeds and the proposer loop; staged compaction in seeds
+  (elide bulky middle tool outputs at 0.6 of window, summarise with a fixed-heading prompt at 0.85,
+  thresholds exposed for the proposer; no recall tool); normalised `stop_reason` histogram in
+  `scores.json` incl. `overflow`; planning and bash-only seed toggles; rule-based
+  Understand/Write/Verify phase labels in terminal traces; read-before-write with content hash and
+  `py_compile` diagnostics in seed edit tools; cost per task and an optional context-window sweep in
+  reports; up to 8 read-only proposer calls answered in one turn; TerminalBench dataset version is
+  a loader parameter recorded in `run.json`.

@@ -2427,3 +2427,23 @@ git commit -m "docs: first live Symptom2Disease run with recorded provider fixtu
 | §10 risks: no key, format drift, cost | T26, T3 + T26 fixture, T9/T10 bounds and budget |
 
 Residual, stated in the README rather than claimed: proof grading for IMO-ProofBench items, TTT-Discover weight training, exact LawBench/USPTO label framing pending Step 1 source checks, and any full-scale paper-number reproduction (documented commands only).
+
+---
+
+## Addendum A: coding-agent harness paper (arXiv:2609.20804)
+
+Source notes with page refs and test ideas: `.superpowers/pivot/refs-coding-agent-harness-paper.md`
+§2 (ideas 1-9). Each owning task adds these requirements, with the listed test, to its own files.
+
+| Idea | Requirement (see notes §2 for exact values and tests) | Owner |
+|---|---|---|
+| 1 | `meta_harness/stats.py`: `mcnemar_exact(b, c)`, `bh(pvals, q=0.05)`; reports emit paired win/loss/tie, p, q, `significant` | T24 (creates), T21, T22A (use) |
+| 2 | Stuck detection: reminder at 5 identical calls/failures, stop at 8 identical failures with `stop_reason="stuck"` | T9 (proposer loop), T18 (seeds) |
+| 3 | Staged compaction B1=0.6 elide / B2=0.85 fixed-heading summary; thresholds as seed constants; no recall tool | T18 |
+| 4 | Normalised `stop_reason` ∈ {done, step_limit, overflow, stuck, timeout, error}; histogram in `scores.json` | T10 (histogram), T18 (seeds emit) |
+| 5 | `planning` and `bash_only` seed toggles; proposer domain notes name them as model-dependent axes | T18, T9 (prompt notes) |
+| 6 | Rule-based Understand/Write/Verify phase labels; "ended without writing code" rate in `scores.json` | T18 (labels), T22 (stats) |
+| 7 | Seed `edit`: read-before-write with content hash; `py_compile` diagnostics appended | T18 |
+| 8 | Cost per task in reports; optional `--context-window` sweep | T24, T21 |
+| 9 | Up to 8 read-only proposer calls dispatched in one turn, each counted against the cap | T9 |
+| — | TerminalBench dataset version is a loader parameter recorded in `run.json` | T18 |
