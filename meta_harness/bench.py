@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .judge import http_status, retryable
 from .protocol import Metric, hide_target
-from .redact import bounded
+from .redact import bounded, redact
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -123,7 +123,7 @@ def subprocess_cell(arm: Arm, task: Mapping, trial: int, timeout: float) -> dict
             return {"result": None, "error": f"timeout after {timeout}s", "status": None, "usage": {}}
         rfile = box.root / "result.json"
         if not rfile.is_file():
-            tail = (done.stderr or done.stdout or "").strip()[-500:]
+            tail = redact((done.stderr or done.stdout or "").strip())[-500:]  # redact BEFORE cutting
             return {"result": None, "error": bounded(f"worker exited {done.code}: {tail}"),
                     "status": None, "usage": {}}
         return json.loads(rfile.read_text(encoding="utf-8"))
@@ -143,12 +143,24 @@ def _read_done(path: Path) -> dict[tuple, dict]:
     return done
 
 
+def _repair(path: Path) -> None:
+    """Drop an unparseable unterminated last line (a torn write); terminate a parseable one."""
+    if not path.is_file() or not path.stat().st_size:
+        return
+    data = path.read_bytes()
+    if data.endswith(b"\n"):
+        return
+    head, _, last = data.rpartition(b"\n")
+    try:
+        json.loads(last.decode("utf-8"))
+    except ValueError:
+        path.write_bytes(head + b"\n" if head else b"")
+    else:
+        path.write_bytes(data + b"\n")
+
+
 def _append(path: Path, row: Mapping) -> None:
-    if path.is_file() and path.stat().st_size:  # a torn last line must not swallow the next row
-        with path.open("rb+") as raw:
-            raw.seek(-1, 2)
-            if raw.read(1) != b"\n":
-                raw.write(b"\n")
+    _repair(path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
         handle.flush()

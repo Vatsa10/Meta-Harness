@@ -219,3 +219,41 @@ def test_judge_retries_transient_provider_errors(monkeypatch):
     monkeypatch.setattr(judge, "judge_model", lambda: model)
     monkeypatch.setattr(judge, "RETRY_DELAY", 0)
     assert judge.verdict({"criteria": "c"}, {"output": "o"}) == 1.0 and len(calls) == 2
+
+
+def test_key_straddling_the_tail_cut_is_redacted(tmp_path):
+    key = "sk-abcdefghijklmnop1234"
+    body = ("import sys, os; sys.stderr.write('A'*100 + %r + 'B'*490); sys.stderr.flush(); os._exit(1)" % key)
+    h = harness_file(tmp_path, body)
+    out = tmp_path / "out"
+    run_matrix([idle_arm(tmp_path, h)], TASKS[:1], 1, exact, out, cell_timeout=60)
+    text = (out / "matrix.jsonl").read_text(encoding="utf-8")
+    assert "worker exited" in text or "exited" in text or "[redacted]" in text
+    assert key[-10:] not in text and key not in text and "[redacted]" in text
+
+
+def test_torn_line_ending_in_brace_is_dropped_by_parsing(tmp_path):
+    a = [Arm("a", Path("x"), "p", "m")]
+    out = tmp_path / "out"
+    run_matrix(a, TASKS[:2], 1, exact, out, cell_runner=ok_runner())
+    path = out / "matrix.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"arm": "a", "task_id": "q2", "trial": 0, "score": 1.0, "usage": {}}'[:-1] + "}}")
+    again = []
+    run_matrix(a, TASKS, 1, exact, out, cell_runner=ok_runner(again))
+    assert len(again) == 1
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3 and all(json.loads(x) for x in lines)
+
+
+def test_worker_side_provider_error_429_is_retried_once(tmp_path):
+    counter = tmp_path / "attempts.txt"
+    body = (f"from meta_harness.providers import ProviderError; "
+            f"import os; seen = os.path.exists({str(counter)!r}); "
+            f"open({str(counter)!r}, 'a').write('x'); "
+            f"(_ for _ in ()).throw(ProviderError('HTTP 429: slow down')) if not seen else None; "
+            f"return model(task['input'])")
+    arm = make_arms(tmp_path, harness_file(tmp_path, body))[0]
+    (row,) = rows(run_matrix([arm], TASKS[:1], 1, exact, tmp_path / "out", cell_timeout=60))
+    assert counter.read_text(encoding="utf-8") == "xx"
+    assert row["score"] == 1.0 and not row["error"]
