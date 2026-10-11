@@ -11,4 +11,4 @@ def build(ctx):
     return AgentProposer(ctx.proposer_model, domain=ctx.domain.NAME,
                          domain_notes=getattr(ctx.domain, "PROMPT", ""), view="seed",
                          max_tool_calls=ctx.max_tool_calls, summarizer=ctx.summarizer,
-                         forbidden=ctx.forbidden)
+                         forbidden=ctx.forbidden, test_root=ctx.test_root)

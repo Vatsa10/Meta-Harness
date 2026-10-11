@@ -11,7 +11,8 @@ from typing import Sequence
 from ..cache import CachedModel
 from ..core import CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
 from ..datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
-from ..metrics import METRICS
+from ..metrics import terminal_metric
+from ..protocol import exact, numeric
 from ..providers import model_from_environment
 
 NAME = "run"
@@ -24,6 +25,8 @@ DEFAULT_BASELINES = {
     "math": ["math/zero_shot.py", "math/bm25.py"],
     "terminal": ["terminal/basic.py"],
 }
+METRIC_FOR = {"classification": exact, "math": numeric,
+              "terminal": lambda task, result: terminal_metric(result.get("output"), task)}
 ADAPTERS = {"classification": classification_tasks, "math": math_tasks,
             "terminal": terminal_tasks}
 
@@ -99,7 +102,7 @@ def run(args) -> int:
                           validation_timeout=args.validation_timeout,
                           repeats=args.repeats, max_workers=args.max_workers,
                           task_timeout=args.task_timeout, test_root=args.test_root)
-    evaluator = CandidateEvaluator(model, METRICS[args.task_type], task_timeout=args.task_timeout)
+    evaluator = CandidateEvaluator(model, METRIC_FOR[args.task_type], task_timeout=args.task_timeout)
     runner = SearchRunner(config, evaluator, proposer)
     baselines = [Path(p) for p in (args.baseline or default_baselines(args.task_type))]
     frontier = runner.run(baselines, search_tasks, test_tasks or None)

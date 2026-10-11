@@ -58,5 +58,8 @@ class Harness:
 ''')
     evaluator = CandidateEvaluator(lambda prompt, **_: "x", task_timeout=0.2)
     result = evaluator.evaluate(source, [{"input": "a", "label": "a"}], "c1", tmp_path / "trace.jsonl")
-    assert result.valid is False
-    assert "timeout" in (result.error or "").lower()
+    # a per-task timeout is a failed task scored 0, not an invalid candidate
+    assert result.valid is True and result.score == 0.0
+    assert result.metrics["task_failures"] == 1
+    end = [json.loads(line) for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+    assert end["event"] == "task_end" and "timeout" in end["error"]

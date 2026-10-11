@@ -25,6 +25,18 @@ class OptimizerContext:
     seed: int = 0
     forbidden: list[Path] = field(default_factory=list)
     summarizer: Callable[[str], str] | None = None
+    test_root: Path | None = None       # SearchConfig.test_root: denied to the proposer as the test split
+
+    def __post_init__(self) -> None:
+        if self.test_root is not None:
+            self.test_root = Path(self.test_root)
+            if self.test_root not in [Path(p) for p in self.forbidden]:
+                self.forbidden = [*self.forbidden, self.test_root]
+
+    @classmethod
+    def for_config(cls, config: Any, proposer_model: Any, domain: ModuleType, **kwargs: Any) -> "OptimizerContext":
+        """The context for a search: carries config.test_root and forbids it."""
+        return cls(proposer_model, domain, test_root=Path(config.test_root), **kwargs)
 
 
 def all_optimizers() -> dict[str, ModuleType]:
