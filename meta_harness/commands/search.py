@@ -14,7 +14,7 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from ..cache import CachedModel
 from ..chat_types import Usage
-from ..core import CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
+from ..core import MAX_AUTOMATIC_RESUMES, CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
 from ..datasets import read_records, split_tasks
 from ..domains import get_domain
 from ..optimizers import OptimizerContext, build as build_optimizer
@@ -42,6 +42,9 @@ def add_arguments(p) -> None:
     data.add_argument("--search", help="explicit search split (with --test)")
     p.add_argument("--test", help="explicit held-out test split (with --search)")
     p.add_argument("--test-fraction", type=float, default=0.3)
+    p.add_argument("--train", help="online domains: explicit train split (disjoint from search and test)")
+    p.add_argument("--train-fraction", type=float, default=0.4,
+                   help="online domains with --data: share of the non-test rows used as the train split")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--metric", default="exact", help="exact|contains|numeric or module:function")
     p.add_argument("--provider", choices=PROVIDERS, required=True, help="where the harness model runs")
@@ -103,7 +106,8 @@ def parse_prices(specs: Sequence[str]) -> dict[str, Price]:
             raise UsageError(f"--price values must be numbers, got {numbers!r}") from None
         if len(values) not in (2, 3, 4) or any(v < 0 for v in values):
             raise UsageError(f"--price needs 2 to 4 non-negative numbers, got {numbers!r}")
-        prices[model] = Price(*values)
+        prices[f"{provider.lower()}:{model}"] = Price(*values)
+        prices.setdefault(model, Price(*values))   # bare-model fallback (first --price wins)
     return prices
 
 
@@ -120,7 +124,9 @@ def _price_table(prices: Mapping[str, Price]) -> Iterator[None]:
             table = {}
     except ValueError:
         table = {}
-    table.update({name: asdict(price) for name, price in prices.items()})
+    # core's Budget.price looks up the bare model id, so only bare keys go into the table
+    table.update({name: asdict(price) for name, price in prices.items()
+                  if name.split(":", 1)[0] not in PROVIDERS})
     os.environ["META_HARNESS_PRICES"] = json.dumps(table)
     try:
         yield
@@ -159,6 +165,44 @@ def _load_tasks(args, domain) -> tuple[list[dict], list[dict]]:
     raise UsageError("give --data, or --search (with an optional --test)")
 
 
+def _task_key(task: Mapping[str, Any]) -> str:
+    if task.get("id") is not None:
+        return f"id:{task['id']}"
+    return "input:" + json.dumps(task.get("input"), sort_keys=True, default=str)
+
+
+def assert_disjoint(**splits: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse overlapping splits (by id, else by input)."""
+    names = list(splits)
+    keys = {name: {_task_key(t) for t in splits[name]} for name in names}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            shared = keys[a] & keys[b]
+            if shared:
+                raise UsageError(f"{a} and {b} splits overlap on {len(shared)} task(s), "
+                                 f"e.g. {sorted(shared)[0]}")
+
+
+def _train_tasks(args, domain, search_tasks: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Online protocol: (train, search) with train disjoint from search. Never trains on search."""
+    if args.train:
+        return _read(args.train, domain), search_tasks
+    provided = getattr(domain, "train_tasks", None)
+    if callable(provided):
+        train = provided()
+        if train:
+            return [dict(t) for t in train], search_tasks
+    if args.data:
+        if not 0.0 < args.train_fraction < 1.0:
+            raise UsageError("--train-fraction must be strictly between 0 and 1")
+        if len(search_tasks) < 2:
+            raise UsageError("too few non-test rows for a train/search split; give --train")
+        search, train = split_tasks(search_tasks, seed=args.seed + 1, test_fraction=args.train_fraction)
+        return train, search
+    raise UsageError(f"domain {args.domain!r} uses the online protocol and needs a train split "
+                     "disjoint from search: give --train, or --data for a seeded three-way split")
+
+
 def _verdicts(root: Path) -> dict[str, int]:
     counts: Counter[str] = Counter()
     candidates = root / "candidates"
@@ -170,13 +214,18 @@ def _verdicts(root: Path) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _billed(budget, model: str, proposer_model: str, prices: Mapping[str, Price]) -> float | None:
+def _price(provider: str, model: str, prices: Mapping[str, Price]) -> Price | None:
+    return prices.get(f"{provider}:{model}") or price_for(model, prices)
+
+
+def _billed(budget, model: tuple[str, str], proposer_model: tuple[str, str],
+            prices: Mapping[str, Price]) -> float | None:
     total = 0.0
-    for name, usage, used in ((model, budget.model_usage, budget.model_calls),
-                              (proposer_model, budget.proposer_usage, budget.proposer_calls)):
+    for (provider, name), usage, used in ((model, budget.model_usage, budget.model_calls),
+                                          (proposer_model, budget.proposer_usage, budget.proposer_calls)):
         if not used:
             continue
-        cost = cost_usd(Usage(**usage), price_for(name, prices))
+        cost = cost_usd(Usage(**usage), _price(provider, name, prices))
         if cost is None:
             return None
         total += cost
@@ -185,7 +234,8 @@ def _billed(budget, model: str, proposer_model: str, prices: Mapping[str, Price]
 
 # -- the command ----------------------------------------------------------------------------------
 
-def _search(args) -> int:
+def _prepare(args):
+    """Setup phase: validates everything and builds the runner; user errors raise here."""
     if args.test and not args.search:
         raise UsageError("--test needs --search")
     if not 0.0 < args.test_fraction < 1.0:
@@ -205,6 +255,23 @@ def _search(args) -> int:
         raise UsageError(str(exc.args[0] if exc.args else exc)) from None
     metric = resolve_metric(args.metric, extra=getattr(domain, "METRICS", None) or None)
     search_tasks, test_tasks = _load_tasks(args, domain)
+    protocol = getattr(domain, "PROTOCOL", "plain")
+    train_tasks: list[dict] = []
+    if protocol == "online":
+        train_tasks, search_tasks = _train_tasks(args, domain, search_tasks)
+        if not train_tasks:
+            raise UsageError("the online protocol needs a non-empty train split")
+        assert_disjoint(train=train_tasks, search=search_tasks, test=test_tasks)
+    elif args.train:
+        raise UsageError(f"--train applies only to online-protocol domains, not {args.domain!r}")
+    if resume and not args.force_resume:
+        try:
+            attempts = int((root / ".resume_attempts").read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            attempts = 0
+        if attempts + 1 > MAX_AUTOMATIC_RESUMES:
+            raise UsageError(f"{root} was already resumed {attempts} times automatically "
+                             f"(limit {MAX_AUTOMATIC_RESUMES}); inspect it and use --force-resume")
 
     base_model = _make_model(args.provider, args.model, args.base_url)
     proposer_provider = args.proposer_provider or args.provider
@@ -231,10 +298,16 @@ def _search(args) -> int:
                                           max_tool_calls=args.max_tool_calls, seed=args.seed,
                                           summarizer=summarizer)
         proposer = build_optimizer("metaharness", ctx)
-    protocol = getattr(domain, "PROTOCOL", "plain")
     evaluator = CandidateEvaluator(model, metric, task_timeout=args.task_timeout, protocol=protocol,
-                                   train_tasks=search_tasks if protocol == "online" else ())
+                                   train_tasks=train_tasks)
     runner = SearchRunner(config, evaluator, proposer)
+    return lambda: _execute(args, runner, model, config, root, harnesses, search_tasks, test_tasks,
+                            train_tasks, resume, prices, proposer_provider, proposer_model_name)
+
+
+def _execute(args, runner, model, config, root, harnesses, search_tasks, test_tasks, train_tasks,
+             resume, prices, proposer_provider, proposer_model_name) -> int:
+    """The engine phase: its exceptions propagate with their traceback (not turned into exit 2)."""
     if args.force_resume:
         (root / ".resume_attempts").unlink(missing_ok=True)
     with _price_table(prices):
@@ -246,11 +319,13 @@ def _search(args) -> int:
         "root": str(config.root),
         "search_tasks": len(search_tasks),
         "test_tasks": len(test_tasks),
+        "train_tasks": len(train_tasks),
         "cache": {"hits": model.hits, "misses": model.misses},
         "frontier": [asdict(item) for item in frontier],
         "test_results": str(test_path) if test_path.is_file() else None,
         "context_tokens": {"model": budget.model_usage["input"], "proposer": budget.proposer_usage["input"]},
-        "cost_usd": _billed(budget, args.model, proposer_model_name, prices),
+        "cost_usd": _billed(budget, (args.provider, args.model), (proposer_provider, proposer_model_name),
+                            prices),
         "verdicts": _verdicts(root),
         "budget": asdict(budget),
     }, indent=2, default=str))
@@ -259,9 +334,10 @@ def _search(args) -> int:
 
 def run(args) -> int:
     try:
-        return _search(args)
+        execute = _prepare(args)
     except (UsageError, ProviderError, ValueError, KeyError, OSError, RuntimeError, TypeError) as exc:
         message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
         print(f"error: {redact(message).splitlines()[0] if message else type(exc).__name__}",
               file=sys.stderr)
         return 2
+    return execute()

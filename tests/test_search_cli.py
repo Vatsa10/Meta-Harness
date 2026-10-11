@@ -137,3 +137,109 @@ def test_price_flag_feeds_billed_cost_separately_from_tokens(tmp_path, capsys):
 def test_bad_price_is_exit_2(tmp_path, capsys):
     assert _smoke(tmp_path / "s", "--price", "nonsense") == 2
     assert "--price" in capsys.readouterr().err
+
+
+# -- online protocol: train on a split disjoint from search and test -------------------------------
+
+MEMORIZER = """class Harness:
+    def __init__(self):
+        self.seen = {}
+
+    def run(self, task, model, trace):
+        return {"output": self.seen.get(task["input"], "unknown")}
+
+    def learn(self, task, result):
+        self.seen[task["input"]] = task["label"]
+"""
+
+
+@pytest.fixture
+def online_domain(monkeypatch):
+    import types
+
+    from meta_harness.commands import search as search_cmd
+
+    domain = types.SimpleNamespace(NAME="online-test", PROMPT="", METRICS={}, SEED_DIR=None,
+                                   PROTOCOL="online", adapt=lambda rows: [dict(r) for r in rows])
+    monkeypatch.setattr(search_cmd, "get_domain", lambda name: domain)
+    return domain
+
+
+def _online(tmp_path, *extra):
+    seed = tmp_path / "memorizer.py"
+    seed.write_text(MEMORIZER, encoding="utf-8")
+    return cli.main(["search", "--harness", str(seed), "--provider", "scripted",
+                     "--model", str(FIX / "base.jsonl"), "--root", str(tmp_path / "s"),
+                     "--iterations", "0", "--no-cache", *extra])
+
+
+def test_online_memorizer_does_not_win_on_search(tmp_path, capsys, online_domain):
+    assert _online(tmp_path, "--data", str(FIX / "data.jsonl")) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["test_tasks"] == 3 and out["train_tasks"] + out["search_tasks"] == 7
+    assert out["train_tasks"] > 0 and out["search_tasks"] > 0
+    score = json.loads((tmp_path / "s" / "candidates" / "initial-0000" / "scores.json")
+                       .read_text(encoding="utf-8"))["score"]
+    assert score < 1.0, "the memorizer was trained on the tasks it is scored on"
+
+
+def test_online_splits_are_disjoint(tmp_path, capsys, online_domain):
+    from meta_harness.commands import search as search_cmd
+
+    captured = {}
+    real = search_cmd.CandidateEvaluator
+
+    def spy(*args, **kwargs):
+        captured["train"] = kwargs.get("train_tasks")
+        return real(*args, **kwargs)
+
+    import _pytest.monkeypatch
+    mp = _pytest.monkeypatch.MonkeyPatch()
+    mp.setattr(search_cmd, "CandidateEvaluator", spy)
+    try:
+        assert _online(tmp_path, "--data", str(FIX / "data.jsonl")) == 0
+    finally:
+        mp.undo()
+    manifest = json.loads((tmp_path / "s" / "run.json").read_text(encoding="utf-8"))
+    test = json.loads((Path(str(tmp_path / "s") + "-test") / "test_results.json").read_text(encoding="utf-8"))
+    train = {t["input"] for t in captured["train"]}
+    search = {t["input"] for t in manifest["tasks"]}
+    every = {json.loads(l)["input"] for l in (FIX / "data.jsonl").read_text(encoding="utf-8").splitlines()}
+    assert train and search and not (train & search)
+    assert len(every - train - search) == 3 and test["results"]
+
+
+def test_online_overlapping_train_is_refused(tmp_path, capsys, online_domain):
+    assert _online(tmp_path, "--search", str(FIX / "data.jsonl"), "--train", str(FIX / "data.jsonl")) == 2
+    assert "overlap" in capsys.readouterr().err
+
+
+def test_online_without_a_train_split_is_refused(tmp_path, capsys, online_domain):
+    assert _online(tmp_path, "--search", str(FIX / "data.jsonl")) == 2
+    assert "train split" in capsys.readouterr().err
+
+
+def test_train_flag_is_rejected_for_plain_domains(tmp_path, capsys):
+    assert _smoke(tmp_path / "s", "--train", str(FIX / "data.jsonl"), "--iterations", "0") == 2
+    assert "online" in capsys.readouterr().err
+
+
+def test_engine_errors_keep_their_traceback(tmp_path, monkeypatch):
+    from meta_harness.commands import search as search_cmd
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("engine failure")
+
+    monkeypatch.setattr(search_cmd.SearchRunner, "run", boom)
+    with pytest.raises(RuntimeError, match="engine failure"):
+        _smoke(tmp_path / "s", "--iterations", "0")
+
+
+def test_price_is_keyed_by_provider_and_model_with_bare_fallback():
+    from meta_harness.commands.search import _price, parse_prices
+
+    prices = parse_prices(["openai:m=1,2", "anthropic:m=3,4"])
+    assert _price("openai", "m", prices).input == 1.0
+    assert _price("anthropic", "m", prices).input == 3.0
+    assert _price("unikey", "m", prices).input == 1.0, "bare model id is the fallback"
+    assert _price("openai", "other", prices) is None
