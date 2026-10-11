@@ -104,11 +104,29 @@ labelled train stream feeds `learn`, held-out test evaluated once on the frontie
   filesystem access (proposer sees only the seed), as the equal-budget baseline.
 - Evaluation budget (harness evaluations, model calls, tokens) is recorded in `run.json`.
 
-## 8. Out of scope (stated in README)
+## 8. Full paper coverage (owner, 2026-10-11: "the full gaps and system")
 
-TerminalBench-2, the retrieval-augmented math corpus (535K problems, decontamination, IMO),
-OpenEvolve / TTT-Discover / GEPA reimplementations, multi-model transfer (Table 6), container
-sandboxing. These are listed as roadmap, not claimed.
+Every gap in `.superpowers/pivot/paper-gap.md` is in scope:
+
+- **All classification datasets** from the paper (LawBench, Symptom2Disease, USPTO-50k) and the
+  9 out-of-distribution sets, each via a stdlib loader with a local test fixture; all eight
+  discovered classification harnesses and the dense / random few-shot baselines; ACE and MCE
+  per their reference behaviour.
+- **Retrieval-augmented math:** corpus build (stdlib BM25 index), decontamination against the
+  test sets, IMO-style test set loader, and the full router (separate hard-geometry index,
+  adaptive K, a real technique-statement check).
+- **Agentic coding (TerminalBench-2):** a searchable Python harness with Terminus-2 and
+  Terminus-KIRA style seeds, run in Docker when available (skipped with a stated reason when
+  not), with the container recorded on the task so scoring runs inside it.
+- **Comparison optimizers** under an equal evaluation budget: Best-of-N, an OpenEvolve-style
+  evolutionary loop, a TTT-Discover-style loop, and a GEPA-style reflective prompt optimizer.
+- **Multi-model transfer** (Table 6): evaluate a fixed harness across N models.
+- **Proposer read statistics** (Table 8) and an `experience` query CLI (top-k, diffs, reuse
+  across runs).
+- **Sandboxing:** subprocess isolation with resource limits everywhere; Docker when available.
+
+Expensive full-scale runs are documented commands; the README reports only numbers actually
+produced, with their scale stated.
 
 ## 9. Constraints
 
