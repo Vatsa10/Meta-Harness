@@ -373,12 +373,24 @@ def _load_harness(path: Path) -> Any:
     return harness
 
 
+MAX_ABANDONED_THREADS = 8
+_abandoned: list[threading.Thread] = []
+_abandoned_lock = threading.Lock()
+
+
 def _bounded_call(watchdog: Watchdog, fn: Callable[[], Any]) -> tuple[Any, str | None, str | None]:
     """Run fn in a daemon thread under the watchdog: (value, error, abort reason).
 
-    A harness cannot be killed in-thread; a timed-out thread is abandoned and its model is
-    closed when the evaluation ends, so it can neither spend budget nor write the trace.
+    Abandoned threads: Python cannot kill a thread, so a task that times out keeps running in
+    its daemon thread until it returns on its own (or the process exits). Its MeteredModel and
+    TraceRecorder are closed when the evaluation ends, so it can neither spend model calls nor
+    write the trace. At most MAX_ABANDONED_THREADS may be alive at once; beyond that new tasks
+    are failed without being started instead of piling up more stuck threads.
     """
+    with _abandoned_lock:
+        _abandoned[:] = [t for t in _abandoned if t.is_alive()]
+        if len(_abandoned) >= MAX_ABANDONED_THREADS:
+            return None, f"error: {len(_abandoned)} timed-out harness threads still running", None
     watchdog.kick()
     try:
         watchdog.check()
@@ -396,6 +408,8 @@ def _bounded_call(watchdog: Watchdog, fn: Callable[[], Any]) -> tuple[Any, str |
     thread.start()
     thread.join(watchdog.remaining())
     if thread.is_alive():
+        with _abandoned_lock:
+            _abandoned.append(thread)
         reason = "idle"
         try:
             watchdog.check()
@@ -800,9 +814,27 @@ class SearchRunner:
 
     def evaluate_on_test(self, frontier: Sequence[EvaluationResult],
                          test_tasks: Sequence[Mapping[str, Any]]) -> list[EvaluationResult]:
-        """Score the frontier once on held-out tasks. Paper section 3: the proposer never sees this."""
+        """Score the frontier once on held-out tasks. Paper section 3: the proposer never sees this.
+
+        The held-out split is read once per frontier: when test_results.json already scores exactly
+        this frontier (a resumed, finished run) it is returned as is. When the frontier changed, the
+        previous attempt is kept as test_results.<n>.json, never overwritten, and one new attempt runs.
+        """
         test_root = Path(self.config.test_root)
-        (test_root / "traces").mkdir(parents=True, exist_ok=True)
+        current = test_root / "test_results.json"
+        archived = sorted(test_root.glob("test_results.*.json"))
+        if current.is_file():
+            try:
+                previous = json.loads(current.read_text(encoding="utf-8"))
+                stored = [EvaluationResult.from_dict(r) for r in previous.get("results", [])]
+            except (OSError, TypeError, ValueError):
+                stored = None
+            if stored is not None and [r.candidate_id for r in stored] == [r.candidate_id for r in frontier]:
+                return stored
+            os.replace(current, test_root / f"test_results.{len(archived) + 1}.json")
+            archived = sorted(test_root.glob("test_results.*.json"))
+        traces = test_root / ("traces" if not archived else f"traces-attempt-{len(archived) + 1}")
+        traces.mkdir(parents=True, exist_ok=True)
         results: list[EvaluationResult] = []
         for item in frontier:
             harness_path = self.experience.candidate_dir(item.candidate_id) / "harness.py"
@@ -810,13 +842,13 @@ class SearchRunner:
             for repeat in range(self.config.repeats):
                 name = f"{item.candidate_id}.jsonl" if repeat == 0 else f"{item.candidate_id}-{repeat}.jsonl"
                 run = self.evaluator.evaluate(harness_path, test_tasks, item.candidate_id,
-                                              test_root / "traces" / name, sample_index=repeat)
+                                              traces / name, sample_index=repeat)
                 runs.append(run)
                 with self._lock:
                     self.budget.add_run(run.metrics, "test")
             results.append(self._merge_repeats(item.candidate_id, runs, "test"))
         payload = {"search_root": str(self.experience.root), "results": [asdict(r) for r in results]}
-        atomic_write(test_root / "test_results.json", json.dumps(payload, indent=2))
+        atomic_write(current, json.dumps(payload, indent=2))
         return results
 
     # -- budget, checkpoint, resume ------------------------------------------------------------
@@ -880,7 +912,8 @@ class SearchRunner:
         from .httpdata import read_jsonl, write_jsonl
 
         root = self.experience.root
-        paths = [*root.glob("candidates/*/traces*.jsonl"), *root.glob("candidates/*/proposer_log.jsonl"),
+        test_root = Path(self.config.test_root)
+        paths = [*root.glob("candidates/*/traces*.jsonl"), *test_root.glob("traces*/*.jsonl"), *root.glob("candidates/*/proposer_log.jsonl"),
                  *root.glob("proposals/*/*.proposer_log.jsonl")]
         for path in paths:
             try:
@@ -893,9 +926,11 @@ class SearchRunner:
                 write_jsonl(path, rows)
 
     @classmethod
-    def _persist_proposals(cls, proposals: Sequence[Path | str], proposal_dir: Path) -> list[Path]:
+    def _persist_proposals(cls, proposals: Sequence[Path | str], proposal_dir: Path,
+                           proposed_at: str | None = None) -> list[Path]:
         """Every proposal is a file under proposals/iteration-NNNN/ (with its sidecars), so a resume
-        reuses it instead of proposing again."""
+        reuses it instead of proposing again. A proposal that recorded no fingerprint (e.g. from
+        CommandProposer) gets the one the runner took just before proposing, so the stale gate applies."""
         proposal_dir.mkdir(parents=True, exist_ok=True)
         kept: list[Path] = []
         for item in proposals:
@@ -910,6 +945,13 @@ class SearchRunner:
                 if sidecar.is_file():
                     shutil.copy2(sidecar, proposal_dir / sidecar.name)
             kept.append(target)
+        if proposed_at:
+            for path in kept:
+                sidecar = path.with_name(path.stem + ".proposal.json")
+                data = cls._json_sidecar(path, ".proposal.json")
+                if not data.get("fingerprint"):
+                    data = {"candidate": path.stem, "parents_read": [], **data, "fingerprint": proposed_at}
+                    sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return kept
 
     # -- the loop ------------------------------------------------------------------------------
@@ -926,7 +968,10 @@ class SearchRunner:
         self.probe = _protocol.hide_target(search_tasks[0]) if search_tasks else None
         self._manifest = self._run_manifest(search_tasks, test_tasks)
         self._checkpoint()
-        self._evaluate_many([(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)], search_tasks)
+        seeds = [(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)]
+        remaining = self._remaining()
+        fits = len(seeds) if remaining is None else remaining // self.config.repeats
+        self._evaluate_many(seeds, search_tasks, over_budget=[i >= fits for i in range(len(seeds))])
         count = self.config.candidates_per_iteration
         for iteration in range(1, self.config.iterations + 1):
             remaining = self._remaining()
@@ -938,6 +983,7 @@ class SearchRunner:
                 proposals: Sequence[Path] = existing
             else:
                 try:
+                    proposed_at = fingerprint(self.experience.root)
                     proposals = self.proposer(self.experience, iteration, count)
                 except Exception as exc:
                     proposal_dir.mkdir(parents=True, exist_ok=True)
@@ -945,7 +991,7 @@ class SearchRunner:
                     proposals = []
                 finally:
                     self._absorb_proposer_usage()
-                proposals = self._persist_proposals(proposals, proposal_dir)
+                proposals = self._persist_proposals(proposals, proposal_dir, proposed_at)
                 with self._lock:
                     self.budget.proposals += len(proposals)
             work = [(Path(s), f"iteration-{iteration:04d}-{i:02d}") for i, s in enumerate(proposals)]

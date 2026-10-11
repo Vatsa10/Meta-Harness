@@ -404,3 +404,73 @@ def test_secrets_in_model_responses_are_redacted_in_traces(tmp_path):
     CandidateEvaluator(lambda p, **_: "token: Bearer abc123def").evaluate(source, [{"input": "a"}], "c", trace)
     text = trace.read_text(encoding="utf-8")
     assert "[redacted]" in text and "abc123def" not in text
+
+
+# --- Task 10 review fixes ---------------------------------------------------------------------
+
+def test_held_out_split_is_read_once_across_resumes(tmp_path):
+    seed = tmp_path / "s.py"
+    seed.write_text(ECHO, encoding="utf-8")
+    tasks, test = [{"input": "a", "label": "x"}], [{"input": "t", "label": "x"}]
+    better = tmp_path / "better.py"
+    better.write_text("class Harness:\n    def run(self, task, model):\n        return 'x'\n", encoding="utf-8")
+    model = CountingModel()
+    config = SearchConfig(root=tmp_path / "r", iterations=0)
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "y"), lambda *a: []).run([seed], tasks, test)
+    results = tmp_path / "r-test" / "test_results.json"
+    first = results.read_bytes()
+    budget = json.loads((config.root / "run.json").read_text(encoding="utf-8"))["budget"]["test_evaluations"]
+    SearchRunner(config, CandidateEvaluator(model), lambda *a: []).run([seed], tasks, test, resume=True)
+    assert model.n == 0 and results.read_bytes() == first
+    assert json.loads((config.root / "run.json").read_text(encoding="utf-8"))["budget"]["test_evaluations"] == budget
+    more = SearchConfig(root=tmp_path / "r", iterations=1)
+    SearchRunner(more, CandidateEvaluator(lambda p, **_: "y"), lambda *a: [better]).run(
+        [seed], tasks, test, resume=True)
+    assert (tmp_path / "r-test" / "test_results.1.json").read_bytes() == first
+    ids = [r["candidate_id"] for r in json.loads(results.read_text(encoding="utf-8"))["results"]]
+    assert ids == ["iteration-0001-00"]
+    assert json.loads((config.root / "run.json").read_text(encoding="utf-8"))["budget"]["test_evaluations"] == budget + 1
+
+
+def test_budget_cap_covers_baselines(tmp_path):
+    seeds = []
+    for i in range(3):
+        seeds.append(tmp_path / f"s{i}.py")
+        seeds[-1].write_text(ECHO, encoding="utf-8")
+    config = SearchConfig(root=tmp_path / "r", iterations=2, repeats=2, max_evaluations=3)
+    made = []
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), _copying_proposer(tmp_path, seeds[0], made)).run(
+        seeds, [{"input": "a", "label": "x"}])
+    run = json.loads((config.root / "run.json").read_text(encoding="utf-8"))
+    assert run["budget"]["harness_evaluations"] == 2 and made == []
+    assert _receipt(config.root, "initial-0002")["verdict"] == "budget_expired"
+
+
+def test_proposals_without_a_fingerprint_get_one_from_the_runner(tmp_path):
+    seed = tmp_path / "s.py"
+    seed.write_text(ECHO, encoding="utf-8")
+    config = SearchConfig(root=tmp_path / "r", iterations=1)
+
+    def command_like(experience, iteration, count):
+        path = tmp_path / "plain.py"
+        path.write_text(ECHO, encoding="utf-8")
+        scores = experience.root / "candidates" / "initial-0000" / "scores.json"
+        scores.write_text(scores.read_text(encoding="utf-8").replace('"score": 1.0', '"score": 0.5'),
+                          encoding="utf-8")
+        return [path]
+
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), command_like).run([seed], [{"input": "a", "label": "x"}])
+    assert _receipt(config.root, "iteration-0001-00")["verdict"] == "stale_parent"
+
+
+def test_torn_test_trace_is_repaired_on_resume(tmp_path):
+    seed = tmp_path / "s.py"
+    seed.write_text(ECHO, encoding="utf-8")
+    config = SearchConfig(root=tmp_path / "r", iterations=0)
+    tasks = [{"input": "a", "label": "x"}]
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), lambda *a: []).run([seed], tasks, tasks)
+    trace = tmp_path / "r-test" / "traces" / "initial-0000.jsonl"
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write('{"event": "tor')
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), lambda *a: []).run([seed], tasks, tasks, resume=True)
+    assert read_jsonl(trace, tolerate_torn=False)
