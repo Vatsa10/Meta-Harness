@@ -12,6 +12,7 @@ from .chat_types import Usage
 from .core import CandidateEvaluator, atomic_write
 from .protocol import Metric
 from .providers import Price, cost_usd, model_from_environment, price_for
+from .stats import bh, mcnemar_exact, paired_counts
 
 PASS_THRESHOLD = 0.5
 
@@ -164,9 +165,39 @@ def transfer(harnesses: Sequence[Path], tasks: Sequence[Mapping], models: Sequen
                          "context_cost": sum(costs) / len(costs), "n": len(tasks),
                          "cost_usd": total, "cost_usd_per_task": None if total is None else total / len(usd),
                          "outcomes": outcomes})
-    report = {"rows": rows, "repeats": max(1, repeats), "protocol": protocol}
+    report = {"rows": rows, "repeats": max(1, repeats), "protocol": protocol,
+              "comparisons": paired_comparisons(rows)}
     atomic_write(root / "transfer.json", json.dumps(report, indent=2))
     return report
+
+
+def paired_comparisons(rows: Sequence[Mapping[str, Any]], q: float = 0.05) -> list[dict[str, Any]]:
+    """Per model, every harness against the first harness listed for that model: paired win/loss/tie
+    on the per-task pass outcome, exact McNemar p, BH q over all comparisons, `significant`."""
+    usable = [r for r in rows if not r.get("error") and r.get("outcomes")]
+    baselines: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for row in usable:
+        baselines.setdefault((row["provider"], row["model"]), row)
+    out: list[dict[str, Any]] = []
+    for row in usable:
+        base = baselines[(row["provider"], row["model"])]
+        if row is base:
+            continue
+        counts = paired_counts({o["task"]: float(o["pass"]) for o in base["outcomes"]},
+                               {o["task"]: float(o["pass"]) for o in row["outcomes"]})
+        out.append({"harness": row["harness"], "baseline": base["harness"], "provider": row["provider"],
+                    "model": row["model"], **counts, "p": mcnemar_exact(counts["losses"], counts["wins"])})
+    qvals, flags = bh([c["p"] for c in out], q)
+    for c, qv, flag in zip(out, qvals, flags):
+        c["q"], c["significant"] = qv, flag
+    return out
+
+
+def format_comparisons(comparisons: Sequence[Mapping[str, Any]]) -> str:
+    lines = [f"{c['harness']} vs {c['baseline']} @ {c['provider']}:{c['model']}: "
+             f"{c['wins']}W/{c['losses']}L/{c['ties']}T p={c['p']:.4f} q={c['q']:.4f} "
+             f"{'significant' if c['significant'] else 'not significant'}" for c in comparisons]
+    return "\n".join(lines)
 
 
 def format_table(rows: Sequence[Mapping[str, Any]]) -> str:

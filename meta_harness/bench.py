@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .judge import http_status, retryable
 from .protocol import Metric, hide_target
 from .redact import bounded, redact
+from .stats import compare
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -196,6 +197,11 @@ def summarize(rows: Sequence[Mapping]) -> dict:
             "per_task": {t: sum(v) / len(v) for t, v in per_task.items()},
             "outcomes": per_task,
         }
+    names = list(out)
+    if len(names) > 1:
+        # Every arm against the first one: pass = per-task mean score > 0.5, BH over the arms.
+        for name, result in compare(out[names[0]]["per_task"], {n: out[n]["per_task"] for n in names[1:]}).items():
+            out[name]["vs_baseline"] = {"baseline": names[0], **result}
     return out
 
 
