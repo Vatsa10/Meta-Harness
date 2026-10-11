@@ -7,14 +7,25 @@ from pathlib import Path
 from typing import MutableMapping
 
 
+def _strip_comment(value: str) -> str:
+    """Drop a whitespace-preceded `#` comment that sits outside any quotes."""
+    quote = ""
+    for i, ch in enumerate(value):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"" and i == 0:
+            quote = ch
+        elif ch == "#" and i > 0 and value[i - 1] in " 	":
+            return value[:i]
+    return value
+
+
 def _value(raw: str) -> str:
-    value = raw.strip()
+    value = _strip_comment(raw.strip()).strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
         return value[1:-1]
-    comment = value.find(" #")
-    if comment != -1:
-        value = value[:comment]
-    return value.strip()
+    return value
 
 
 def parse_env(text: str) -> dict[str, str]:

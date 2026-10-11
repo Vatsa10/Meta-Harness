@@ -74,3 +74,24 @@ def test_jsonl_torn_last_line_tolerated_middle_raises(tmp_path):
     bad.write_text(json.dumps({"a": 1}) + "\n{\"a\": \n" + json.dumps({"a": 2}) + "\n", encoding="utf-8")
     with pytest.raises(ValueError):
         read_jsonl(bad)
+
+
+def test_inline_comment_rules():
+    text = ('A="sk-abc"  # prod\nB=\'a # b\'\nC=v # c\nD=v#notacomment\nE="x#y" # z\n'
+            'F=\'q\'\t# tab\n')
+    assert parse_env(text) == {"A": "sk-abc", "B": "a # b", "C": "v", "D": "v#notacomment",
+                               "E": "x#y", "F": "q"}
+
+
+def test_redact_covers_secret_named_environment_values(monkeypatch):
+    values = {"AWS_SECRET_ACCESS_KEY": "aws-secret-value-1", "HF_KEY": "hf-key-value-22",
+              "DB_PASSWORD": "db-pass-value-333", "SVC_CREDENTIALS": "creds-value-4444",
+              "DATABASE_URL_SECRET_X": "dburl-secret-555"}
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PLAIN_NAME", "plain-value-not-secret")
+    from meta_harness.redact import redact_obj
+    for value in values.values():
+        assert value not in redact(f"x {value} y")
+        assert value not in str(redact_obj({"k": [f"a{value}"], value: 1}))
+    assert "plain-value-not-secret" in redact("plain-value-not-secret")
