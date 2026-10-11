@@ -215,12 +215,15 @@ class CandidateEvaluator:
         self.metric = metric or (lambda prediction, task: float(prediction == task.get("label")))
         self.task_timeout = task_timeout
 
-    def validate(self, source: Path | str) -> None:
+    def validate(self, source: Path | str, probe: Mapping[str, Any] | None = None) -> None:
+        from .protocol import call_run
+
         harness = _load_harness(Path(source))
+        row = dict(probe) if probe is not None else {"input": "validation"}
         with tempfile.TemporaryDirectory() as td:
             with TraceRecorder(Path(td) / "validation.jsonl") as trace:
                 try:
-                    harness.run({"input": "validation", "label": "ok"}, MeteredModel(self.model, trace), trace)
+                    call_run(harness, row, MeteredModel(self.model, trace), trace)
                 except Exception as exc:
                     raise HarnessValidationError(f"validation run failed: {exc}") from exc
 
@@ -305,13 +308,20 @@ class SearchRunner:
                  proposer: Callable[[FilesystemExperience, int, int], Sequence[Path]]):
         self.config, self.evaluator, self.proposer = config, evaluator, proposer
         self.experience = FilesystemExperience(config.root)
+        self.probe: dict[str, Any] | None = None
 
-    @staticmethod
-    def _sidecar_notes(source: Path) -> dict[str, str]:
-        sidecar = source.with_name(source.stem + ".reasoning.md")
-        if sidecar.is_file():
-            return {"proposer_reasoning.md": sidecar.read_text(encoding="utf-8", errors="replace")}
-        return {}
+    # proposal sidecars written next to <stem>.py, copied into the candidate directory
+    SIDECARS = {".reasoning.md": "proposer_reasoning.md", ".proposer_log.jsonl": "proposer_log.jsonl",
+                ".outcomes.json": "outcomes.json", ".parent.json": "parent.json"}
+
+    @classmethod
+    def _sidecar_notes(cls, source: Path) -> dict[str, str]:
+        notes = {}
+        for suffix, name in cls.SIDECARS.items():
+            sidecar = source.with_name(source.stem + suffix)
+            if sidecar.is_file():
+                notes[name] = sidecar.read_text(encoding="utf-8", errors="replace")
+        return notes
 
     @staticmethod
     def _merge_repeats(candidate_id: str, runs: Sequence[EvaluationResult], split: str) -> EvaluationResult:
@@ -345,7 +355,7 @@ class SearchRunner:
 
         notes = self._sidecar_notes(source)
         try:
-            validate_in_subprocess(source, self.config.validation_timeout)
+            validate_in_subprocess(source, self.config.validation_timeout, self.probe, self.experience.root)
         except Exception as exc:
             candidate_id = self.experience.add_source(source, label, notes)
             result = EvaluationResult(candidate_id, float("-inf"), valid=False, error=str(exc), split=split)
@@ -390,6 +400,9 @@ class SearchRunner:
 
     def run(self, initial: Sequence[Path | str], search_tasks: Sequence[Mapping[str, Any]],
             test_tasks: Sequence[Mapping[str, Any]] | None = None) -> list[EvaluationResult]:
+        from .protocol import hide_target
+
+        self.probe = hide_target(search_tasks[0]) if search_tasks else None
         self._write_run_manifest(search_tasks, test_tasks)
         results = self._evaluate_many([(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)], search_tasks)
         for iteration in range(1, self.config.iterations + 1):
