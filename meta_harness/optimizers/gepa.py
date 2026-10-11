@@ -118,14 +118,25 @@ def reward_matrix(candidates_dir: Path, valid: set[str] | None = None) -> dict[s
 
 
 def task_wins(matrix: Mapping[str, Mapping[int, float]]) -> dict[str, set[int]]:
-    """Tasks each candidate is best on (ties: every tied candidate wins that task)."""
-    tasks = {i for row in matrix.values() for i in row}
+    """Tasks each non-dominated candidate is best on (ties: every tied candidate wins that task).
+
+    Only tasks every candidate was scored on count, so a partial (killed) candidate cannot win
+    tasks it has no score for. A candidate strictly dominated by another (no better anywhere, worse
+    somewhere) is pruned first and wins nothing.
+    """
     wins: dict[str, set[int]] = {cid: set() for cid in matrix}
+    if not matrix:
+        return wins
+    tasks = set.intersection(*(set(row) for row in matrix.values()))
+    alive = [cid for cid in matrix if not any(
+        other != cid
+        and all(matrix[other][t] >= matrix[cid][t] for t in tasks)
+        and any(matrix[other][t] > matrix[cid][t] for t in tasks)
+        for other in matrix)]
     for task in tasks:
-        scored = {cid: row[task] for cid, row in matrix.items() if task in row}
-        best = max(scored.values())
-        for cid, value in scored.items():
-            if value == best:
+        best = max(matrix[cid][task] for cid in alive)
+        for cid in alive:
+            if matrix[cid][task] == best:
                 wins[cid].add(task)
     return wins
 

@@ -124,3 +124,36 @@ def test_build_from_context(tmp_path):
     (path,) = build("gepa", ctx)(experience, 1, 1)
     assert path.parent == experience.root / "proposals" / "iteration-0001"
     assert path.with_name("candidate-00.reasoning.md").is_file()
+
+
+def test_dominated_candidate_is_pruned_and_never_sampled():
+    matrix = as_matrix({"A": [1.0, 1.0], "D": [1.0, 0.5]})
+    wins = gepa.task_wins(matrix)
+    assert wins == {"A": {0, 1}, "D": set()}
+    assert gepa.pareto_set(matrix) == ["A"]
+    rng = random.Random(1)
+    assert {gepa.sample_parent(rng, wins) for _ in range(100)} == {"A"}
+
+
+def test_ties_give_every_tied_candidate_the_win():
+    wins = gepa.task_wins(as_matrix({"A": [1.0, 0.0], "B": [1.0, 0.0]}))
+    assert wins["A"] == {0, 1} and wins["B"] == {0, 1}      # identical rows: neither is strictly dominated
+    wins = gepa.task_wins(as_matrix({"A": [1.0, 0.0], "B": [1.0, 0.5], "C": [0.0, 0.0]}))
+    assert wins["B"] == {0, 1} and wins["A"] == set()
+
+
+def test_partial_candidate_cannot_win_unscored_tasks():
+    matrix = {"A": {0: 0.5, 1: 0.5, 2: 0.5}, "P": {0: 0.9}}      # P was killed after task 0
+    wins = gepa.task_wins(matrix)
+    assert wins == {"A": set(), "P": {0}}                        # tasks 1 and 2 are not commonly scored
+    matrix = {"A": {0: 0.5, 1: 0.5}, "P": {0: 0.1, 2: 0.9}}
+    assert gepa.task_wins(matrix) == {"A": {0}, "P": set()} or gepa.task_wins(matrix)["P"] <= {0}
+
+
+def test_invalid_candidates_are_never_parents(tmp_path):
+    experience = make_experience(tmp_path, {"A": [0.5, 0.5], "BAD": [1.0, 1.0]})
+    experience.write_result(EvaluationResult("BAD", 1.0, valid=False))
+    paths = gepa.GepaProposer(lambda p: REPLY)(experience, 1, 3)
+    for path in paths:
+        info = json.loads(path.with_name(path.stem + ".parent.json").read_text(encoding="utf-8"))
+        assert info["parents"] == ["A"]
