@@ -188,3 +188,59 @@ def test_ace_seed_learns_bullet_from_wrong_answer(tmp_path):
         harness.run({"problem": "p2", "answer": "6"}, model, trace)
     assert harness.playbook == ["Check small cases first."]
     assert "Check small cases first." in prompts[2]
+
+
+def _t16_corpus():
+    rows = [{"id": f"n{i}", "problem": "triangle ABC angle bisector circumcircle tangent chord",
+             "solution": "Draw the bisector.", "difficulty": None, "source": "OpenMathReasoning"} for i in range(3)]
+    rows.append({"id": "n9", "problem": "olympiad circle configuration", "solution": "Invert.",
+                 "difficulty": None, "source": "NuminaMath-1.5", "problem_source": "olympiads"})
+    rows.append({"id": "o1", "problem": "triangle ABC angle", "solution": "s", "difficulty": None,
+                 "source": "OpenMathReasoning"})
+    return rows
+
+
+def test_hard_index_fallback_on_t16_shaped_corpus():
+    harness = MathRetrievalHarness(_t16_corpus())
+    assert harness.hard_index_mode == "fallback"
+    assert "o1" not in [x["id"] for x in harness.hard_index.items]
+    trace = _Trace()
+    prompts = []
+    harness.run({"problem": "triangle ABC angle bisector circumcircle tangent chord"},
+                lambda p, **_: prompts.append(p) or "1", trace)
+    names = [n for n, _ in trace.events]
+    assert "hard_index_fallback" in names
+    retrieved = dict(trace.events)["math_retrieval"]["retrieved"]
+    assert "n9" in retrieved
+
+
+def test_empty_hard_index_emits_event():
+    harness = MathRetrievalHarness([_item(1, "triangle angle")])
+    assert harness.hard_index_mode == "empty"
+    trace = _Trace()
+    harness.run({"problem": "triangle angle"}, lambda p, **_: "1", trace)
+    assert dict(trace.events)["hard_index_fallback"]["mode"] == "empty"
+
+
+def test_adaptive_k_uses_raw_scores_not_difficulty_bonus():
+    # equal lexical match; a huge difficulty gap must not change K
+    items = [_item(0, "solve quadratic equation roots", difficulty=0),
+             _item(1, "solve quadratic equation roots", difficulty=10),
+             _item(2, "solve quadratic equation roots", difficulty=0)]
+    filler = [_item(10 + i, f"unrelated alpha{i}") for i in range(5)]
+    assert len(MathRetrievalHarness(items + filler)._retrieve("solve quadratic equation roots", "default")) == 3
+
+
+def test_router_seed_parity_with_library(tmp_path, monkeypatch):
+    rows = _t16_corpus() + [_item(i, f"prime integer divisibility problem {i}", "By induction on n.") for i in range(4)]         + [_item(20 + i, f"choose subsets permutation {i}") for i in range(4)]
+    path = tmp_path / "c.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    monkeypatch.setenv("META_HARNESS_CORPUS", str(path))
+    seed, lib = _load("router").Harness(), MathRetrievalHarness(rows)
+    for problem, _ in ROUTE_TABLE + [("triangle ABC angle bisector circumcircle tangent chord", "")]:
+        a, b = [], []
+        seed.run({"problem": problem}, lambda p, **_: a.append(p) or "1", _Trace())
+        lib.run({"problem": problem}, lambda p, **_: b.append(p) or "1", _Trace())
+        assert a == b
+    src = (SEEDS / "router.py").read_text(encoding="utf-8")
+    assert "math_harnesses" not in src

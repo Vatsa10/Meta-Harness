@@ -73,9 +73,27 @@ def adaptive_k(scores: Sequence[float], max_k: int = 3, ratio: float = ADAPTIVE_
     return k
 
 
+COMPETITION_MARKERS = ("olympiad", "aops", "amc", "aime", "cn_contest", "inequalities",
+                       "number_theory", "contest", "competition")
+
+
+def _labels(item: Mapping[str, Any]) -> list[str]:
+    keys = ("source", "dataset", "origin", "competition", "problem_source")
+    return [str(item[key]).lower() for key in keys if item.get(key)]
+
+
 def _is_numina(item: Mapping[str, Any]) -> bool:
-    labels = [str(item[key]) for key in ("source", "dataset", "origin") if item.get(key)]
-    return not labels or any("numina" in label.lower() for label in labels)
+    labels = _labels(item)
+    return not labels or any("numina" in label for label in labels)
+
+
+def _numina_competition(item: Mapping[str, Any]) -> bool:
+    """A NuminaMath item from a competition source (the corpus keeps only those)."""
+    labels = _labels(item)
+    if not any("numina" in label for label in labels):
+        return False
+    extra = [x for x in (str(item.get(k) or "").lower() for k in ("competition", "problem_source")) if x]
+    return not extra or any(m in x for x in extra for m in COMPETITION_MARKERS)
 
 
 def _difficulty(item: Mapping[str, Any]) -> float:
@@ -101,6 +119,11 @@ class MathRetrievalHarness:
             self.corpus.append(record)
         self.index = BM25Index(self.corpus, [str(x["problem"]) for x in self.corpus], math_mode=True)
         hard = [x for x in self.corpus if _difficulty(x) > HARD_DIFFICULTY and _is_numina(x)]
+        self.hard_index_mode = "difficulty"
+        if not hard:
+            # The built corpus carries no difficulty: fall back to NuminaMath competition items.
+            hard = [x for x in self.corpus if _numina_competition(x) and x.get("difficulty") in (None, "")]
+            self.hard_index_mode = "fallback" if hard else "empty"
         self.hard_index = BM25Index(hard, [str(x["problem"]) for x in hard], math_mode=True)
         self.default_k = default_k
         self.adaptive_ratio = adaptive_ratio
@@ -149,14 +172,17 @@ class MathRetrievalHarness:
             raw = unique[:8]
         ranked = sorted(raw, key=lambda x: (-self._rank(x, route), x.index))
         if route == "default":
-            scores = [self._rank(x, route) for x in ranked]
-            return ranked[:adaptive_k(scores, self.default_k, self.adaptive_ratio)]
+            raw_scores = sorted((x.score for x in ranked), reverse=True)  # raw BM25, not the bonused rank
+            return ranked[:adaptive_k(raw_scores, self.default_k, self.adaptive_ratio)]
         return ranked[:3]
 
     def run(self, task: Mapping[str, Any], model: Callable[..., Any], trace: Any) -> str:
         problem = str(task.get("problem", task.get("input", "")))
         route = self.route(problem)
         examples = self._retrieve(problem, route)
+        if route == "geometry" and self.hard_index_mode != "difficulty":
+            trace.event("hard_index_fallback", {"event": "hard_index_fallback", "mode": self.hard_index_mode,
+                                                "hard_items": len(self.hard_index.items)})
         context = "\n\n".join(
             f"Reference problem:\n{x.item['problem']}\nSolution:\n{str(x.item['solution'])[:SOLUTION_PROMPT_CHARS]}"
             for x in examples)
