@@ -64,27 +64,56 @@ def test_openevolve_prompt_has_parent_and_two_inspirations(tmp_path):
     assert "s5" in seen[0] or pid == "s5"
 
 
+def _archives(exp):
+    valid = exp.results()
+    ids = [r.candidate_id for r in valid]
+    bounds = (min(r.score for r in valid), max(r.score for r in valid), max(r.context_cost for r in valid))
+    state = {"migrations": {}}
+    return {i: openevolve.build_archive(valid, openevolve.OpenEvolve.members(state, ids, i), bounds)
+            for i in range(3)}
+
+
 def test_openevolve_exploit_ratio(tmp_path):
-    exp = experience(tmp_path, SIX)
-    archive = openevolve.build_archive(exp.results())
-    members = {"s0", "s2", "s4", "s5"}
-    modes = [openevolve.sample_parent(random.Random(i), archive, members)[1] for i in range(200)]
+    archives = _archives(experience(tmp_path, SIX))
+    island = next(i for i, a in archives.items() if len(a) >= 2)
+    modes = [openevolve.sample_parent(random.Random(i), archives, island)[1] for i in range(200)]
     assert 0.6 <= modes.count("exploit") / 200 <= 0.8
+    assert set(modes) == {"exploit", "explore"}
+
+
+def test_openevolve_empty_island_fallback_is_labelled(tmp_path):
+    archives = _archives(experience(tmp_path, SIX))
+    empty = {0: {}, 1: archives[0] or archives[1] or archives[2]}
+    modes = {openevolve.sample_parent(random.Random(i), empty, 0)[1] for i in range(100)}
+    assert modes == {"exploit_fallback_explore", "explore"}
+
+
+def test_openevolve_scores_outside_unit_range_stay_in_deciles(tmp_path):
+    exp = experience(tmp_path, {"a": -5.0, "b": 3.0, "c": 40.0})
+    cells = openevolve.build_archive(exp.results())
+    assert all(0 <= x <= 9 and 0 <= y <= 9 for x, y in cells)
 
 
 def test_openevolve_migration_at_iteration_five(tmp_path):
     exp = experience(tmp_path, SIX)
     proposer = build("openevolve", ctx(tmp_path))
     proposer(exp, 4, 1)
-    state = tmp_path / "store" / "proposals" / "openevolve_state.json"
-    assert json.loads(state.read_text(encoding="utf-8"))["migrations"] == {}
+    state_path = tmp_path / "store" / "proposals" / "openevolve_state.json"
+    assert json.loads(state_path.read_text(encoding="utf-8"))["migrations"] == {}
     proposer(exp, 5, 1)
-    moves = json.loads(state.read_text(encoding="utf-8"))["migrations"]["5"]
-    assert moves and all(0 <= island < 3 for island in moves.values())
-    best = max((r for r in exp.results() if openevolve.island_of(r.candidate_id) == 0),
-               key=lambda r: r.score, default=None)
-    if best:
-        assert moves[best.candidate_id] == 1
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    moves = state["migrations"]["5"]
+    ids = [r.candidate_id for r in exp.results()]
+    assert moves
+    for cid, target in moves.items():
+        assert cid in openevolve.OpenEvolve.members(state, ids, target)
+        assert openevolve.island_of(cid) != target
+    # the migrant is now sampleable from the target island's archive
+    cid, target = next(iter(moves.items()))
+    valid = exp.results()
+    bounds = (min(r.score for r in valid), max(r.score for r in valid), max(r.context_cost for r in valid))
+    members = openevolve.OpenEvolve.members(state, ids, target)
+    assert any(r.candidate_id == cid for r in openevolve.build_archive(valid, members, bounds).values())
 
 
 def tree(tmp_path, scores, parents):
@@ -113,6 +142,34 @@ def test_ttt_higher_q_once_visits_equalise(tmp_path):
                                {"child-a": "a-root", "child-b": "a-root"})
     visits = {"a-root": 4, "child-a": 2, "child-b": 2}
     assert ttt_discover.select(results, parents, visits) == "child-a"
+
+
+def test_ttt_selecting_a_leaf_bumps_every_ancestor(tmp_path):
+    exp = experience(tmp_path, {"r": 0.5, "m": 0.6, "leaf": 0.7}, {"m": "r", "leaf": "m"})
+    ttt_discover.save_state(exp.root, {"visits": {"r": 1, "m": 1}})
+    build("ttt_discover", ctx(tmp_path))(exp, 1, 1)
+    visits = ttt_discover.load_state(exp.root)["visits"]
+    assert visits == {"r": 2, "m": 2, "leaf": 1}
+
+
+def test_ttt_two_seed_roots_share_the_virtual_root(tmp_path):
+    _, results, parents = tree(tmp_path, {"seed-a": 0.5, "seed-b": 0.5}, {})
+    assert parents == {"seed-a": "", "seed-b": ""}
+    # root-level N is the sum of root visits: the unvisited seed wins
+    assert ttt_discover.select(results, parents, {"seed-a": 3}) == "seed-b"
+    assert ttt_discover.select(results, parents, {"seed-a": 3, "seed-b": 3}) == "seed-a"
+
+
+def test_ttt_no_visit_for_unparseable_reply(tmp_path):
+    exp = experience(tmp_path, {"r": 0.5})
+    ttt_discover.TTTDiscover(lambda prompt: "no code here")(exp, 1, 1)
+    assert ttt_discover.load_state(exp.root)["visits"] == {}
+
+
+def test_ttt_cyclic_lineage_is_treated_as_roots(tmp_path):
+    _, results, parents = tree(tmp_path, {"x": 0.4, "y": 0.6}, {"x": "y", "y": "x"})
+    assert parents == {"x": "", "y": ""}
+    assert ttt_discover.select(results, parents, {}) in {"x", "y"}
 
 
 def test_ttt_state_round_trips_and_expansion(tmp_path):
@@ -149,4 +206,6 @@ def test_neither_opens_test_root(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "read_text", spy_read)
     for name in ("openevolve", "ttt_discover"):
         build(name, ctx(tmp_path, test_root=test_root))(exp, 5, 2)
-    assert opened and not [p for p in opened if test_root in p.parents or p == test_root]
+    assert opened
+    assert not [p for p in opened if test_root.resolve() in Path(p).resolve().parents]
+    assert (test_root / "secret.jsonl").resolve() not in {Path(p).resolve() for p in opened}

@@ -66,6 +66,14 @@ def parent_map(root: Path, ids: list[str]) -> dict[str, str]:
         except (OSError, ValueError, AttributeError):
             pass
         parents[node] = parent
+    original = dict(parents)
+    for node in ids:  # a node whose lineage never reaches a root is on or under a cycle: make it a root
+        seen, cursor = set(), node
+        while cursor != ROOT and cursor not in seen:
+            seen.add(cursor)
+            cursor = original[cursor]
+        if cursor != ROOT:
+            parents[node] = ROOT
     return parents
 
 
@@ -104,13 +112,14 @@ def select(results: list[Any], parents: dict[str, str], visits: dict[str, int]) 
     for node, parent in parents.items():
         children.setdefault(parent, []).append(node)
     node = ROOT
-    while True:
+    for _ in range(len(parents) + 1):
         options = children.get(node)
         if not options:
             return node
         node = max(sorted(options), key=lambda n: values[n])  # ties: first by id
         if not visits.get(node, 0) or node not in children:
             return node
+    return node
 
 
 def _ancestors(node: str, parents: dict[str, str]) -> list[str]:
@@ -143,8 +152,6 @@ class TTTDiscover:
         paths: list[Path] = []
         for index in range(count):
             node = select(results, parents, visits)
-            for member in _ancestors(node, parents):
-                visits[member] = visits.get(member, 0) + 1
             kids = [c for c, p in parents.items() if p == node]
             top = max(kids, key=lambda c: (by_id[c].score, c), default=None)
             child = (f"Its best child (id {top}, score {by_id[top].score:.4f}):\n"
@@ -156,6 +163,8 @@ class TTTDiscover:
                 source = extract_python(text)
             except ValueError:
                 continue
+            for member in _ancestors(node, parents):
+                visits[member] = visits.get(member, 0) + 1
             stem = f"candidate-{index:02d}"
             (output / f"{stem}.py").write_text(source, encoding="utf-8")
             (output / f"{stem}.reasoning.md").write_text(text, encoding="utf-8")

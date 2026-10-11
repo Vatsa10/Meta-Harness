@@ -50,25 +50,38 @@ def _decile(value: float, top: float) -> int:
     return max(0, min(9, int(10 * value / top)))
 
 
-def build_archive(results: list[Any]) -> dict[tuple[int, int], Any]:
+def build_archive(results: list[Any], members: set[str] | None = None,
+                  bounds: tuple[float, float, float] | None = None) -> dict[tuple[int, int], Any]:
+    """One elite per (score decile, cost decile) cell. Deciles use the score normalised over all
+    valid results and are clamped to [0, 9]; `members` restricts the archive to one island."""
     valid = [r for r in results if r.valid]
-    max_cost = max((r.context_cost for r in valid), default=0.0)
+    lo, hi, max_cost = bounds or (min((r.score for r in valid), default=0.0),
+                                  max((r.score for r in valid), default=0.0),
+                                  max((r.context_cost for r in valid), default=0.0))
     archive: dict[tuple[int, int], Any] = {}
     for r in sorted(valid, key=lambda r: r.candidate_id):
-        cell = (max(0, min(9, int(r.score * 10))), _decile(r.context_cost, max_cost))
+        if members is not None and r.candidate_id not in members:
+            continue
+        norm = 0.0 if hi <= lo else (r.score - lo) / (hi - lo)
+        cell = (max(0, min(9, int(norm * 10))), _decile(r.context_cost, max_cost))
         if cell not in archive or r.score > archive[cell].score:
             archive[cell] = r
     return archive
 
 
-def sample_parent(rng: random.Random, archive: dict[tuple[int, int], Any],
-                  island_members: set[str]) -> tuple[Any, str]:
-    """(parent, 'exploit' | 'explore'); the parent is always an archive member."""
-    elites = sorted(archive.values(), key=lambda r: r.candidate_id)
-    local = [r for r in elites if r.candidate_id in island_members]
-    if rng.random() < EXPLOIT and local:
-        return rng.choices(local, weights=[r.score + 1e-9 for r in local], k=1)[0], "exploit"
-    return rng.choice(elites), "explore"
+def sample_parent(rng: random.Random, archives: dict[int, dict[tuple[int, int], Any]],
+                  island: int) -> tuple[Any, str]:
+    """(parent, operator). Exploit draws from the island's own archive weighted by score; explore
+    draws uniformly from every archive. An exploit draw on an empty island is recorded as
+    'exploit_fallback_explore'."""
+    local = sorted(archives.get(island, {}).values(), key=lambda r: r.candidate_id)
+    everyone = sorted({r.candidate_id: r for a in archives.values() for r in a.values()}.values(),
+                      key=lambda r: r.candidate_id)
+    if rng.random() < EXPLOIT:
+        if local:
+            return rng.choices(local, weights=[r.score + 1e-9 for r in local], k=1)[0], "exploit"
+        return rng.choice(everyone), "exploit_fallback_explore"
+    return rng.choice(everyone), "explore"
 
 
 class OpenEvolve:
@@ -115,17 +128,20 @@ class OpenEvolve:
         output = root / "proposals" / f"iteration-{iteration:04d}"
         output.mkdir(parents=True, exist_ok=True)
         results = experience.results()
-        archive = build_archive(results)
-        if not archive:
+        valid = [r for r in results if r.valid]
+        if not valid:
             return []
         state = self._state(root)
         self._migrate(state, results, iteration)
-        ids = [r.candidate_id for r in results if r.valid]
+        ids = [r.candidate_id for r in valid]
+        bounds = (min(r.score for r in valid), max(r.score for r in valid),
+                  max(r.context_cost for r in valid))
+        archives = {i: build_archive(valid, self.members(state, ids, i), bounds) for i in range(ISLANDS)}
         rng = random.Random(self.seed + iteration)
         paths: list[Path] = []
         for index in range(count):
             island = (iteration + index) % ISLANDS
-            parent, operator = sample_parent(rng, archive, self.members(state, ids, island))
+            parent, operator = sample_parent(rng, archives, island)
             others = sorted((r for r in results if r.valid and r.candidate_id != parent.candidate_id),
                             key=lambda r: (-r.score, r.candidate_id))[:INSPIRATIONS]
             inspirations = "\n\n".join(
