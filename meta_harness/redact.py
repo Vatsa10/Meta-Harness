@@ -11,14 +11,25 @@ SECRET = re.compile(r"(?i)(api[_-]?key\S*\s*[:=]\s*\S+|bearer\s+\S+|sk-[A-Za-z0-
 REDACTED = "[redacted]"
 
 
+_SECRET_SUFFIXES = ("_API_KEY", "_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASS", "_CREDENTIALS")
+_SECRET_WORDS = ("SECRET", "PASSWORD")
+
+
+def _is_secret_name(name: str) -> bool:
+    upper = name.upper()
+    return upper.endswith(_SECRET_SUFFIXES) or any(word in upper for word in _SECRET_WORDS)
+
+
 def _secret_values() -> list[str]:
     values = {value for name, value in os.environ.items()
-              if (name.endswith("_API_KEY") or name.endswith("_TOKEN")) and len(value) >= 8}
+              if _is_secret_name(name) and len(value) >= 8}
     return sorted(values, key=len, reverse=True)
 
 
 def redact(text: str) -> str:
-    """Replace every SECRET match and every loaded *_API_KEY/*_TOKEN value (>= 8 chars)."""
+    """Replace every SECRET match and every loaded secret-named environment value
+    (*_API_KEY, *_TOKEN, *_KEY, *_SECRET, *_PASSWORD, *_PASS, *_CREDENTIALS, or a name containing
+    SECRET/PASSWORD; >= 8 chars, longest first)."""
     for value in _secret_values():
         text = text.replace(value, REDACTED)
     return SECRET.sub(REDACTED, text)

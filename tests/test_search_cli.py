@@ -243,3 +243,17 @@ def test_price_is_keyed_by_provider_and_model_with_bare_fallback():
     assert _price("anthropic", "m", prices).input == 3.0
     assert _price("unikey", "m", prices).input == 1.0, "bare model id is the fallback"
     assert _price("openai", "other", prices) is None
+
+
+def test_py_metric_syntax_error_is_exit_2(tmp_path, capsys):
+    bad = tmp_path / "bad.py"
+    bad.write_text("def f(:\n", encoding="utf-8")
+    assert cli.main(_base_args(tmp_path, FIX / "data.jsonl") + ["--metric", f"{bad}:f"]) == 2
+    assert "bad.py" in _one_line_error(capsys)
+
+
+@pytest.mark.parametrize("spelling", ["ttt-discover", "ttt_discover"])
+def test_run_json_records_canonical_optimizer_name(tmp_path, capsys, spelling):
+    root = tmp_path / "s"
+    assert cli.main(_base_args(tmp_path, FIX / "data.jsonl") + ["--optimizer", spelling]) == 0
+    assert json.loads((root / "run.json").read_text(encoding="utf-8"))["run_meta"]["optimizer"] == "ttt_discover"

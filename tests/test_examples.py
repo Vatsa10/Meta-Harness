@@ -43,5 +43,7 @@ def test_readme_commands_match_the_cli():
 def test_readme_results_cite_only_produced_runs():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     results = readme.split("## Results", 1)[1].split("\n## ", 1)[0]
+    sources = "\n".join(f.read_text(encoding="utf-8")
+                        for f in sorted((ROOT / "docs" / "results").glob("*.md")))
     for number in re.findall(r"\b0\.\d{2,}\b|\b\d{2}\.\d%?", results):
-        assert "run.json" in results, f"result {number} has no run.json provenance"
+        assert number in sources, f"result {number} does not appear in docs/results/*.md"

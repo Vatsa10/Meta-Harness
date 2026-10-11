@@ -31,6 +31,17 @@ ORPHAN_RESULT = "error: no result (turn ended)"
 RETRY_AFTER_CAP = 60.0
 
 
+def _user_agent() -> str:
+    try:
+        from importlib.metadata import version
+        return f"meta-harness/{version('meta-harness')}"
+    except Exception:
+        return "meta-harness/0.2.0"
+
+
+USER_AGENT = _user_agent()
+
+
 class ProviderError(RuntimeError):
     """Provider failure. The message is always redacted: secret patterns, loaded *_API_KEY values
     and any extra `secrets` (e.g. an explicitly passed key) never appear in str(exc)."""
@@ -95,7 +106,7 @@ class _HttpClient:
         self.rng = rng or random.Random()
 
     def _once(self, url: str, headers: Mapping[str, str], payload: bytes) -> dict[str, Any]:
-        request = urllib.request.Request(url, payload, {"Content-Type": "application/json", **headers},
+        request = urllib.request.Request(url, payload, {"Content-Type": "application/json", "User-Agent": USER_AGENT, **headers},
                                          method="POST")
         try:
             with self.urlopen(request, timeout=self.timeout) as response:
@@ -156,7 +167,7 @@ class _HttpClient:
 
 
 def _http_get_json(url: str, headers: Mapping[str, str], timeout: float = 60.0) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **headers}, method="GET")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))

@@ -84,3 +84,27 @@ def test_missing_key_message_names_variable(monkeypatch):
         assert str(error) == "UNIKEY_API_KEY is not set"
     else:
         raise AssertionError("expected ProviderError")
+
+
+def test_every_request_sends_a_meta_harness_user_agent(monkeypatch):
+    import io
+    import re
+    seen = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout=None):
+        seen.append(request.get_header("User-agent"))
+        return Resp(b'{"data": []}')
+
+    client = providers._HttpClient(urlopen=fake_urlopen)
+    client.post("https://example.invalid/v1/chat/completions", {"Authorization": "Bearer k"}, {})
+    monkeypatch.setattr(providers.urllib.request, "urlopen", fake_urlopen)
+    providers._http_get_json("https://example.invalid/v1/models", {"Authorization": "Bearer k"})
+    assert len(seen) == 2
+    assert all(re.fullmatch(r"meta-harness/\S+", ua or "") for ua in seen)

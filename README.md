@@ -266,10 +266,21 @@ meta-harness ablate --views scores,summary,full --runs 3 --max-tasks 1000 -- <se
 
 ## Results
 
-Results: pending the live run.
+First live check, 2026-10-11 (full write-up: [docs/results/2026-10-11-live.md](docs/results/2026-10-11-live.md)).
+It is a smoke run, not a benchmark.
 
-No paper result has been reproduced yet. The offline smoke run checks the pipeline, not model
-quality. Every number added here will name its command, date, model and recorded budget.
+- Providers and models: openai, `gpt-4o-mini` as the base model and `gpt-4.1-mini` as the proposer.
+- Scale: Symptom2Disease, seed-0 subsample of 40 train, 20 search and 20 test examples; 3
+  iterations of 2 candidates, `--max-evaluations 8`.
+- Headline: best search accuracy 0.75 to 0.80; held-out test accuracy 0.55, unchanged. Billed
+  cost about $0.336.
+
+Caveats:
+
+- One example is worth 5 accuracy points, so the search gain is a single example and the test
+  result did not move.
+- These numbers can't be compared with the paper's Table 2.
+- The Best-of-N comparison is inconclusive: it produced 0 candidates under the 20-tool-call cap.
 
 ## Roadmap and limits
 
