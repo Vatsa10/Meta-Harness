@@ -1,0 +1,21 @@
+{
+ "kind": "csv",
+ "rows": [
+  {
+   "text": "How do I locate my card?",
+   "category": "card_arrival"
+  },
+  {
+   "text": "Why won't my card show up on the app?",
+   "category": "card_linking"
+  },
+  {
+   "text": "I need to know your exchange rates.",
+   "category": "exchange_rate"
+  },
+  {
+   "text": "I purchased something in a foreign currency but the rate applied is wrong",
+   "category": "card_payment_wrong_exchange_rate"
+  }
+ ]
+}

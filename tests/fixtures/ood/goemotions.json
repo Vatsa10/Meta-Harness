@@ -1,0 +1,120 @@
+{
+ "kind": "hf",
+ "features": [
+  {
+   "feature_idx": 0,
+   "name": "text",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 1,
+   "name": "labels",
+   "type": {
+    "feature": {
+     "names": [
+      "admiration",
+      "amusement",
+      "anger",
+      "annoyance",
+      "approval",
+      "caring",
+      "confusion",
+      "curiosity",
+      "desire",
+      "disappointment",
+      "disapproval",
+      "disgust",
+      "embarrassment",
+      "excitement",
+      "fear",
+      "gratitude",
+      "grief",
+      "joy",
+      "love",
+      "nervousness",
+      "optimism",
+      "pride",
+      "realization",
+      "relief",
+      "remorse",
+      "sadness",
+      "surprise",
+      "neutral"
+     ],
+     "_type": "ClassLabel"
+    },
+    "_type": "List"
+   }
+  },
+  {
+   "feature_idx": 2,
+   "name": "id",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  }
+ ],
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "text": "I’m really sorry about your situation :( Although I love the names Sapphira, Cirilla, and Scarlett!",
+    "labels": [
+     25
+    ],
+    "id": "eecwqtt"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "text": "It's wonderful because it's awful. At not with.",
+    "labels": [
+     0
+    ],
+    "id": "ed5f85d"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 10,
+   "row": {
+    "text": "[NAME] has towed the line of the Dark Side. He wouldn't cross it by doing something like this.",
+    "labels": [
+     3,
+     10
+    ],
+    "id": "eeaf7fg"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 11,
+   "row": {
+    "text": "Lol! But I love your last name though. XD",
+    "labels": [
+     1,
+     18
+    ],
+    "id": "ee3yyz3"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 12,
+   "row": {
+    "text": "Translation }}} I wish I could afford it.",
+    "labels": [
+     8
+    ],
+    "id": "eegij2q"
+   },
+   "truncated_cells": []
+  }
+ ]
+}

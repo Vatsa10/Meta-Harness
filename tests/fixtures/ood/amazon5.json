@@ -1,0 +1,69 @@
+{
+ "kind": "hf",
+ "features": [
+  {
+   "feature_idx": 0,
+   "name": "id",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 1,
+   "name": "text",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 2,
+   "name": "label",
+   "type": {
+    "dtype": "int64",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 3,
+   "name": "label_text",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  }
+ ],
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "id": "en_0199937",
+    "text": "These are AWFUL. They are see through, the fabric feels like tablecloth, and they fit like children’s clothing. Customer service did seem to be nice though, but I regret missing my return date for these. I wouldn’t even donate them because the quality is so poor.",
+    "label": 0,
+    "label_text": "0"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "id": "en_0863335",
+    "text": "I bought 4 and NONE of them worked. Yes I used new batteries!",
+    "label": 0,
+    "label_text": "0"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "id": "en_0565010",
+    "text": "On first use it didn't heat up and now it doesn't work at all",
+    "label": 0,
+    "label_text": "0"
+   },
+   "truncated_cells": []
+  }
+ ]
+}

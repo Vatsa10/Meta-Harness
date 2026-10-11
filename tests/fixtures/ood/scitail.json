@@ -1,0 +1,58 @@
+{
+ "kind": "hf",
+ "features": [
+  {
+   "feature_idx": 0,
+   "name": "premise",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 1,
+   "name": "hypothesis",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 2,
+   "name": "label",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  }
+ ],
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "premise": "Based on the list provided of the uses of substances 1-7, estimate the pH of each unknown and record the number in the data table in the estimated pH column.",
+    "hypothesis": "If a substance has a ph value greater than 7,that indicates that it is base.",
+    "label": "neutral"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "premise": "If one or two            base pairs are changed (mutated), the embryo will fail to develop properly.",
+    "hypothesis": "Invertebrates (and higher animals) can also be placed in one of two groups based on how they develop as embryos.",
+    "label": "neutral"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "premise": "At high temperatures, the solid dye converts into a gas without ever becoming a liquid.",
+    "hypothesis": "Gases and liquids become solids at low temperatures.",
+    "label": "neutral"
+   },
+   "truncated_cells": []
+  }
+ ]
+}
