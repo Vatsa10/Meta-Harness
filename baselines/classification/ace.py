@@ -20,8 +20,10 @@ Roles
              The playbook is never rewritten wholesale.
 
 Counters and pruning
-  Every bullet carries `helpful` and `harmful` counters. After each labelled task, each bullet
-  shown in the prompt gets helpful += 1 if the prediction was right, harmful += 1 if wrong.
+  Every bullet carries `helpful` and `harmful` counters. After a right prediction every bullet
+  shown in the prompt gets helpful += 1. After a wrong one the reflector names the shown bullets
+  it blames (`BLAME: 1, 3`) and the ones that helped (`HELPED: 2`); only those get harmful += 1 /
+  helpful += 1, and unnamed shown bullets are left unchanged.
   A bullet with harmful > helpful is pruned. When the playbook exceeds META_HARNESS_ACE_BULLETS
   (default 24) the bullets with the lowest helpful - harmful (oldest first) are dropped.
 
@@ -31,7 +33,9 @@ Counters and pruning
 import os
 import re
 
-_OP = re.compile(r"^\s*[-*]?\s*(ADD|UPDATE|REMOVE)\b\s*(\d+)?\s*:?\s*(.*?)\s*$", re.IGNORECASE)
+_OP = re.compile(r"^\s*[-*]?\s*(?:(ADD)\s*:|(UPDATE)\s+(\d+)\s*:|(REMOVE)\s+(\d+)\s*:?)\s*(.*?)\s*$",
+                 re.IGNORECASE)
+_IDS = re.compile(r"^\s*[-*]?\s*(BLAME|HELPED)\s*:\s*(.*)$", re.IGNORECASE)
 
 
 def _labels(task, memory):
@@ -77,7 +81,9 @@ class Harness:
             match = _OP.match(line)
             if not match:
                 continue
-            op, number, body = match.group(1).upper(), match.group(2), match.group(3).strip()
+            op = (match.group(1) or match.group(2) or match.group(4)).upper()
+            number = match.group(3) or match.group(5)
+            body = match.group(6).strip()
             if op == "ADD":
                 if body and all(b["text"] != body for b in self.playbook):
                     self.playbook.append({"id": self.next_id, "text": body, "helpful": 0, "harmful": 0})
@@ -132,20 +138,35 @@ class Harness:
         output = result.get("output") if hasattr(result, "get") else result
         prediction = str(output).strip()
         correct = prediction == truth
-        for bullet_id in self._shown:
-            bullet = self._find(bullet_id)
-            if bullet is not None:
-                bullet["helpful" if correct else "harmful"] += 1
-        self._shown = []
+        shown, self._shown = self._shown, []
         self.memory.append((query, truth))
-        if not correct:
+        if correct:
+            for bullet_id in shown:
+                bullet = self._find(bullet_id)
+                if bullet is not None:
+                    bullet["helpful"] += 1
+        else:
+            shown_text = "\n".join(f"[{i}]" for i in shown) or "(none)"
             reflection = str(model(
                 "A classifier made a mistake.\n"
                 f"Input: {query}\nPredicted: {prediction}\nCorrect: {truth}\n"
+                f"Playbook bullets shown to it: {shown_text}\n"
                 "Write 1-2 tagged insights, one per line as 'TAG: insight' (TAG names the error "
                 "type; insight is a reusable rule of at most 20 words that does not mention this "
-                "specific input).")).strip()
-            insights = [line.strip(" -*") for line in reflection.splitlines() if line.strip()][:2]
+                "specific input). Then name the shown bullets that misled it as 'BLAME: <ids>' and "
+                "the ones that were right as 'HELPED: <ids>'.")).strip()
+            insights = []
+            for line in reflection.splitlines():
+                named = _IDS.match(line)
+                if named:
+                    field = "harmful" if named.group(1).upper() == "BLAME" else "helpful"
+                    for bullet_id in (int(x) for x in re.findall(r"\d+", named.group(2))):
+                        bullet = self._find(bullet_id)
+                        if bullet is not None and bullet_id in shown:
+                            bullet[field] += 1
+                elif line.strip():
+                    insights.append(line.strip(" -*"))
+            insights = insights[:2]
             self.insights.extend(insights)
             if insights:
                 delta = str(model(

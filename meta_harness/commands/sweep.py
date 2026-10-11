@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 from ..cache import CachedModel
@@ -31,7 +32,11 @@ def add_arguments(parser) -> None:
     parser.add_argument("--task-type", choices=["classification", "math", "terminal"],
                         default="classification")
     parser.add_argument("--protocol", choices=["plain", "online"], default="plain",
-                        help="online: stream the search split, then score a frozen copy on the test split")
+                        help="online: stream the train part of the search tasks, score a frozen copy on the "
+                             "validation part (never on the held-out test split)")
+    parser.add_argument("--report-test", action="store_true",
+                        help="also report held-out test numbers (choosing a setting by them is "
+                             "selection on test; without this flag the test file is never opened)")
     parser.add_argument("--metric", choices=sorted(BUILTIN_METRICS), help="override the task-type metric")
     parser.add_argument("--root", default=".meta-harness-sweep")
     parser.add_argument("--cache-dir")
@@ -52,46 +57,64 @@ def _setting_dir(index: int, value: str) -> str:
     return f"{index:02d}-{safe}"
 
 
+def _score(model, metric, harness, key, value, args, train, scored, directory) -> dict:
+    os.environ[key] = value
+    evaluator = CandidateEvaluator(model, metric, task_timeout=args.task_timeout,
+                                   protocol=args.protocol, train_tasks=train)
+    result = evaluator.evaluate(Path(harness), scored, f"{key}={value}", directory)
+    return {"score": result.score, "examples": result.examples, "valid": result.valid,
+            "error": result.error, "context_cost": result.context_cost,
+            "elapsed_seconds": result.elapsed_seconds}
+
+
 def run(args) -> int:
     key, values = parse_env(args.env)
     adapt = ADAPTERS[args.task_type]
-    search = adapt(read_records(args.tasks))
-    if args.test_tasks:
-        test = adapt(read_records(args.test_tasks))
-    elif len(search) >= 2:
-        search, test = split_tasks(search, args.search_fraction, args.split_seed)
-    else:
-        test = []
-    if args.protocol == "online" and not test:
-        raise ValueError("--protocol online needs a held-out split (--test-tasks or at least 2 tasks)")
+    # The held-out file is opened only when the caller explicitly asks to report test numbers.
+    pool = adapt(read_records(args.tasks))
+    test: list = []
+    if args.report_test:
+        print("warning: --report-test adds held-out numbers; choosing a setting by them is "
+              "selection on the test split", file=sys.stderr)
+        if args.test_tasks:
+            test = adapt(read_records(args.test_tasks))
+        elif len(pool) >= 2:
+            pool, test = split_tasks(pool, args.search_fraction, args.split_seed)
+        if not test:
+            raise ValueError("--report-test needs a held-out split (--test-tasks or at least 2 tasks)")
+    online = args.protocol == "online"
+    train: list = []
+    scored = pool
+    if online:
+        if len(pool) < 2:
+            raise ValueError("--protocol online needs at least 2 search tasks (train + validation)")
+        train, scored = split_tasks(pool, args.search_fraction, args.split_seed)
     root = Path(args.root)
     cache_dir = Path(args.cache_dir) if args.cache_dir else root.parent / ".meta-harness-cache"
     model = CachedModel(model_from_environment(args.provider, args.model), cache_dir,
                         enabled=not args.no_cache)
     metric = BUILTIN_METRICS[args.metric] if args.metric else METRIC_FOR[args.task_type]
-    online = args.protocol == "online"
-    scored = test if online else search
     rows = []
     previous = os.environ.get(key)
     try:
         for index, value in enumerate(values):
-            os.environ[key] = value
-            evaluator = CandidateEvaluator(model, metric, task_timeout=args.task_timeout,
-                                           protocol=args.protocol, train_tasks=search if online else ())
             directory = root / _setting_dir(index, value)
-            result = evaluator.evaluate(Path(args.harness), scored, f"{key}={value}",
-                                        directory / "trace.jsonl")
-            rows.append({"setting": value, "env": {key: value}, "score": result.score,
-                         "context_cost": result.context_cost, "examples": result.examples,
-                         "valid": result.valid, "error": result.error,
-                         "elapsed_seconds": result.elapsed_seconds})
+            row = {"setting": value, "env": {key: value}}
+            row.update(_score(model, metric, args.harness, key, value, args, train, scored,
+                              directory / "trace.jsonl"))
+            if args.report_test:
+                # online: the harness learns from the whole search pool, then is frozen on test
+                row["test"] = _score(model, metric, args.harness, key, value, args,
+                                     pool if online else (), test, directory / "test_trace.jsonl")
+            rows.append(row)
     finally:
         if previous is None:
             os.environ.pop(key, None)
         else:
             os.environ[key] = previous
     payload = {"harness": str(args.harness), "variable": key, "protocol": args.protocol,
-               "split": "test" if online else "search", "rows": rows}
+               "selection_split": "validation" if online else "search",
+               "reports_test": bool(args.report_test), "rows": rows}
     root.mkdir(parents=True, exist_ok=True)
     atomic_write(root / "sweep.json", json.dumps(payload, indent=2))
     print(json.dumps(payload, indent=2))

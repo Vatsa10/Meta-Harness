@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,6 +102,26 @@ def test_random_few_shot_is_deterministic_per_input(trace):
     assert prompts[0].split("Input:")[0] != prompts[2].split("Input:")[0]
 
 
+def test_random_few_shot_is_identical_across_processes_with_different_hash_seeds(tmp_path):
+    script = tmp_path / "pick.py"
+    script.write_text(
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('rfs', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "h = m.Harness(4)\n"
+        "for i in range(30):\n"
+        "    h.learn({'input': f'item {i}', 'label': 'a'}, {})\n"
+        "print([t for t, _ in h._examples('some query')])\n", encoding="utf-8")
+    outputs = []
+    for seed in ("1", "2"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONIOENCODING": "utf-8"}
+        done = subprocess.run([sys.executable, str(script), str(ROOT / "random_few_shot.py")],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              env=env, check=True)
+        outputs.append(done.stdout)
+    assert outputs[0] == outputs[1] and outputs[0].count("item") == 4
+
+
 def _fake_embed(calls):
     vectors = {"the cat sat": [1.0, 0.0, 0.0], "a kitten": [0.9, 0.1, 0.0],
                "stock market": [0.0, 1.0, 0.0], "tax law": [0.0, 0.9, 0.1]}
@@ -182,7 +205,7 @@ def test_ace_learn_scores_shown_bullets_and_applies_the_model_delta(trace):
     harness = _playbook(["rule one", "rule two"])
     for bullet in harness.playbook:
         bullet["helpful"] = 1   # one past success each, so a single blame does not prune
-    replies = iter(["shape: look at the shape", "UPDATE 2: rule two sharpened\nADD: rule three"])
+    replies = iter(["shape: look at the shape\nBLAME: 1, 2", "UPDATE 2: rule two sharpened\nADD: rule three"])
     model = lambda prompt, **_: next(replies) if "mistake" in prompt or "curate" in prompt else "vehicle"
     prediction = harness.run(_task(0, "fruit"), model, trace)
     assert prediction == "vehicle"
@@ -192,10 +215,35 @@ def test_ace_learn_scores_shown_bullets_and_applies_the_model_delta(trace):
     assert harness.insights == ["shape: look at the shape"]
 
 
+def test_ace_unblamed_bullets_are_unchanged_and_a_new_bullet_survives(trace):
+    harness = _playbook(["old", "innocent", "new"])
+    harness.playbook[0].update(helpful=1)
+    harness.playbook[1].update(helpful=1)
+    model = lambda prompt, **_: "tag: x\nBLAME: 1\nHELPED: 2" if "mistake" in prompt else "vehicle"
+    harness.run(_task(0, "fruit"), model, trace)
+    harness.learn(_task(0, "fruit"), {"output": "vehicle"}, model)
+    counters = [(b["text"], b["helpful"], b["harmful"]) for b in harness.playbook]
+    assert counters == [("old", 1, 1), ("innocent", 2, 0), ("new", 0, 0)]
+
+
+def test_ace_op_regex_requires_the_colon():
+    harness = _playbook(["a", "b"])
+    assert harness.apply_delta("ADD no colon\nUPDATE 1 no colon\nADD: c") == [("ADD", 3)]
+    assert harness.apply_delta("REMOVE 1") == [("REMOVE", 1)]
+
+
+def test_dense_only_maps_missing_provider_to_the_config_message(trace):
+    def boom(texts, **_):
+        raise ConnectionError("upstream exploded")
+    harness = _load("dense_few_shot", embed_fn=boom)
+    with pytest.raises(ConnectionError, match="upstream exploded"):
+        harness.run({"input": "x", "labels": LABELS}, _answer, trace)
+
+
 def test_ace_learn_drops_a_bullet_that_keeps_misleading(trace):
     harness = _playbook(["bad rule"])
     harness.playbook[0].update(helpful=0, harmful=0)
-    model = lambda prompt, **_: "" if "mistake" in prompt else "vehicle"
+    model = lambda prompt, **_: "BLAME: 1" if "mistake" in prompt else "vehicle"
     harness.run(_task(0, "fruit"), model, trace)
     harness.learn(_task(0, "fruit"), {"output": "vehicle"}, model)
     assert harness.playbook == []
@@ -223,25 +271,65 @@ def test_mce_evolves_skills_from_errors_and_retains_by_usefulness(trace):
 
 # -- sweep --------------------------------------------------------------------------------------
 
-def test_sweep_writes_one_row_per_setting(tmp_path, monkeypatch, capsys):
-    tasks = tmp_path / "tasks.jsonl"
-    tasks.write_text("\n".join(
-        json.dumps({"input": f"item {i}", "label": "fruit" if i % 2 else "vehicle"}) for i in range(12)),
+def _tasks_file(path, count=40):
+    path.write_text("\n".join(
+        json.dumps({"input": f"item {i}", "label": "fruit" if i % 2 else "vehicle"}) for i in range(count)),
         encoding="utf-8")
-    monkeypatch.setattr(sweep_cmd, "model_from_environment", lambda *a, **k: (lambda prompt, **_: "fruit"))
+    return path
+
+
+def _sweep(tmp_path, monkeypatch, *extra, tasks=None):
+    tasks = tasks or _tasks_file(tmp_path / "tasks.jsonl")
+    prompts = []
+
+    def model(prompt, **_):
+        prompts.append(prompt)
+        return "fruit"
+    monkeypatch.setattr(sweep_cmd, "model_from_environment", lambda *a, **k: model)
     monkeypatch.delenv("META_HARNESS_FEW_SHOT_N", raising=False)
     root = tmp_path / "out"
     code = cli.main(["sweep", "--harness", str(ROOT / "few_shot.py"),
                      "--env", "META_HARNESS_FEW_SHOT_N=4,8,16,32,all",
                      "--tasks", str(tasks), "--provider", "unikey", "--model", "m",
-                     "--root", str(root), "--no-cache"])
+                     "--root", str(root), "--no-cache", *extra])
     assert code == 0
-    rows = json.loads((root / "sweep.json").read_text(encoding="utf-8"))["rows"]
+    assert "META_HARNESS_FEW_SHOT_N" not in os.environ
+    return json.loads((root / "sweep.json").read_text(encoding="utf-8")), prompts
+
+
+def test_sweep_writes_one_row_per_setting_and_the_env_reaches_the_harness(tmp_path, monkeypatch):
+    payload, prompts = _sweep(tmp_path, monkeypatch)
+    rows = payload["rows"]
     assert [r["setting"] for r in rows] == ["4", "8", "16", "32", "all"]
     assert all(r["valid"] and r["examples"] > 0 for r in rows)
-    import os
-    assert "META_HARNESS_FEW_SHOT_N" not in os.environ
-    capsys.readouterr()
+    # each setting caps the shots the harness really uses: 40 tasks stream through every setting
+    counts = [p.count("Example:") for p in prompts]
+    assert {4, 8, 16, 32, 39} <= set(counts)
+    per_setting = len(prompts) // 5
+    maxima = [max(counts[i * per_setting:(i + 1) * per_setting]) for i in range(5)]
+    assert maxima == [4, 8, 16, 32, 39]
+    costs = [r["context_cost"] for r in rows]
+    assert costs == sorted(costs) and len(set(costs)) == 5
+
+
+def test_sweep_online_selects_on_validation_and_never_opens_the_test_file(tmp_path, monkeypatch):
+    test_file = tmp_path / "test.jsonl"   # deliberately absent: opening it would raise
+    payload, _ = _sweep(tmp_path, monkeypatch, "--protocol", "online", "--test-tasks", str(test_file))
+    assert payload["selection_split"] == "validation" and not payload["reports_test"]
+    assert all("test" not in r for r in payload["rows"])
+
+
+def test_sweep_plain_never_opens_the_test_file_either(tmp_path, monkeypatch):
+    payload, _ = _sweep(tmp_path, monkeypatch, "--test-tasks", str(tmp_path / "absent.jsonl"))
+    assert payload["selection_split"] == "search" and len(payload["rows"]) == 5
+
+
+def test_sweep_report_test_adds_test_numbers_and_warns(tmp_path, monkeypatch, capsys):
+    test_file = _tasks_file(tmp_path / "test.jsonl", 6)
+    payload, _ = _sweep(tmp_path, monkeypatch, "--protocol", "online", "--report-test",
+                        "--test-tasks", str(test_file))
+    assert payload["reports_test"] and all(r["test"]["examples"] == 6 for r in payload["rows"])
+    assert "selection on the test split" in capsys.readouterr().err
 
 
 def test_sweep_rejects_a_malformed_env_spec():

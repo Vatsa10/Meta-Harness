@@ -56,7 +56,10 @@ class Harness:
             fn = self.embed_fn or embed
             try:
                 vectors = fn(missing, provider=provider, model=model)
-            except Exception as error:  # noqa: BLE001 - any provider failure is a clear config error
+            except Exception as error:  # noqa: BLE001
+                # Only a missing provider/key is a configuration problem; anything else keeps its text.
+                if not (isinstance(error, ValueError) or "is not set" in str(error)):
+                    raise
                 raise RuntimeError(
                     f"dense few-shot needs an embedding provider ({provider}/{model}; set "
                     f"META_HARNESS_EMBED_PROVIDER, META_HARNESS_EMBED_MODEL and the provider API key): "
