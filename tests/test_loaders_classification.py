@@ -108,16 +108,57 @@ def test_val_comes_from_train_not_test(tmp_path, small_pages):
     assert not test_inputs & {r["input"] for r in read_jsonl(paths["train"])}
 
 
-def test_lawbench_label_is_bare_charge(tmp_path):
+def test_lawbench_label_is_bare_charge_and_labels_exclude_test_only(tmp_path):
     paths = lawbench.fetch(tmp_path, http=law_http())
-    labels = {r["label"] for s in paths.values() for r in read_jsonl(paths[s.name[:-6]])} \
-        if False else {r["label"] for p in paths.values() for r in read_jsonl(p)}
+    rows = {s: read_jsonl(p) for s, p in paths.items()}
     raw = _load("lawbench_3-3.json")
-    assert labels == {r["answer"].split(":", 1)[1] for r in raw}
-    assert all(":" not in label for label in labels)
-    row = read_jsonl(paths["train"])[0]
-    assert row["labels"] == sorted(labels) and not row["input"].endswith("\n")
-    assert lawbench.normalise_answer("\u7f6a\u540d:\u76d7\u7a83") == "\u76d7\u7a83"
+    all_labels = {r["answer"].split(":", 1)[1] for r in raw}
+    seen = {r["label"] for p in paths.values() for r in read_jsonl(p)}
+    assert seen == all_labels and all(":" not in label for label in seen)
+    trained = {r["label"] for r in rows["train"] + rows["val"]}
+    for row in rows["train"] + rows["val"] + rows["test"]:
+        assert row["labels"] == sorted(trained)
+    assert {r["label"] for r in rows["test"]} - trained  # fixture has test-only labels
+    assert lawbench.normalise_answer("罪名:盗窃") == "盗窃"
+
+
+def test_lawbench_limit_and_parameter_keyed_cache(tmp_path):
+    http = law_http()
+    paths = lawbench.fetch(tmp_path, http=http, limit=3)
+    assert sum(len(read_jsonl(p)) for p in paths.values()) == 3
+    lawbench.fetch(tmp_path, http=http, limit=3)
+    assert len(http.calls) == 1
+    lawbench.fetch(tmp_path, http=http, limit=None, test_fraction=0.4)
+    assert len(http.calls) == 2
+
+
+def test_seed_change_resplits_same_dir(tmp_path, small_pages):
+    http = s2d_http()
+    a = symptom2disease.fetch(tmp_path, http=http, seed=0)
+    first = read_jsonl(a["val"])
+    n = len(http.calls)
+    b = symptom2disease.fetch(tmp_path, http=http, seed=1)
+    assert len(http.calls) > n and read_jsonl(b["val"]) != first
+    assert json.loads((tmp_path / "meta.json").read_text(encoding="utf-8"))["seed"] == 1
+
+
+def test_default_limit_bounds_http_calls(tmp_path):
+    import inspect
+    assert inspect.signature(symptom2disease.fetch).parameters["limit"].default == 200
+    served = []
+
+    def http(url):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        off, length = int(q["offset"][0]), int(q["length"][0])
+        served.append((q["split"][0], off, length))
+        rows = [{"row_idx": i, "row": {"input_text": f"t{q['split'][0]}{i}", "output_text": f"d{i % 3}"}}
+                for i in range(off, off + length)]
+        return json.dumps({"rows": rows, "num_rows_total": 5000}).encode("utf-8")
+
+    paths = symptom2disease.fetch(tmp_path, http=http)
+    assert len(served) == 4  # 2 pages of 100 per split, never the 5000
+    assert sum(len(read_jsonl(p)) for k, p in paths.items() if k != "test") == 200
+    assert len(read_jsonl(paths["test"])) == 200
 
 
 def test_uspto_uses_validation_as_test_and_numeric_labels(tmp_path, small_pages):
@@ -125,7 +166,9 @@ def test_uspto_uses_validation_as_test_and_numeric_labels(tmp_path, small_pages)
     test = read_jsonl(paths["test"])
     served = _load("uspto_validation_p0.json")["rows"]
     assert [r["input"] for r in test] == [r["row"]["prod_smiles"] for r in served]
-    assert test[0]["labels"] == ["1", "2", "3", "6", "7", "9"]
+    train_classes = {str(r["row"]["class"]) for r in _load("uspto_train_p0.json")["rows"]}
+    assert test[0]["labels"] == sorted(train_classes, key=int) == ["1", "2", "3", "6", "7", "9"]
+    assert all(r["label"] in {"1", "5", "6"} for r in test)
 
 
 def test_fetch_command_unknown_loader_exits_2(capsys):
@@ -137,14 +180,18 @@ def test_fetch_command_unknown_loader_exits_2(capsys):
 def test_fetch_command_prints_split_paths(monkeypatch, tmp_path, capsys):
     seen = {}
 
-    def stub(cache_dir):
+    def stub(cache_dir, **kwargs):
         seen["dir"] = cache_dir
+        seen["kwargs"] = kwargs
         return {"train": cache_dir / "train.jsonl"}
 
     monkeypatch.setattr(symptom2disease, "fetch", stub)
     assert cli.main(["fetch", "symptom2disease", "--dir", str(tmp_path)]) == 0
-    assert seen["dir"] == tmp_path / "symptom2disease"
-    assert json.loads(capsys.readouterr().out) == {"train": str(tmp_path / "symptom2disease" / "train.jsonl")}
+    first_out = capsys.readouterr().out
+    assert seen["dir"] == tmp_path / "symptom2disease" and seen["kwargs"] == {}
+    assert cli.main(["fetch", "symptom2disease", "--dir", str(tmp_path), "--full"]) == 0
+    assert seen["kwargs"] == {"limit": None}
+    assert json.loads(first_out) == {"train": str(tmp_path / "symptom2disease" / "train.jsonl")}
 
 
 def test_classification_domain_contract():
