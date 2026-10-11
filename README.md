@@ -1,6 +1,6 @@
 # Meta-Harness
 
-A standalone, stdlib-only implementation of *Meta-Harness: End-to-End Optimization of Model
+A standalone implementation, with no runtime dependencies (stdlib only), of *Meta-Harness: End-to-End Optimization of Model
 Harnesses* (arXiv 2603.28052).
 
 ## What it is
@@ -17,11 +17,13 @@ held-out split the proposer never sees, plus an auditable record of every candid
 
 ## How it differs
 
-| | Prompt optimizers (DSPy, GEPA, TextGrad) | Score-only evolvers (OpenEvolve / AlphaEvolve-style) | Meta-Harness |
+Numbers from paper Table 1:
+
+| | Prompt optimizers (OPRO, TextGrad, GEPA) | Score-guided evolvers (AlphaEvolve, TTT-Discover) | Meta-Harness |
 |---|---|---|---|
 | What is optimized | prompt text / instructions | programs | the whole harness program (retrieval, memory, parsing, prompts) |
-| What the optimizer sees | last artifact + textual feedback or summaries | a window of programs + scores | **all** prior code, scores and raw traces, on a filesystem it navigates with tools |
-| History per iteration (paper Table 1) | 0.002-0.015 MTok | 0.022-0.026 MTok | up to 10 MTok |
+| What the optimizer sees | last artifact + textual feedback or summaries | a window of programs or solution fragments + scores | **all** prior code, scores and raw traces, on a filesystem it navigates with tools |
+| History per iteration | 0.002-0.015 MTok | 0.022-0.026 MTok | up to 10 MTok |
 
 Paper Table 3 (online text classification, accuracy %; > ZS = runs above zero-shot):
 
@@ -31,7 +33,11 @@ Paper Table 3 (online text classification, accuracy %; > ZS = runs above zero-sh
 | Scores + summary | yes | yes | yes | no | 34.9 | 38.7 | 23 |
 | Meta-Harness (full) | yes | yes | - | yes | 50.0 | 56.7 | 39 |
 
-These are the paper's numbers, not ours. Ours are under [Results](#results).
+`--view scores` still shows candidate source, as in the paper's ablation. These are the paper's
+numbers, not ours. Ours are under [Results](#results).
+
+Related work: DSPy (prompt-program optimization) and OpenEvolve (open AlphaEvolve-style
+evolution) are close relatives; `--optimizer openevolve` is a style re-implementation.
 
 Differences from the paper's own setup:
 
@@ -209,7 +215,7 @@ meta-harness experience diff-runs .meta-harness-example .mh-bon
 |---|---|---|---|
 | `classification` | `symptom2disease` (HF `gretelai/symptom_to_diagnosis`), `lawbench` (open-compass LawBench task 3-3), `uspto50k` (HF `pingzhili/uspto-50k`); OOD: scicite, finer139, amazon5, fpb, goemotions, banking77, agnews, scitail, tweet_hate | online: train stream feeds `learn`, frozen copies scored on search/test | **USPTO-50k is 10-way** (the public copy has no 180-way label); **LawBench has 275 labels** (closest public copy, not the paper's 215) |
 | `math` | `math_corpus` (8 sources, Table 10), `math_search` (OlympiadBench + Omni-MATH hard), `imo` (IMO-AnswerBench, IMO-ProofBench, ArXivMath) | plain, BM25 retrieval over the decontaminated corpus | **Omni-MATH** keeps all rows (about 4,428), not the paper's 933; **ProofBench**: only the 27 rows with a short answer are graded (proof grading needs a judge), so the full test set has fewer than 200 gradable items |
-| `terminal` | `terminalbench` from a local TerminalBench-2 checkout (`META_HARNESS_TB_DIR`) | search = test (as in the paper); each task in its own Docker container, tests copied in only at scoring time | the container is restarted before scoring and scorer binaries are checked with `docker diff`; modifications outside the checked set remain a **residual reward-forging risk**; TB containers keep resource limits and `no-new-privileges` but not `--cap-drop ALL` |
+| `terminal` | `terminalbench` from a local TerminalBench-2 checkout (`META_HARNESS_TB_DIR`) | search = test (as in the paper); each task in its own Docker container, tests copied in only at scoring time | the container is restarted before scoring and scorer binaries are checked with `docker diff` (fixed list of scorer binaries); modifications outside the checked set remain a **residual reward-forging risk**; TB containers keep resource limits and `no-new-privileges` but not `--cap-drop ALL` |
 
 Seeds per domain are in [baselines/](baselines/README.md).
 
@@ -277,9 +283,9 @@ Not implemented:
 ## Credits
 
 - The method: Meta-Harness, arXiv 2603.28052.
-- Designs re-implemented in stdlib Python (designs only, no code copied): soketlabs/loop and
-  truefoundry/trueforge (proposer loop, tool output bounds, provider layer, benchmark runner,
-  Terminus-style seeds), rivet-dev/rivet (resumable runs, sandbox protocol), keel (candidate
+- Designs re-implemented in stdlib Python (designs only, no code copied): [soketlabs/loop](https://github.com/soketlabs/loop) and
+  [truefoundry/trueforge](https://github.com/truefoundry/trueforge) (proposer loop, tool output bounds, provider layer, benchmark runner,
+  Terminus-style seeds), [rivet-dev/rivet](https://github.com/rivet-dev/rivet) (resumable runs, sandbox protocol), keel (MIT; candidate
   receipts, crash repair, retries, redaction, read window), and *An Empirical Study of Harness
   Design for Coding Agents* (arXiv:2609.20804: paired McNemar + Benjamini-Hochberg, stuck
   detection, staged compaction, stop-reason histograms, phase labels).
