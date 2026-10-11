@@ -32,6 +32,8 @@ def bh(pvals: Sequence[float], q: float = 0.05) -> tuple[list[float], list[bool]
     Hypothesis i is significant when its adjusted q-value is <= q, which is the same set as
     p_(k) <= k * q / m for the largest passing rank k.
     """
+    if any(not 0.0 <= p <= 1.0 for p in pvals):   # NaN fails both comparisons
+        raise ValueError("p-values must lie in [0, 1]")
     m = len(pvals)
     order = sorted(range(m), key=lambda i: pvals[i])
     adjusted = [0.0] * m

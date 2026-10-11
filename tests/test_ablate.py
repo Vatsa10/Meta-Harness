@@ -17,26 +17,29 @@ CANNED = {"scores": [(0.1, 0.1), (0.2, 0.2), (0.9, 0.9)],
 SEED = 0.25
 
 
-def write_trace(path: Path, rewards):
+def write_trace(path: Path, rewards, ids="t"):
     lines = []
     for i, reward in enumerate(rewards):
-        lines.append({"event": "task_start", "payload": {"index": i}})
+        lines.append({"event": "task_start", "payload": {"index": i, "task": {"id": f"{ids}{i}", "input": "x"}}})
         lines.append({"event": "model_call", "payload": {"tokens": 1000, "usage": {"completion_tokens": 500}}})
         lines.append({"event": "task_end", "payload": {"index": i, "reward": reward, "stop_reason": "done"}})
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
 
 
-def fake_search(calls):
+def fake_search(calls, ids="t", fail=()):
     counters = {}
 
     def search(argv):
         calls.append(list(argv))
+        if len(calls) - 1 in fail:
+            return 3
         view, root = argv[argv.index("--view") + 1], Path(argv[argv.index("--root") + 1])
         i = counters[view] = counters.get(view, -1) + 1
         search_best, test_best = CANNED[view][i]
         root.mkdir(parents=True, exist_ok=True)
-        (root / "frontier.json").write_text(json.dumps([{"candidate_id": "c", "score": search_best}]), encoding="utf-8")
+        (root / "frontier.json").write_text(json.dumps([{"candidate_id": "c", "score": search_best, "context_cost": 5},
+                                                {"candidate_id": "decoy", "score": search_best - 0.05, "context_cost": 1}]), encoding="utf-8")
         seed = root / "candidates" / "initial-0000"
         seed.mkdir(parents=True)
         (seed / "scores.json").write_text(json.dumps({"score": SEED}), encoding="utf-8")
@@ -45,9 +48,9 @@ def fake_search(calls):
         metrics = {"ended_without_writing_code_rate": 0.5} if view == "full" else {}
         (test / "test_results.json").write_text(json.dumps({"results": [
             {"candidate_id": "c", "score": test_best, "metrics": metrics},
-            {"candidate_id": "worse", "score": test_best / 2, "metrics": {}}]}), encoding="utf-8")
+            {"candidate_id": "decoy", "score": test_best + 0.05, "metrics": {}}]}), encoding="utf-8")
         # "full" passes every task, the others pass the first 4 of 10: a clear paired difference
-        write_trace(test / "traces" / "c.jsonl", [1.0] * 10 if view == "full" else [1.0] * 4 + [0.0] * 6)
+        write_trace(test / "traces" / "c.jsonl", ([1.0] * 10 if view == "full" else [1.0] * 4 + [0.0] * 6), ids)
         return 0
     return search
 
@@ -71,9 +74,9 @@ def test_paired_stats_cost_and_phase_rate_in_report(tmp_path):
     argv = ["--model", "m", "--price", "scripted:m=1000000,1000000"]
     report = run_ablation(argv, ["scores", "full"], 3, tmp_path / "ab", fake_search([]))
     full = report["views"]["full"]
-    assert full["vs_baseline"]["wins"] == 18 and full["vs_baseline"]["losses"] == 0
-    assert full["vs_baseline"]["ties"] == 12
-    assert full["vs_baseline"]["p"] == pytest.approx(mcnemar_exact(0, 18))
+    assert full["vs_baseline"]["wins"] == 6 and full["vs_baseline"]["losses"] == 0
+    assert full["vs_baseline"]["ties"] == 4
+    assert full["vs_baseline"]["p"] == pytest.approx(mcnemar_exact(0, 6))
     assert full["vs_baseline"]["significant"] is True
     assert "vs_baseline" not in report["views"]["scores"]
     assert full["ended_without_writing_code_rate"] == 0.5
@@ -137,3 +140,59 @@ def test_compare_counts_pairs_by_key():
     arm = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 0.0, "extra": 1.0}
     got = compare(base, {"x": arm})["x"]
     assert (got["wins"], got["losses"], got["ties"]) == (2, 1, 1)
+
+
+def test_test_score_is_the_search_selected_candidates_not_the_max_over_test(tmp_path):
+    report = run_ablation([], ["scores"], 3, tmp_path / "ab", fake_search([]))
+    # the decoy has the higher test score in every run but the lower search score
+    assert report["views"]["scores"]["test_best"] == [0.1, 0.2, 0.9]
+    assert report["views"]["scores"]["best_test"] == 0.9
+
+
+def test_one_pair_per_task_and_mismatched_split_is_refused(tmp_path):
+    report = run_ablation([], ["scores", "full"], 3, tmp_path / "a", fake_search([]))
+    c = report["views"]["full"]["vs_baseline"]
+    assert c["wins"] + c["losses"] + c["ties"] == 10   # 10 tasks x 3 runs collapse to 10 pairs
+    inner = fake_search([])
+
+    def shifted(argv):
+        code = inner(argv)
+        if "full" in argv:
+            root = Path(argv[argv.index("--root") + 1])
+            write_trace(root.with_name(root.name + "-test") / "traces" / "c.jsonl", [1.0] * 10, "other")
+        return code
+    with pytest.raises(ValueError, match="different tasks"):
+        run_ablation([], ["scores", "full"], 1, tmp_path / "b", shifted)
+
+
+def test_failed_runs_fail_the_command_and_are_not_counted(tmp_path, capsys):
+    report = run_ablation([], ["scores"], 3, tmp_path / "ab", fake_search([], fail={1}))
+    assert report["views"]["scores"]["runs"] == 2
+    assert report["failed"] == [{"view": "scores", "run": 1, "exit_code": 3}]
+    import argparse
+    from meta_harness.commands import ablate as cmd
+    parser = argparse.ArgumentParser()
+    cmd.add_arguments(parser)
+    args = parser.parse_args(["--views", "scores", "--runs", "2", "--root", str(tmp_path / "cli")])
+    assert cmd.run(args, search=fake_search([], fail={0})) == 1
+    assert "failed: view scores run 0" in capsys.readouterr().out
+
+
+def test_non_empty_root_refused_and_data_sampled_deterministically(tmp_path):
+    (tmp_path / "ab").mkdir()
+    (tmp_path / "ab" / "old").write_text("x", encoding="utf-8")
+    with pytest.raises(ValueError, match="not empty"):
+        run_ablation([], ["scores"], 1, tmp_path / "ab", fake_search([]))
+    from meta_harness.ablate import cap_tasks
+    data = tmp_path / "d.jsonl"
+    data.write_text("\n".join(json.dumps({"input": str(i)}) for i in range(50)), encoding="utf-8")
+    a = cap_tasks(["--data", str(data)], 20, tmp_path / "r1")
+    b = cap_tasks(["--data", str(data)], 20, tmp_path / "r2")
+    ra, rb = Path(a[1]).read_text(encoding="utf-8"), Path(b[1]).read_text(encoding="utf-8")
+    assert ra == rb and len(ra.splitlines()) == 20
+
+
+def test_bh_rejects_invalid_p_values():
+    for bad in ([float("nan")], [1.5], [-0.1]):
+        with pytest.raises(ValueError):
+            bh(bad)
