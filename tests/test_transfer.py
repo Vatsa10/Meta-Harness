@@ -136,3 +136,20 @@ def test_duplicate_harness_stems_rejected(tmp_path):
     a, b = harness(tmp_path / "x" / "h.py", ECHO), harness(tmp_path / "y" / "h.py", FLIP)
     with pytest.raises(ValueError, match="unique"):
         transfer([a, b], TASKS, [], exact, tmp_path / "out")
+
+
+def test_cache_convention_is_respected(tmp_path):
+    from meta_harness.providers import Price
+    from meta_harness.transfer import task_outcomes
+
+    def cost(includes):
+        usage = {"cache_read": 400, "input_includes_cache": includes}
+        events = [{"event": "task_start", "payload": {"index": 0}},
+                  {"event": "model_call", "payload": {"tokens": 1000, "usage": usage}},
+                  {"event": "task_end", "payload": {"reward": 1.0}}]
+        trace = tmp_path / f"t{includes}.jsonl"
+        trace.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+        return task_outcomes(trace, Price(1000000.0, 0.0, cache_read=100000.0))[0]["cost_usd"]
+
+    assert cost(False) == 1000 + 40   # input 1000 uncached + 400 cache reads at 0.1x
+    assert cost(True) == 600 + 40     # 400 of the 1000 are cached: billed once, at the cache rate

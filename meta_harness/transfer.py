@@ -54,19 +54,24 @@ def task_outcomes(trace_path: Path, price: Price | None) -> list[dict[str, Any]]
         event, payload = record.get("event"), record.get("payload") or {}
         if event == "task_start":
             current = {"task": payload.get("index"), "prompt_tokens": 0, "completion_tokens": 0,
-                       "cache_read_tokens": 0, "cache_write_tokens": 0}
+                       "cache_read_tokens": 0, "cache_write_tokens": 0,
+                       "includes_cache": False}
         elif event == "model_call" and current is not None:
             usage = payload.get("usage") or {}
             current["prompt_tokens"] += int(payload.get("tokens") or 0)
             current["completion_tokens"] += int(usage.get("completion_tokens") or usage.get("output") or 0)
             current["cache_read_tokens"] += int(usage.get("cache_read") or 0)
             current["cache_write_tokens"] += int(usage.get("cache_write") or 0)
+            # OpenAI convention (prompt tokens already contain cached ones) when the model's
+            # usage dict says so; otherwise additive, as Anthropic reports.
+            current["includes_cache"] = current["includes_cache"] or bool(usage.get("input_includes_cache"))
         elif event == "task_end" and current is not None:
             current["reward"] = float(payload.get("reward") or 0.0)
             current["stop_reason"] = payload.get("stop_reason")
             current["cost_usd"] = cost_usd(
                 Usage(input=current["prompt_tokens"], output=current["completion_tokens"],
-                      cache_read=current["cache_read_tokens"], cache_write=current["cache_write_tokens"]),
+                      cache_read=current["cache_read_tokens"], cache_write=current["cache_write_tokens"],
+                      input_includes_cache=current.pop("includes_cache")),
                 price)
             outcomes.append(current)
             current = None
