@@ -31,7 +31,8 @@ class ScriptedModel:
                                                     sequential; consumed once, in file order
       {"default": "..."}                             used by call() when nothing else applies
       {"error": {"status": 429, "message": "..."}}   sequential; raised as ProviderError(.status)
-      {"stop_reason": "length", "text": "..."}       sequential; simulates truncation
+      {"stop_reason": "length", "text": "..."}       sequential; simulates truncation in chat();
+                                                    call() treats it as plain text
     usage is estimated as estimate_tokens(prompt) / estimate_tokens(text).
     """
 
@@ -41,10 +42,17 @@ class ScriptedModel:
         self._matches: list[tuple[re.Pattern[str], dict[str, Any]]] = []
         self._sequence: list[dict[str, Any]] = []
         self._default: str | None = None
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        for number, line in enumerate(self.path.read_text(encoding="utf-8").splitlines(), start=1):
             if not line.strip():
                 continue
-            entry = json.loads(line)
+            try:
+                entry = json.loads(line)
+                if not isinstance(entry, dict):
+                    raise ValueError("entry is not a JSON object")
+                if "match" in entry:
+                    re.compile(entry["match"])
+            except (ValueError, re.error) as exc:
+                raise ValueError(f"{self.path}: line {number}: malformed script entry: {exc}") from exc
             if "match" in entry:
                 self._matches.append((re.compile(entry["match"]), entry))
             elif "default" in entry:
