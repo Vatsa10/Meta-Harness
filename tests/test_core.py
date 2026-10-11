@@ -49,7 +49,8 @@ def test_math_router_and_retrieval(tmp_path: Path):
 
 def test_terminal_agent_is_bounded(tmp_path: Path):
     responses = iter(['{"command":"echo ready","done":false}', '{"done":true,"answer":"finished"}'])
-    agent = TerminalAgent(lambda prompt: next(responses), ShellPolicy(max_steps=3, timeout_seconds=2))
+    agent = TerminalAgent(lambda prompt: next(responses), ShellPolicy(max_steps=3, timeout_seconds=2),
+                          allow_local_shell=True)
     with TraceRecorder(tmp_path / "terminal.jsonl") as trace:
         result = agent.run({"instruction": "prepare"}, trace)
     assert result.completed is True

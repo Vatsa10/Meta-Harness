@@ -10,7 +10,7 @@ from meta_harness.sandbox import validate_in_subprocess
 ROOT = Path(__file__).resolve().parent.parent / "baselines"
 CLASSIFICATION = ["classification/zero_shot", "classification/few_shot",
                   "classification/random_few_shot", "classification/ace", "classification/mce"]
-BASELINES = CLASSIFICATION + ["math/zero_shot", "math/bm25", "terminal/basic"]
+BASELINES = CLASSIFICATION + ["math/zero_shot", "math/bm25", "terminal/terminus2", "terminal/terminus_kira"]
 
 
 def _load(name: str):

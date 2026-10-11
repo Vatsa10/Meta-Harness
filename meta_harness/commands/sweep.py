@@ -12,7 +12,7 @@ from ..core import CandidateEvaluator, atomic_write
 from ..datasets import read_records, split_tasks
 from ..protocol import BUILTIN_METRICS
 from ..providers import model_from_environment
-from .run import ADAPTERS, METRIC_FOR
+from ..domains import adapter_for, metric_for
 
 NAME = "sweep"
 HELP = "evaluate a harness at each value of an environment variable (no proposer)"
@@ -69,7 +69,7 @@ def _score(model, metric, harness, key, value, args, train, scored, directory) -
 
 def run(args) -> int:
     key, values = parse_env(args.env)
-    adapt = ADAPTERS[args.task_type]
+    adapt = adapter_for(args.task_type)
     # The held-out file is opened only when the caller explicitly asks to report test numbers.
     pool = adapt(read_records(args.tasks))
     test: list = []
@@ -93,7 +93,7 @@ def run(args) -> int:
     cache_dir = Path(args.cache_dir) if args.cache_dir else root.parent / ".meta-harness-cache"
     model = CachedModel(model_from_environment(args.provider, args.model), cache_dir,
                         enabled=not args.no_cache)
-    metric = BUILTIN_METRICS[args.metric] if args.metric else METRIC_FOR[args.task_type]
+    metric = BUILTIN_METRICS[args.metric] if args.metric else metric_for(args.task_type)
     rows = []
     previous = os.environ.get(key)
     try:

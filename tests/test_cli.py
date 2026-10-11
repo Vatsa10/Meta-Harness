@@ -49,7 +49,9 @@ def test_help_lists_search_not_run(capsys):
     with pytest.raises(SystemExit):
         cli.main(["--help"])
     out = capsys.readouterr().out
-    assert "search" in out and "{demo,inspect,models,search}" in out.replace(" ", "")
+    import re
+    choices = re.search(r"\{([a-z_,-]+)\}", out.replace(" ", "")).group(1).split(",")
+    assert "search" in choices and "run" not in choices
 
 
 def test_models_subcommand_uses_list_models(monkeypatch, capsys):
