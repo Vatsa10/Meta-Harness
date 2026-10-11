@@ -39,20 +39,26 @@ def item(ident, problem):
 
 def test_removes_exact_prefix_and_near_duplicate_keeps_unrelated():
     near = LONG.replace("exactly eight", "exactly seven")
-    prefix = LONG[:80] + " a completely different ending that shares only the opening."
+    words = LONG.split()
+    prefix = " ".join(words[:45] + ["zeta"] * 20)  # same opening, tail rewritten: Jaccard in [0.5, 0.8)
     corpus = [item("exact", LONG), item("near", near), item("prefix", prefix),
               item("other", "Compute the area of a triangle with sides three, four and five units.")]
     assert decontam.jaccard(decontam.shingles(LONG), decontam.shingles(near)) >= 0.8
     kept, removed = decontam.decontaminate(corpus, [LONG])
+    assert 0.5 <= decontam.jaccard(decontam.shingles(LONG), decontam.shingles(prefix)) < 0.8
     assert [r["id"] for r in removed] == ["exact", "near", "prefix"]
     assert [k["id"] for k in kept] == ["other"]
 
 
-def test_prefix_only_match_is_removed_without_jaccard():
-    held = "Show that for every positive integer n the number n^3 - n is divisible by six always."
-    corpus = [item("p", held[:70] + " zzz yyy xxx www vvv uuu ttt sss rrr qqq")]
-    kept, removed = decontam.decontaminate(corpus, [held], threshold=1.1)
-    assert [r["id"] for r in removed] == ["p"] and not kept
+def test_stock_opening_alone_does_not_remove_distinct_problems():
+    held = ("Find all functions f from the reals to the reals such that f(x + y) = f(x) + f(y) for all real numbers x and y and "
+            "f is continuous on the whole real line.")
+    other = ("Find all functions f from the reals to the reals such that f(f(n)) = n + 2 for every positive integer n, where the "
+             "domain is the positive integers and the values are integers.")
+    assert decontam.normalise(held)[:60] == decontam.normalise(other)[:60]
+    kept, removed = decontam.decontaminate([item("d", other)], [held])
+    assert [k["id"] for k in kept] == ["d"] and not removed
+    assert [k["id"] for k in decontam.dedup([item("a", held), item("d", other)])] == ["a", "d"]
 
 
 def test_whitespace_and_latex_variants_still_match():
@@ -83,7 +89,7 @@ def test_inverted_index_matches_brute_force_reference():
         a = decontam.normalise(problem)
         for h in held:
             b = decontam.normalise(h)
-            if a[:60] == b[:60] and (len(a) >= 60 and len(b) >= 60 or a == b):
+            if a[:60] == b[:60] and (len(a) >= 60 and len(b) >= 60 or a == b) and                     decontam.jaccard(decontam.shingles(problem), decontam.shingles(h)) >= 0.5:
                 return True
             if decontam.jaccard(decontam.shingles(problem), decontam.shingles(h)) >= 0.8:
                 return True
@@ -131,18 +137,18 @@ def test_corpus_loader_limit_and_cache(tmp_path):
 
 
 def test_search_loader_maps_problem_answer_and_hard_filter(tmp_path):
-    rows = read_jsonl(math_search.fetch(tmp_path, fake_http, size=250, seed=0)["search"])
+    rows = read_jsonl(math_search.fetch(tmp_path, fake_http, size=250, seed=0, limit=None)["search"])
     assert all(set(r) == {"problem", "answer"} for r in rows)
     problems = {r["problem"]: r["answer"] for r in rows}
     assert problems[LONG] == "1234"                                   # list answer, $ stripped
     assert not any(p.startswith("Problem 8") for p in problems)       # easy Omni row excluded
     assert len(rows) == 3
-    small = read_jsonl(math_search.fetch(tmp_path / "s", fake_http, size=2, seed=1)["search"])
+    small = read_jsonl(math_search.fetch(tmp_path / "s", fake_http, size=2, seed=1, limit=None)["search"])
     assert len(small) == 2
 
 
 def test_imo_loader_answer_gradable_and_skipped(tmp_path):
-    paths = imo.fetch(tmp_path, fake_http)
+    paths = imo.fetch(tmp_path, fake_http, limit=None)
     rows = read_jsonl(paths["test"])
     assert all(set(r) == {"problem", "answer"} for r in rows)
     assert len(rows) == 10
@@ -177,3 +183,42 @@ def test_build_writes_clean_corpus_without_any_held_out_problem(tmp_path):
 def test_command_is_registered():
     from meta_harness.commands import all_commands
     assert "math-corpus" in all_commands()
+
+
+def test_small_run_defaults(tmp_path):
+    big = dict(HF)
+    big["Hothan/OlympiadBench"] = [{"question": f"Olympiad question number {i} about sums", "final_answer": [str(i)]}
+                                   for i in range(60)]
+    big["MathArena/arxivmath-1225"] = [{"problem_idx": i, "problem": f"arxiv december problem {i}", "answer": "1"}
+                                       for i in range(17)]
+    big["MathArena/arxivmath-0126"] = [{"problem_idx": i, "problem": f"arxiv january problem {i}", "answer": "1"}
+                                       for i in range(23)]
+    csv_big = dict(CSV)
+    csv_big["answerbench.csv"] = "Problem ID,Problem,Short Answer,Category\r\n" + "".join(
+        f"ab{i},Answer problem {i},{i},C{i % 3}\r\n" for i in range(100))
+
+    def http(url):
+        if url.endswith(".csv"):
+            return csv_big[url.rsplit("/", 1)[1]].encode("utf-8")
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        rows = big[query["dataset"][0]]
+        offset, length = int(query["offset"][0]), int(query["length"][0])
+        return json.dumps({"rows": [{"row": r} for r in rows[offset:offset + length]],
+                           "num_rows_total": len(rows)}).encode("utf-8")
+
+    assert len(read_jsonl(math_search.fetch(tmp_path / "s", http)["search"])) <= 20
+    assert len(read_jsonl(imo.fetch(tmp_path / "i", http)["test"])) <= 20
+    full = read_jsonl(imo.fetch(tmp_path / "f", http, limit=None)["test"])
+    assert len(full) > 20
+    assert command.SMALL_LIMIT <= 200
+    import argparse
+    parser = argparse.ArgumentParser()
+    command.add_arguments(parser)
+    args = parser.parse_args(["build"])
+    assert args.limit_per_source == command.SMALL_LIMIT and args.full is False
+    assert parser.parse_args(["build", "--full"]).full is True
+
+
+def test_putnam_and_arxivmath_pins():
+    assert math_corpus.SOURCES["Putnam-AXIOM"] == "kaifronsdal/Putnam-AXIOM"
+    assert set(imo.ARXIVMATH.values()) == {"MathArena/arxivmath-1225", "MathArena/arxivmath-0126"}

@@ -81,7 +81,7 @@
    "Answer": 7
   }
  ],
- "Putnam-AXIOM/putnam-axiom-original": [
+ "kaifronsdal/Putnam-AXIOM": [
   {
    "problem": "Problem 11: find the smallest integer k such that k times 11 plus 77 is a perfect square number.",
    "solution": "put sol"
@@ -101,14 +101,14 @@
    ]
   }
  ],
- "MathArena/arxivmath-2512": [
+ "MathArena/arxivmath-1225": [
   {
    "problem_idx": 1,
    "problem": "  FIND   ALL primes $P$ for which $P^2 + 2$ is also prime, and PROVE that no other prime works at all.",
    "answer": "3"
   }
  ],
- "MathArena/arxivmath-2601": [
+ "MathArena/arxivmath-0126": [
   {
    "problem_idx": 1,
    "problem": "Evaluate the integral of x squared from zero to three over the reals.",

@@ -42,7 +42,11 @@ def _omni(row: dict) -> dict | None:
     return {"problem": problem, "answer": answer} if hard and problem and answer else None
 
 
-def fetch(cache_dir, http=urllib_get, size: int = 250, seed: int = 0) -> dict[str, Path]:
+def fetch(cache_dir, http=urllib_get, size: int = 250, seed: int = 0,
+          limit: int | None = 20) -> dict[str, Path]:
+    """`limit` (default 20, the small-run cap) bounds the set at min(size, limit); None = full size."""
+    if limit is not None:
+        size = min(size, limit)
     cache = Path(cache_dir)
     path, meta = cache / "search.jsonl", cache / "search.meta.json"
     want = {"size": size, "seed": seed}

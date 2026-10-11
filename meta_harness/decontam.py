@@ -53,28 +53,30 @@ def _prefix(normalised: str, prefix_chars: int) -> str | None:
 class _Index:
     """Inverted shingle index plus a prefix table over a growing set of reference problems."""
 
-    def __init__(self, prefix_chars: int, threshold: float):
+    def __init__(self, prefix_chars: int, threshold: float, prefix_min_jaccard: float = 0.5):
         self.prefix_chars = prefix_chars
         self.threshold = threshold
-        self.prefixes: set[str] = set()
+        self.prefix_min_jaccard = prefix_min_jaccard
+        self.prefixes: dict[str, list[int]] = {}
         self.postings: dict[str, list[int]] = {}
         self.sets: list[set[str]] = []
 
     def add(self, text: str) -> None:
         key = _prefix(normalise(text), self.prefix_chars)
-        if key is not None:
-            self.prefixes.add(key)
         members = shingles(text)
         number = len(self.sets)
+        if key is not None:
+            self.prefixes.setdefault(key, []).append(number)
         self.sets.append(members)
         for shingle in members:
             self.postings.setdefault(shingle, []).append(number)
 
     def matches(self, text: str) -> bool:
         key = _prefix(normalise(text), self.prefix_chars)
-        if key is not None and key in self.prefixes:
-            return True
         members = shingles(text)
+        if key is not None and any(jaccard(members, self.sets[number]) >= self.prefix_min_jaccard
+                                   for number in self.prefixes.get(key, ())):
+            return True
         candidates: set[int] = set()
         for shingle in members:
             candidates.update(self.postings.get(shingle, ()))
@@ -84,7 +86,9 @@ class _Index:
 def decontaminate(corpus: Iterable[dict], held_out: Sequence[str], prefix_chars: int = 60,
                   threshold: float = 0.8) -> tuple[list[dict], list[dict]]:
     """Drop a corpus item when its normalised problem shares the first `prefix_chars` with any
-    held-out problem, or its shingle Jaccard with any held-out problem is >= threshold.
+    held-out problem AND overlaps it by shingle Jaccard >= 0.5 (so a stock opening such as
+    "Find all functions f such that" does not wipe distinct problems), or its shingle Jaccard
+    with any held-out problem is >= threshold.
     Candidate pairs come from an inverted shingle index (no O(N*M) scan).
     Returns (kept, removed) and the caller writes removed ids to decontam_report.json."""
     index = _Index(prefix_chars, threshold)
@@ -97,9 +101,10 @@ def decontaminate(corpus: Iterable[dict], held_out: Sequence[str], prefix_chars:
     return kept, removed
 
 
-def dedup(corpus: Iterable[dict], threshold: float = 0.8, prefix_chars: int = 60) -> list[dict]:
-    """Same test, within the corpus: the first of any near-duplicate group is kept."""
-    index = _Index(prefix_chars, threshold)
+def dedup(corpus: Iterable[dict], threshold: float = 0.8) -> list[dict]:
+    """Within the corpus: the first of any group with shingle Jaccard >= threshold is kept.
+    No prefix test here: shared openings between distinct problems are common."""
+    index = _Index(0, threshold)
     kept: list[dict] = []
     for item in corpus:
         problem = str(item.get("problem", ""))

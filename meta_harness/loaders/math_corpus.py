@@ -4,11 +4,13 @@ Table 10 (problems in the final corpus; 535,356 in total):
     OpenMathReasoning 281,743 | DeepMath-103K 103,021 | NuminaMath-1.5 129,520 | PolyMath 11,083
     Omni-MATH 933 | FineProofs-SFT 4,289 | AIME 1983-2024 4,275 | Putnam-AXIOM 492
 The table text in paper.pdf extracts out of column order; the Omni-MATH (933) and Putnam (492)
-counts are recovered by making the column sum to the stated total.
+counts are recovered by making the column sum to the stated total. Omni-MATH: the paper's 933 is a
+subset whose filter is not stated, so this corpus keeps every row (about 4,428) and the count
+differs from Table 10; the search-set items are removed by decontamination either way.
 
 SOURCES maps each dataset to its Hugging Face id. The ids and field names below are pinned from
-the dataset cards and were not re-verified against the live hub from this offline build; a wrong
-pin fails loudly at fetch time (HTTP error) rather than silently producing an empty source.
+the dataset cards. Putnam-AXIOM was verified against the live hub on 2026-10-11; the others were
+not, and a wrong pin fails loudly at fetch time (HTTP error), not with an empty source.
 Row field names read per source (first present wins):
     OpenMathReasoning  nvidia/OpenMathReasoning  split cot: problem, generated_solution,
                        pass_rate_72b_tir, problem_source
@@ -18,7 +20,7 @@ Row field names read per source (first present wins):
     Omni-MATH          KbsdJames/Omni-MATH       test: problem, solution, difficulty
     FineProofs-SFT     lm-provers/FineProofs-SFT train: problem, solution
     AIME 1983-2024     di-zhang-fdu/AIME_1983_2024 train: Question, Answer
-    Putnam-AXIOM       Putnam-AXIOM/putnam-axiom-original test: problem, solution
+    Putnam-AXIOM       kaifronsdal/Putnam-AXIOM  config original, split train (501 rows): problem, solution
 
 Filters from the paper: NuminaMath keeps competition sources only; OpenMathReasoning drops
 problems whose source is an evaluation family (IMO, AIME, HMMT, SMT, USAMO, Putnam) and keeps one
@@ -44,7 +46,7 @@ SOURCES: dict[str, str] = {
     "Omni-MATH": "KbsdJames/Omni-MATH",
     "FineProofs-SFT": "lm-provers/FineProofs-SFT",
     "AIME-1983-2024": "di-zhang-fdu/AIME_1983_2024",
-    "Putnam-AXIOM": "Putnam-AXIOM/putnam-axiom-original",
+    "Putnam-AXIOM": "kaifronsdal/Putnam-AXIOM",
 }
 
 SOLUTION_CAP = 5000
@@ -62,7 +64,7 @@ _LAYOUT: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...],
     "Omni-MATH": ("default", ("test",), ("problem",), ("solution",), ("difficulty",)),
     "FineProofs-SFT": ("default", ("train",), ("problem", "question"), ("solution", "proof"), ()),
     "AIME-1983-2024": ("default", ("train",), ("Question", "question", "problem"), ("Answer", "answer"), ()),
-    "Putnam-AXIOM": ("default", ("test",), ("problem",), ("solution",), ()),
+    "Putnam-AXIOM": ("original", ("train",), ("problem",), ("solution",), ()),
 }
 
 
