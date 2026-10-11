@@ -1,324 +1,271 @@
 # Meta-Harness
 
-Filesystem-backed end-to-end optimization of executable LLM harnesses, following
-*Meta-Harness: End-to-End Optimization of Model Harnesses* (`paper.pdf`).
+A standalone, stdlib-only implementation of *Meta-Harness: End-to-End Optimization of Model
+Harnesses* (arXiv 2603.28052).
 
-A **harness** is the code around a fixed model: what it stores, retrieves, and shows the model
-at each step. This repository searches over that code. A coding-agent proposer reads the full
-experience filesystem — every prior candidate's source, scores, execution traces, and the
-reasoning that produced it — and writes new candidates. Candidates are evaluated on a search
-split; the Pareto frontier over (accuracy, context tokens) is scored once on a held-out split
-the proposer never sees.
+## What it is
 
-## Use it from Claude Code
+A **harness** is the code around a model: how the prompt is built, what is retrieved, what is
+remembered between tasks, how the reply is parsed. Meta-Harness **searches over harness code**,
+not over a prompt string. Each iteration, a tool-using **proposer** model browses an experience
+directory holding the full source, scores and execution traces of every prior candidate, chooses
+what to read, and writes a new harness; the engine evaluates it and adds it to the directory. The
+paper's key result is that this full-history access is what makes the search work: removing the
+raw traces (scores only, or scores plus LLM summaries) loses most of the gain (Table 3 below). The
+output is a Pareto frontier over (score, context tokens), each frontier member scored once on a
+held-out split the proposer never sees, plus an auditable record of every candidate.
 
-The repository is also a Claude Code plugin. Not a wrapper around the CLI — model-invoked
-skills that change how Claude works on prompts, agent scaffolds and retrieval, plus a hook layer
-that observes failures and enforces what has been learned from them:
+## How it differs
 
-```bash
-claude --plugin-dir .
-```
-
-`optimizing-harnesses` carries the discipline (one change per candidate, every candidate kept, no
-score without a trace, held-out split read once). `building-eval-sets`, `reading-execution-traces`
-and `running-harness-search` handle the pieces, `optimizing-claude-code` points the search at
-Claude Code's own scaffold, and `learning-from-failures` drives the loop below. The engine is the
-escalation path when hand-tuning stalls; the skills need nothing installed.
-
-See [docs/plugin.md](docs/plugin.md) for the skill list, the baseline testing behind it, and why
-Haiku 4.5 is the default harness model.
-
-### Learning from failures
-
-```bash
-python -m meta_harness learn            # failure -> artifact -> replay-scored -> staged
-python -m meta_harness learn --tasks tasks.json   # also require no regression on a task set
-python -m meta_harness learn --status
-python -m meta_harness learn --accept <id>
-```
-
-Three layers. **Observe:** a `tool.call` hook records tool errors and repeated calls to a
-per-session log. **Learn:** the CLI above ranks those failures together with ones mined from past
-transcripts, proposes one artifact at the strongest layer that can carry it, and replays it.
-**Enforce:** a `tool.check` hook applies accepted rules and a `prompt.submit` hook attaches
-accepted injections to the user's turn as context. The plugin listens only on `tool.call`,
-`tool.check` and `prompt.submit`; nothing rewrites the system prompt.
-
-An artifact is staged only if it fixes the failure it was born from; one whose origin replay
-still fails is archived with the verdict that killed it. With `--tasks`, it must also score no
-worse than the baseline on that task set, with context cost as the tiebreak; without `--tasks`,
-that check does not run and the recorded verdict says so. Nothing installs itself.
-
-Artifacts sit at four layers, strongest first: `rule` (a `tool.check`, costing no standing
-tokens and not ignorable) > `injection` (context attached to a matching turn, paid when it fires) > `skill` >
-`doctrine`. Only `rule` and `injection` are enforced by the hooks today. **That ordering is this
-project's own design position — it appears nowhere in `paper.pdf`.** `tools/prose_vs_rule.py` is
-the experiment that would test it against a measured baseline, and it has not been run here.
-
-What the paper does establish (Table 3, online text classification, median/best score): a
-proposer given scores only reaches 34.6/41.3, scores plus an LLM summary reaches 34.9/38.7, and
-full raw execution traces reach 50.0/56.7. Raw trace access is the paper's key ingredient — a
-summary "may even hurt by compressing away diagnostically useful details." Appendix A.2 adds a
-second, independently evidenced principle: on TerminalBench-2 the proposer regressed six
-consecutive iterations while editing prompts and control flow, diagnosed the shared prompt edit
-as the confound, and then won with a purely additive change. Additive beats invasive.
-
-One measured negative result of our own: the paper's winning TerminalBench-2 discovery was an
-environment snapshot injected before the first model call. That does not transfer to a
-developer's own repository, where the environment is already known — 50 orientation calls across
-344 sessions on this machine. We do not build it.
-
-### Decision receipts, and the holdout
-
-A receipt is one line the hooks write each time a learned rule, an injection, a session rule or
-the drift note acts on a call or a prompt: which artifact, what it did (`acted`, or `held`),
-and the call number in the session. It carries no message text and no tool input. Receipts go to
-`<harness_home>/receipts-<session>.jsonl`, next to the observations, which now record the same
-call number so the two can be matched.
-
-To find out whether an artifact does anything, the harness needs something to compare against. So
-a learned rule, an injection or the drift note is held out on a random 10% of the occasions it
-would have acted: the hook records a `held` receipt and does nothing. The cost is real: a
-held-out learned rule does not deny that call, so about one time in ten the failure it exists to
-prevent is allowed through. Session rules and rejection memory are never held out: they are
-something you said, and they always apply.
-
-Set the rate in `<harness_home>/receipts.json`:
-
-```json
-{"holdout_rate": 0.1}
-```
-
-The value is clamped to 0 through 0.5; a missing or unreadable file means 0.1. Set it to 0 to
-switch the holdout off entirely (receipts are still written, but nothing is held, so learned artifacts stay "not enough data").
-
-```bash
-python -m meta_harness receipts report            # add --json for the raw rows
-python -m meta_harness receipts export --out receipts.json
-```
-
-The report compares how often the failure signature recurred in later calls of the same session
-with the artifact acting versus held out. Verdicts:
-
-- **helps** - the failure recurred measurably less when the artifact acted.
-- **no measurable effect** - no difference either way. The harness proposes retiring the
-  artifact (see `learn --status`); it never retires one itself.
-- **not enough data** - fewer than 5 receipts in an arm, or no recurrence at all to compare. No
-  verdict is given. The drift note cannot reach a verdict yet either: its receipts carry no
-  failure signature to match against.
-- **no control arm** - a session rule or rejection memory, which are never held out, so there
-  is nothing to compare against.
-
-Evidence accumulates slowly. At a 10% holdout an artifact needs many occasions before either arm
-has 5 receipts, which takes weeks of ordinary use. Until then, expect "not enough data".
-
-### Waste, and what the hooks do inside a session
-
-`python -m meta_harness waste` (add `--json`, `--this-project`, `--since`, `--limit`) reads your
-transcripts and reports stretches of tool calls that ended with you correcting course, the calls
-they burned, and identical failures retried. It also writes `<harness_home>/waste.json`. Its
-correction count is a keyword heuristic: in a hand-labelled audit, 11 of the 21 flagged stretches
-audited were genuine corrections, and recall is unmeasured. The report carries that caveat itself;
-treat the numbers as an estimate, not an audit.
-
-Beyond enforcing artifacts, the hooks add (details in [hooks/README.md](hooks/README.md)):
-
-- **Rejection memory** - a call you rejected is denied if retried identically in the same session.
-- **"Stop doing X" session rules** - a human's own prompt like "stop running pytest" denies
-  matching calls immediately, for the rest of that session only. Prompts from plugins, peers,
-  schedules or notifications never create one. Nothing makes a rule permanent yet. Session rules and rejection memory are never held out.
-- **A first-run line** - once, a hedged estimate of calls that went to later-corrected work. It
-  needs a prior `meta-harness waste` run; nothing mines your history in the background.
-- **A drift note - built, tested, and shipped disabled.** It would say once when a long stretch
-  of calls has run since you last spoke. The ship gate refused every judge (word-overlap
-  precision about 0.01; the kNN judge never fired; the model judge was never evaluated), so it is
-  off unless `drift.json` enables it, and "enabled" then means a plain call-count threshold: the
-  config's `judge` field is validated but never run.
-- **`/meta-harness:harness waste | pending | why`** - the report, what is staged or pending, and why the last
-  denial happened.
-
-Mined failures are weighted by recency and by Claude Code version (`version_weight`). On the
-current data the version weight is inert: every session shares Claude Code minor 2.1.
-
-The hooks need Claude Code's function-hook surface, which is early access:
-
-```bash
-export CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1   # PowerShell: $env:CLAUDE_CODE_ENABLE_FUNCTION_HOOKS="1"
-claude --plugin-dir .
-```
-
-See [hooks/README.md](hooks/README.md) for the hook layer and
-[the design](docs/superpowers/specs/2026-09-20-learning-harness-design.md) for the rest.
-
-## Install
-
-```bash
-python -m venv venv
-venv/Scripts/activate          # Windows;  source venv/bin/activate elsewhere
-pip install -e .
-pip install -e ".[dev]"        # adds pytest
-```
-
-No runtime dependencies. Python 3.10+.
-
-## Configure the model gateway (Unikey)
-
-All model traffic goes through [Unikey](https://www.getunikey.ai), an OpenAI-compatible
-gateway (`https://www.getunikey.ai/v1`, `Authorization: Bearer $UNIKEY_API_KEY`).
-
-```bash
-export UNIKEY_API_KEY=sk-...            # PowerShell: $env:UNIKEY_API_KEY="sk-..."
-meta-harness models --provider unikey   # GET /v1/models
-```
-
-The proposer is a coding agent, billed separately. Unikey also exposes an
-Anthropic-compatible `/v1/messages`, so Claude Code can be routed through it:
-
-```bash
-export ANTHROPIC_BASE_URL=https://www.getunikey.ai
-export ANTHROPIC_AUTH_TOKEN=$UNIKEY_API_KEY
-```
-
-`--provider openai|anthropic|compatible` still work, reading `OPENAI_API_KEY` /
-`ANTHROPIC_API_KEY` and their `*_BASE_URL` overrides.
-
-## Run a search
-
-```bash
-meta-harness run \
-  --tasks data/classification.jsonl \
-  --task-type classification \
-  --provider unikey --model gpt-5.2 \
-  --iterations 20 --candidates 2 --repeats 3 --max-workers 4 \
-  --proposer-model claude-sonnet-4-6 \
-  --root .meta-harness
-```
-
-Dataset formats: `.jsonl`, `.json`, `.csv`.
-
-| `--task-type` | required fields | optional | metric |
+| | Prompt optimizers (DSPy, GEPA, TextGrad) | Score-only evolvers (OpenEvolve / AlphaEvolve-style) | Meta-Harness |
 |---|---|---|---|
-| `classification` | `input`, `label` | `labels` | exact match |
-| `math` | `problem` | `answer` | `\boxed{}` + numeric equivalence |
-| `terminal` | `instruction` | `test_command`, `image`, `workdir`, `timeout` | test command exit code |
+| What is optimized | prompt text / instructions | programs | the whole harness program (retrieval, memory, parsing, prompts) |
+| What the optimizer sees | last artifact + textual feedback or summaries | a window of programs + scores | **all** prior code, scores and raw traces, on a filesystem it navigates with tools |
+| History per iteration (paper Table 1) | 0.002-0.015 MTok | 0.022-0.026 MTok | up to 10 MTok |
 
-Without `--test-tasks`, `--tasks` is split 70/30 (`--search-fraction`, `--split-seed`).
-Without `--baseline`, the seeds in `baselines/` for that task type are used.
-Without `--proposer-command`, the proposer is the `claude` CLI; use `--proposer-command` to
-drive any other agent, or `python tools/llm_proposer.py` for a plain-API proposer that needs no
-agent installed. See [docs/using-with-coding-agents.md](docs/using-with-coding-agents.md).
+Paper Table 3 (online text classification, accuracy %; > ZS = runs above zero-shot):
 
-Two sample datasets ship in `data/`.
+| Proposer sees | Scores | Code | Summary | Traces | Median | Best | > ZS |
+|---|---|---|---|---|---|---|---|
+| Scores only | yes | yes | no | no | 34.6 | 41.3 | 26 |
+| Scores + summary | yes | yes | yes | no | 34.9 | 38.7 | 23 |
+| Meta-Harness (full) | yes | yes | - | yes | 50.0 | 56.7 | 39 |
 
-## What a run produces
+These are the paper's numbers, not ours. Ours are under [Results](#results).
 
-```
-.meta-harness/
-  run.json                       config + the search-split tasks
-  frontier.json                  Pareto frontier over (score, context_cost)
-  candidates/<id>/harness.py     candidate source
-  candidates/<id>/scores.json    score, context_cost, repeats, score_std, valid, error
-  candidates/<id>/traces.jsonl   every model call, task start/end, harness event
-  candidates/<id>/traces-N.jsonl additional repeats
-  candidates/<id>/proposer_reasoning.md
-  proposals/iteration-NNNN/      proposer stdout/stderr
-  views/iteration-NNNN/          what the proposer was allowed to read (ablation modes)
-.meta-harness-test/
-  test_results.json              held-out scores, written once, outside the proposer's reach
-.meta-harness-cache/             model-call cache, keyed by (model, prompt, kwargs)
-```
+Differences from the paper's own setup:
 
-Inspect a finished run: `meta-harness inspect .meta-harness`
+- The proposer is **any tool-calling model** behind a small provider layer (Anthropic Messages,
+  OpenAI-compatible chat completions), not a coding-agent product. Its tools are `list`, `read`,
+  `grep` and `write_candidate`, confined to the run directory.
+- Context cost is **provider-reported tokens** metered by the engine (harnesses never count it).
+- Stdlib only: `dependencies = []`.
 
-## Proposer-view ablation (paper Table 3)
+## Quick start
 
 ```bash
-meta-harness run ... --proposer-view scores    # source + scores only
-meta-harness run ... --proposer-view summary   # + LLM summaries, no raw traces
-meta-harness run ... --proposer-view full      # everything (default)
+pip install -e .
 ```
 
-## Agentic coding domain
+Fully offline (a scripted provider replays canned replies; no key, no network):
 
-TerminalBench-2 style tasks run inside Docker. The terminal domain starts one container per
-task, hands its id to the harness as `task["container"]`, then runs the task's tests inside that
-same container and removes it. With no container the score is 0 and nothing ever runs on your
-machine.
+```bash
+meta-harness search --harness examples/sentiment/harness.py --data examples/sentiment/data.jsonl \
+    --metric examples/sentiment/metric.py:score \
+    --provider scripted --model examples/sentiment/base_script.jsonl \
+    --proposer-provider scripted --proposer-model examples/sentiment/proposer_script.jsonl \
+    --iterations 2 --root .meta-harness-example --no-cache
+```
 
-Scoring runs in the agent's own container, so before the tests go in the container is restarted
-(`docker restart`, killing every process the agent left, such as a loop rewriting the reward
-file), `docker diff` is checked for tampering (scorer binaries such as `bash`, `sh`, `cat`, `tr`,
-`env` in the PATH directories, anything under `/tests` or `/logs/verifier`, `/logs` replaced)
-and `/logs`, `/logs/verifier` and `/tests` must not be symlinks; any hit scores 0 with reason
-`tampered` in the trace. The tests are then run by absolute shell path
-(`docker exec ... /bin/bash -c <test_command>`). Residual risk: modifications outside the
-checked set (for example a shared library the shell loads) are not detected.
+The seed scores 0 (the model is chatty), the scripted proposer reads the traces and writes a
+harness that maps replies onto labels, which scores 1 on search and test. This checks the
+pipeline, not model quality. See [examples/README.md](examples/README.md).
 
-Seeds: `baselines/terminal/terminus2.py` (Terminus-2: JSON keystroke batches, 30KB observation
-cap, confirmation turn) and `baselines/terminal/terminus_kira.py` (native tool calling,
-completion checklist, in-container environment snapshot). Both share a fuzzy `edit` tool with
-read-before-write checks, stuck detection, staged compaction (`B1`/`B2`) and the `PLANNING` /
-`BASH_ONLY` toggles.
+With a real model, put keys in the environment or a git-ignored `.env` at the repo root
+(`--env-file` picks another file; the environment always wins):
 
-Tasks come from a local TerminalBench checkout (`meta_harness.loaders.terminalbench`, `--tb-dir`,
-dataset version as a loader parameter). **Search = test on this domain, as in the paper:** pass
-the same task file to `--search` and `--test` (`meta-harness search --domain terminal
---dataset-version <v> ...`; the version is recorded in `run.json`), so the numbers are search
-scores, not held-out ones. `audit_leakage(source, tasks)` flags harness source that names task
-ids, test file names or expected outputs; during a search such a candidate is rejected with
-receipt verdict `rejected_invalid_source`. Keep live runs small (at most 5 TerminalBench tasks).
+```
+ANTHROPIC_API_KEY=...
+OPENAI_API_KEY=...        # OPENAI_BASE_URL for --provider compatible
+UNIKEY_API_KEY=...        # optional UNIKEY_BASE_URL
+GROQ_API_KEY=...          # optional GROQ_BASE_URL
+```
 
-## Writing your own harness
+```bash
+meta-harness search --harness my_harness.py --data evals.jsonl --metric exact \
+    --provider anthropic --model claude-haiku-4-5-20251001 --iterations 10
+meta-harness search --harness my_harness.py --data evals.jsonl --metric exact \
+    --provider unikey --model gpt-5-mini --iterations 10
+```
+
+| Provider | `--provider` | Key / base URL |
+|---|---|---|
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` |
+| OpenAI | `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
+| Any OpenAI-compatible endpoint | `compatible` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` or `--base-url` (required) |
+| Unikey gateway | `unikey` | `UNIKEY_API_KEY`, `UNIKEY_BASE_URL` |
+| Groq | `groq` in `models`, `transfer`, `ood` (not yet a `search` choice) | `GROQ_API_KEY`, `GROQ_BASE_URL` |
+| Offline replay | `scripted` | `--model` is the script path |
+
+Keys are read from the environment only: never printed, logged, written to `run.json` or passed
+on a command line.
+
+## Contracts
+
+**Harness** - a Python file defining `class Harness` (or a `build_harness()` factory):
 
 ```python
 class Harness:
-    def run(self, task, model, trace):
-        prompt = f"Classify: {task['input']}"
-        trace.event("prompt", {"prompt": prompt})
-        return model(prompt)
+    def run(self, task, model, trace):     # `trace` is optional: run(self, task, model) also works
+        reply = model("Classify: " + task["input"])   # model(prompt) -> str; tokens are metered
+        return {"output": reply.strip()}              # a dict with "output", or a bare value
+
+    def learn(self, task, result):          # optional; online domains stream train tasks into it
+        ...
 ```
 
-The instance persists across the tasks of one evaluation (that is your memory) and is recreated
-per evaluation. `model(prompt) -> str`; `model.call(prompt) -> (str, usage)`. Every call is
-priced in input tokens and written to the trace. `meta_harness.retrieval` provides
-`TfidfIndex`, `BM25Index`, and `reciprocal_rank_fusion`.
+**Data** - JSONL (or JSON / CSV), one task per line, any fields. The target is the first of
+`expected`, `label`, `answer`, `target`; it is hidden from the harness on held-out evaluation.
+Split by `--test-fraction` (default 0.3, seeded by `--seed`) or explicit `--search` / `--test`
+(online domains also `--train`).
 
-Seven working examples live in `baselines/`; the exact contract handed to the proposer is
-`meta_harness/skill/SKILL.md`.
+**Metric** - `exact`, `contains`, `numeric`, a domain metric, or `path/to/file.py:function` /
+`module:function` with signature `(task, result) -> float`:
 
-## Design notes
+```python
+def score(task, result):
+    return float(str(result.get("output", "")).strip().lower() == task["label"].lower())
+```
 
-- `meta_harness/core.py` — the outer loop, experience filesystem, Pareto frontier, metering.
-- `meta_harness/sandbox.py` — interface validation in a subprocess under a timeout, so an
-  LLM-written `while True` cannot hang the search.
-- `meta_harness/agent_proposer.py` — the coding-agent proposer and the view ablation.
-- `meta_harness/cache.py` — disk cache so `--repeats` and re-runs do not re-bill.
-- `tools/llm_proposer.py` — proposer that needs only an API key, no coding-agent CLI.
-- `meta_harness/replay.py` — failure signatures, and the replay a proposed artifact is scored on.
-- `meta_harness/learn.py` — ranking, proposal, and the retention decision.
-- `meta_harness/harness_store.py` — staged and installed artifacts, and the accept/reject gate.
-- `hooks/` — the function-hook layer: observe, enforce, inject, rejection memory, session rules,
-  first-run line, drift note (disabled). Fails open by construction.
-- `meta_harness/waste.py` — the waste report behind `meta-harness waste`.
-- `tools/prose_vs_rule.py` — the prose-versus-mechanism experiment (built, not yet run).
-- `docs/plugin.md` — the Claude Code plugin: skills, agent, install, Haiku defaults.
-- `docs/using-with-coding-agents.md` — Claude Code as proposer, optimizing agent harnesses,
-  and shipping a discovered harness back into your own agent.
-- `docs/superpowers/specs/` and `docs/superpowers/plans/` — the spec and task-by-task plan
-  this implementation follows.
+Key `search` flags:
 
-## Tests
+| Flag | Default | Meaning |
+|---|---|---|
+| `--harness` | required | seed harness file, repeatable |
+| `--data` / `--search` `--test` / `--train` | - | eval set and splits |
+| `--metric` | domain's, else `exact` | see above |
+| `--provider` `--model` | required | base model the harness calls |
+| `--proposer-provider` `--proposer-model` | same as base | proposer (paper: strong proposer, cheaper base) |
+| `--iterations` / `--candidates` | 10 / 1 | proposer iterations / proposals per iteration |
+| `--view` | `full` | `scores`, `summary` or `full` (Table 3 ablation) |
+| `--max-tool-calls` | 40 | proposer tool calls per proposal |
+| `--domain` | `generic` | `classification`, `math`, `terminal`: prompt section, protocol, metric |
+| `--repeats` | 1 | resamples per task (distinct cache sample index) |
+| `--isolation` | `process` | `process`, `docker` or `none` (see Safety) |
+| `--root` | `.meta-harness` | experience directory; held-out results go to `<root>-test` |
+| `--resume` | off | continue a run; finished steps are skipped |
+| `--price` | - | `PROVIDER:MODEL=IN,OUT[,CR,CW]` USD per million tokens for billed cost |
+| `--proposer-command` | - | escape hatch: an external program writes `.py` files to `META_HARNESS_OUTPUT` |
+
+## The experience directory
+
+```
+<root>/
+  run.json                      config + budget: evaluations, model calls, tokens, proposals, cost
+  frontier.json                 Pareto frontier over (score, context tokens)
+  candidates/<id>/
+    harness.py                  candidate source
+    scores.json                 score, context cost, stop_reason histogram, per-task metrics
+    traces.jsonl                every model call, prompt and response, per task
+    proposer_log.jsonl          every proposer tool call (what it read)
+    proposer_reasoning.md       the proposer's rationale
+    receipt.json                verdict (accepted / rejected_* / failed_eval / ...), parents read
+<root>-test/test_results.json   held-out scores of the frontier, computed once
+```
+
+The proposer's tools refuse every path outside `<root>`, and `<root>-test` is on the forbidden
+list; `--test-root` inside `--root` is rejected.
+
+## Commands
+
+| Command | What it does | Key flags |
+|---|---|---|
+| `search` | harness search (above) | see table |
+| `ablate` | N searches per view, median / best, McNemar + BH significance (Table 3 shape) | `--views scores,summary,full --runs N --max-tasks 20 -- <search args>` |
+| `transfer` | fixed harnesses x several models (Table 6 shape) | `--harness --data --metric --models p:m,p:m [--protocol online --train-data]` |
+| `ood` | harnesses on the nine out-of-distribution sets (Table 5) | `--harness --datasets all --provider --model --limit 20` |
+| `bench` | resumable arm x task x trial matrix | `--arm name=harness.py@provider:model --data --trials --out` |
+| `fetch` | download a paper dataset into `data/cache/<name>` | `<loader> [--full]` |
+| `math-corpus` | build the deduplicated, decontaminated math retrieval corpus | `build [--limit-per-source 200 \| --full]` |
+| `experience` | query runs: `top`, `diff`, `diff-runs`, `import`, `reads` (Table 8), `report`, `export` | `top <root> -k 5` |
+| `sweep` | evaluate one harness across values of an env var, no proposer | `--harness --env KEY=v1,v2 --tasks --provider --model` |
+| `models` | list models of an OpenAI-compatible provider | `--provider unikey\|groq\|openai\|compatible` |
+| `inspect` | print stored results and the frontier | `<root>` |
+| `demo` | deterministic offline end-to-end run | `--iterations 3` |
+
+Offline checks of the example run:
 
 ```bash
-python -m pytest -q
+meta-harness inspect .meta-harness-example
+meta-harness experience reads .meta-harness-example
+meta-harness ablate --views scores,full --runs 1 --root .meta-harness-ablate -- \
+    --harness examples/sentiment/harness.py --data examples/sentiment/data.jsonl \
+    --metric examples/sentiment/metric.py:score --provider scripted \
+    --model examples/sentiment/base_script.jsonl --proposer-provider scripted \
+    --proposer-model examples/sentiment/proposer_script.jsonl --iterations 1 --no-cache
 ```
 
-No network calls. The hook layer is covered by Node tests under `hooks/` that the
-Python suite shells out to; they are skipped, with the reason stated, when `node` is absent.
+Comparison optimizers (Best-of-N, OpenEvolve-style, TTT-Discover-style, GEPA-style) are
+implemented in `meta_harness/optimizers/` under an equal evaluation budget, but `search` does not
+yet expose an `--optimizer` flag; see Roadmap.
 
-## Candidate isolation
+## Domains
 
-`meta-harness search` evaluates each candidate harness with `--isolation process` (the default) unless told otherwise. The candidate runs in a child process with an allowlisted environment, so it gets no API keys or other secrets. Its working directory is a fresh temp dir, and memory/CPU limits apply: `--memory-mb` and `--cpu-seconds`, enforced by rlimits on POSIX and a Job Object on Windows. Model calls are answered by the parent process. Per-task timeouts kill the child and its process group or job, including any grandchildren.
+| Domain | Datasets (loader) | Protocol | Deviations from the paper |
+|---|---|---|---|
+| `classification` | `symptom2disease` (HF `gretelai/symptom_to_diagnosis`), `lawbench` (open-compass LawBench task 3-3), `uspto50k` (HF `pingzhili/uspto-50k`); OOD: scicite, finer139, amazon5, fpb, goemotions, banking77, agnews, scitail, tweet_hate | online: train stream feeds `learn`, frozen copies scored on search/test | **USPTO-50k is 10-way** (the public copy has no 180-way label); **LawBench has 275 labels** (closest public copy, not the paper's 215) |
+| `math` | `math_corpus` (8 sources, Table 10), `math_search` (OlympiadBench + Omni-MATH hard), `imo` (IMO-AnswerBench, IMO-ProofBench, ArXivMath) | plain, BM25 retrieval over the decontaminated corpus | **Omni-MATH** keeps all rows (about 4,428), not the paper's 933; **ProofBench**: only the 27 rows with a short answer are graded (proof grading needs a judge), so the full test set has fewer than 200 gradable items |
+| `terminal` | `terminalbench` from a local TerminalBench-2 checkout (`META_HARNESS_TB_DIR`) | search = test (as in the paper); each task in its own Docker container, tests copied in only at scoring time | the container is restarted before scoring and scorer binaries are checked with `docker diff`; modifications outside the checked set remain a **residual reward-forging risk**; TB containers keep resource limits and `no-new-privileges` but not `--cap-drop ALL` |
 
-The child also blocks socket connects and refuses `open()` outside its own directories, which keeps it away from the repo `.env`. These guards are best-effort and bypassable: `ctypes`, `os.open`, `_socket` and subprocesses get around them, and the child runs as your OS user. `--isolation docker` is the real boundary. It runs the candidate with no network, `--cap-drop ALL`, a read-only root filesystem, user 65534, and only the package and the candidate mounted read-only. `--isolation none` runs candidates in-process. Native `model.chat()` is not available under `process`.
+Seeds per domain are in [baselines/](baselines/README.md).
+
+## Safety
+
+- **Held-out split**: scored once per frontier member after search; the proposer cannot read it,
+  and resume never re-scores it.
+- **Proposer confinement**: tools are read-only except `write_candidate`, bounded in output size,
+  and refuse paths outside the run directory and the test directory.
+- **Redaction**: anything matching `api_key=...`, `bearer ...`, `sk-...` or a loaded `*_API_KEY`
+  value becomes `[redacted]` in logs, traces and receipts.
+- **Isolation** (`--isolation`) of candidate code, which the proposer wrote and you did not:
+
+| Mode | What you get | Honest limit |
+|---|---|---|
+| `process` (default) | child process, allowlisted env (no keys), temp cwd, memory/CPU limits (rlimits on POSIX, Job Object on Windows), model calls served by the parent | socket and file-open guards are **best-effort and bypassable** (ctypes, `os.open`, subprocess); the child runs as your OS user |
+| `docker` | `--network none --cap-drop ALL --read-only --user 65534`, memory/CPU limits, package and candidate mounted read-only | **the real security boundary**; needs Docker |
+| `none` | in-process | **no isolation at all**. Never run untrusted or proposer-written candidates with `none` |
+
+## Reproducing the paper
+
+Small scale (the defaults: capped samples, at most about 20 tasks per split):
+
+```bash
+meta-harness fetch symptom2disease
+meta-harness search --domain classification \
+    --harness baselines/classification/zero_shot.py --harness baselines/classification/few_shot.py \
+    --search data/cache/symptom2disease/val.jsonl --test data/cache/symptom2disease/test.jsonl \
+    --provider unikey --model gpt-5-mini --iterations 3 --candidates 2
+meta-harness ood --harness baselines/classification/zero_shot.py --datasets all \
+    --provider unikey --model gpt-5-mini --limit 20
+meta-harness math-corpus build
+```
+
+The classification domain streams `train.jsonl` (written by `fetch` next to `val.jsonl`) into
+`learn`, then scores frozen copies.
+
+Full scale (documented commands, not run here; cost scales with tokens):
+
+```bash
+meta-harness fetch symptom2disease --full
+meta-harness math-corpus build --full
+meta-harness ood --harness <frozen harness> --datasets all --provider <p> --model <m> --limit 1000
+meta-harness ablate --views scores,summary,full --runs 3 --max-tasks 1000 -- <search args>
+```
+
+## Results
+
+Results: pending the live run.
+
+No paper result has been reproduced yet. The offline smoke run checks the pipeline, not model
+quality. Every number added here will name its command, date, model and recorded budget.
+
+## Roadmap and limits
+
+Not implemented:
+
+- `--optimizer` on `search` (the comparison optimizers exist as modules only).
+- `groq` as a `search` provider choice.
+- Proof grading for IMO-ProofBench (needs a judge).
+- The paper's 180-way USPTO and 215-way LawBench label sets (no public copy found).
+- A process-isolation boundary that a hostile candidate cannot bypass (use `docker`).
+- Native Gemini provider (use `compatible`).
+
+## Credits
+
+- The method: Meta-Harness, arXiv 2603.28052.
+- Designs re-implemented in stdlib Python (designs only, no code copied): soketlabs/loop and
+  truefoundry/trueforge (proposer loop, tool output bounds, provider layer, benchmark runner,
+  Terminus-style seeds), rivet-dev/rivet (resumable runs, sandbox protocol), keel (candidate
+  receipts, crash repair, retries, redaction, read window), and *An Empirical Study of Harness
+  Design for Coding Agents* (arXiv:2609.20804: paired McNemar + Benjamini-Hochberg, stuck
+  detection, staged compaction, stop-reason histograms, phase labels).

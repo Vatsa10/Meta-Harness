@@ -1,0 +1,30 @@
+{"id": "s00", "input": "I love this kettle, it boils fast.", "label": "positive"}
+{"id": "s01", "input": "Terrible customer support, nobody answered.", "label": "negative"}
+{"id": "s02", "input": "The package arrived on Tuesday.", "label": "neutral"}
+{"id": "s03", "input": "Great battery life on this phone.", "label": "positive"}
+{"id": "s04", "input": "The handle broke after two days.", "label": "negative"}
+{"id": "s05", "input": "It comes in blue and grey.", "label": "neutral"}
+{"id": "s06", "input": "Excellent service at the front desk.", "label": "positive"}
+{"id": "s07", "input": "Worst pizza I have had in years.", "label": "negative"}
+{"id": "s08", "input": "The manual is twelve pages long.", "label": "neutral"}
+{"id": "s09", "input": "A wonderful little book for long trips.", "label": "positive"}
+{"id": "s10", "input": "I hate how loud the fan is.", "label": "negative"}
+{"id": "s11", "input": "Delivery took about five days.", "label": "neutral"}
+{"id": "s12", "input": "Fantastic sound for the price.", "label": "positive"}
+{"id": "s13", "input": "Asked for a refund within a week.", "label": "negative"}
+{"id": "s14", "input": "The box contains a charger and a cable.", "label": "neutral"}
+{"id": "s15", "input": "The fit is perfect and the fabric is soft.", "label": "positive"}
+{"id": "s16", "input": "A disappointing ending to the series.", "label": "negative"}
+{"id": "s17", "input": "It is the same size as the old model.", "label": "neutral"}
+{"id": "s18", "input": "A delightful cafe with friendly staff.", "label": "positive"}
+{"id": "s19", "input": "Useless instructions, missing half the steps.", "label": "negative"}
+{"id": "s20", "input": "The store opens at nine.", "label": "neutral"}
+{"id": "s21", "input": "Superb build quality, feels solid.", "label": "positive"}
+{"id": "s22", "input": "Awful smell when it heats up.", "label": "negative"}
+{"id": "s23", "input": "I bought it for my office.", "label": "neutral"}
+{"id": "s24", "input": "We love the new layout of the app.", "label": "positive"}
+{"id": "s25", "input": "The zipper broke on the first trip.", "label": "negative"}
+{"id": "s26", "input": "The lid is made of plastic.", "label": "neutral"}
+{"id": "s27", "input": "Great value, would buy again.", "label": "positive"}
+{"id": "s28", "input": "Terrible lag in every online match.", "label": "negative"}
+{"id": "s29", "input": "It uses two AA batteries.", "label": "neutral"}
