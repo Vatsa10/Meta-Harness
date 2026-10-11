@@ -6,28 +6,42 @@ Parent <-> child protocol over the child's stdin/stdout, one JSON object per lin
                      | {"op":"snapshot"} | {"op":"restore"}
                      | {"op":"model_result","text":...,"usage":{...}} | {"op":"exit"}
     child  -> parent: {"op":"model_call","prompt":...,"kwargs":{...}} | {"op":"trace","event":...,"payload":...}
+                     | {"op":"learn_error","error":...}
                      | {"op":"result","result":{...}} | {"op":"error","error":"..."}
 
-Model calls are served by the PARENT, so the child needs no network and no keys.
+Model calls are served by the PARENT, so the child needs no network and no keys. The parent
+bounds every frame (MAX_FRAME_BYTES; overflow kills the child), rejects non-object frames,
+records child trace events only as `harness.<name>` with reserved field names dropped, and
+forwards only whitelisted model kwargs (`max_tokens` capped).
 
 Modes
 -----
-process  The child is `python -I -c <bootstrap> <repo> <candidate>` with every `*_API_KEY`,
-         `*_TOKEN`, `*_SECRET` and `*_BASE_URL` variable removed from its environment.
-         POSIX: `resource.setrlimit` (RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE) in `preexec_fn`.
+process  The child is `python -I -c <bootstrap> <pkgroot> <candidate>` with an ALLOWLISTED
+         environment (PATH, SYSTEMROOT, COMSPEC, PATHEXT, SYSTEMDRIVE, WINDIR, TEMP/TMP/TMPDIR,
+         HOME/USERPROFILE, LANG/LC_*); everything else, keys included, is dropped. Its cwd is a
+         fresh temp directory, removed on close.
+         POSIX: `resource.setrlimit` (RLIMIT_AS, RLIMIT_CPU, RLIMIT_NOFILE) in `preexec_fn`, and
+         a new session so a kill (`os.killpg`) takes grandchildren with it.
          Windows: a Job Object through `ctypes` (stdlib) with a per-process memory limit, a
-         per-process user-time limit and kill-on-close. If the Job Object cannot be set up the
-         child still runs, timeout-only, and an `isolation_warning` event goes into the trace.
-         Known gap: the child runs as the same OS user, so it can read files the user can read
-         (including a repo-root `.env`); only the environment is scrubbed. Use `docker` to close it.
-docker   `docker run -i --rm --network none --memory <mb>m --cpus 1` with only the
-         `meta_harness` package and the candidate's directory mounted read-only. `preflight()`
-         runs first; a failed preflight raises `IsolationError` with the install hint.
+         per-process user-time limit and kill-on-close (grandchildren die with the job). If the
+         Job Object cannot be set up the child still runs, timeout-only, and an
+         `isolation_warning` event goes into the trace.
+         Best-effort guards installed by the bootstrap before the candidate loads: socket
+         connects raise, and `builtins.open` / `io.open` refuse paths outside the candidate's
+         directory, the temp cwd, the meta_harness package and the Python stdlib/site-packages
+         (so the repo-root `.env` is refused). These guards are BYPASSABLE (ctypes, os.open,
+         _socket, subprocess): the child still runs as the same OS user. `docker` is the real
+         security boundary.
+docker   `docker run -i --rm --network none --cap-drop ALL --read-only --tmpfs /tmp
+         --user 65534:65534 --memory <mb>m --cpus 1` with only the `meta_harness` package and
+         the candidate's directory mounted read-only. `preflight()` runs first; a failed
+         preflight raises `IsolationError` with the install hint.
 
 Timeouts are preemptive: when a task overruns, the child (or container) is killed, the call
 raises `IsolationTimeout`, and the next call starts a fresh child from the candidate source.
 `python -I` ignores PYTHONPATH, so the bootstrap inserts the package root into `sys.path`
 explicitly instead of relying on `-m` (which would also pick up any installed copy).
+Native `model.chat()` is not proxied: inside the child it raises a clear error.
 """
 
 from __future__ import annotations
@@ -36,8 +50,10 @@ import copy
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -46,11 +62,20 @@ from typing import Any, Mapping
 
 MODES = ("none", "process", "docker")
 DEFAULT_IMAGE = "python:3.12-slim"
-SECRET_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_BASE_URL")
+ENV_ALLOW = ("PATH", "SYSTEMROOT", "COMSPEC", "PATHEXT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP",
+             "TMPDIR", "HOME", "USERPROFILE", "LANG")
+ENV_ALLOW_PREFIXES = ("LC_",)
 STDERR_TAIL = 4000
+MAX_FRAME_BYTES = 8 * 1024 * 1024
+MODEL_KWARGS = ("temperature", "max_tokens", "stop", "top_p")
+DEFAULT_MAX_TOKENS = 32768
+RESERVED_FIELDS = ("event", "time", "payload")
+CHAT_UNAVAILABLE = "chat() is unavailable under --isolation process; use --isolation none or docker"
 BOOTSTRAP = ("import sys; sys.path.insert(0, sys.argv[1]); "
              "from meta_harness.isolation import child_main; raise SystemExit(child_main(sys.argv[2:]))")
+GUARDS_ENV = "META_HARNESS_ISOLATION_GUARDS"
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+_OVERFLOW = object()
 
 
 class IsolationError(RuntimeError):
@@ -62,12 +87,24 @@ class IsolationTimeout(IsolationError, TimeoutError):
 
 
 def scrubbed_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Allowlist, not denylist: only what an interpreter needs to start survives."""
     source = os.environ if environ is None else environ
-    return {k: v for k, v in source.items() if not k.upper().endswith(SECRET_SUFFIXES)}
+    return {k: v for k, v in source.items()
+            if k.upper() in ENV_ALLOW or k.upper().startswith(ENV_ALLOW_PREFIXES)}
 
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def model_kwargs(kwargs: Mapping[str, Any], max_tokens: int = DEFAULT_MAX_TOKENS) -> dict[str, Any]:
+    clean = {k: v for k, v in kwargs.items() if k in MODEL_KWARGS}
+    if "max_tokens" in clean:
+        try:
+            clean["max_tokens"] = max(1, min(int(clean["max_tokens"]), int(max_tokens)))
+        except (TypeError, ValueError):
+            del clean["max_tokens"]
+    return clean
 
 
 # -- POSIX limits ---------------------------------------------------------------------------------
@@ -141,7 +178,10 @@ class IsolatedHarness:
     kills the child; the next call then reloads it from source (`restarts` counts these)."""
 
     def __init__(self, source: Path, mode: str = "process", memory_mb: int = 2048, cpu_seconds: int = 600,
-                 image: str = DEFAULT_IMAGE):
+                 image: str = DEFAULT_IMAGE, max_tokens: int = DEFAULT_MAX_TOKENS,
+                 inherit_env: bool = False):
+        """`inherit_env` passes the parent environment through unfiltered: only for the
+        `--isolation none` validation child, which promises no isolation (no guards either)."""
         if mode not in ("process", "docker"):
             raise ValueError(f"isolation mode must be 'process' or 'docker', got {mode!r}")
         self.source = Path(source).resolve()
@@ -149,6 +189,8 @@ class IsolatedHarness:
         self.memory_mb = int(memory_mb)
         self.cpu_seconds = int(cpu_seconds)
         self.image = image
+        self.max_tokens = int(max_tokens)
+        self.inherit_env = bool(inherit_env)
         self.restarts = 0
         self.warnings: list[str] = []
         self._proc: subprocess.Popen | None = None
@@ -156,6 +198,7 @@ class IsolatedHarness:
         self._lines: queue.Queue = queue.Queue()
         self._stderr: list[str] = []
         self._container: str | None = None
+        self._workdir: str | None = None
         self._started = False
 
     # lifecycle ---------------------------------------------------------------------------------
@@ -163,13 +206,7 @@ class IsolatedHarness:
         if self.mode == "process":
             return [sys.executable, "-I", "-c", BOOTSTRAP, str(PACKAGE_ROOT), str(self.source)]
         self._container = f"mh-iso-{uuid.uuid4().hex[:12]}"
-        return ["docker", "run", "-i", "--rm", "--network", "none", "--memory", f"{self.memory_mb}m",
-                "--memory-swap", f"{self.memory_mb}m", "--cpus", "1", "--pids-limit", "256",
-                "--security-opt", "no-new-privileges", "--name", self._container,
-                "--ulimit", f"cpu={self.cpu_seconds}",
-                "-v", f"{PACKAGE_ROOT / 'meta_harness'}:/mh/meta_harness:ro",
-                "-v", f"{self.source.parent}:/c:ro", "-e", "PYTHONDONTWRITEBYTECODE=1",
-                self.image, "python", "-I", "-c", BOOTSTRAP, "/mh", f"/c/{self.source.name}"]
+        return docker_argv(self._container, self.source, self.memory_mb, self.cpu_seconds, self.image)
 
     def start(self, timeout: float = 120.0) -> None:
         if self.mode == "docker" and not self._started:
@@ -179,9 +216,16 @@ class IsolatedHarness:
                 raise IsolationError(f"docker isolation unavailable: {check.problem}. {check.hint}")
         self._started = True
         kwargs: dict[str, Any] = {}
-        if self.mode == "process" and os.name == "posix":
-            kwargs["preexec_fn"] = _posix_limits(self.memory_mb, self.cpu_seconds)
-        env = scrubbed_env()
+        env = dict(os.environ) if self.inherit_env else scrubbed_env()
+        env[GUARDS_ENV] = "0" if self.inherit_env else "1"
+        if self.mode == "process":
+            self._workdir = tempfile.mkdtemp(prefix="mh-iso-")
+            kwargs["cwd"] = self._workdir
+            for key in ("TEMP", "TMP", "TMPDIR"):
+                env[key] = self._workdir
+            if os.name == "posix":
+                kwargs["preexec_fn"] = _posix_limits(self.memory_mb, self.cpu_seconds)
+                kwargs["start_new_session"] = True
         env["PYTHONIOENCODING"] = "utf-8"
         self._lines = queue.Queue()
         self._stderr = []
@@ -209,7 +253,13 @@ class IsolatedHarness:
     @staticmethod
     def _pump_out(proc: subprocess.Popen, lines: queue.Queue) -> None:
         try:
-            for line in proc.stdout:  # type: ignore[union-attr]
+            while True:
+                line = proc.stdout.readline(MAX_FRAME_BYTES + 1)  # type: ignore[union-attr]
+                if not line:
+                    break
+                if len(line) > MAX_FRAME_BYTES:
+                    lines.put(_OVERFLOW)
+                    return
                 lines.put(line)
         except (OSError, ValueError):
             pass
@@ -218,7 +268,10 @@ class IsolatedHarness:
     @staticmethod
     def _pump_err(proc: subprocess.Popen, tail: list[str]) -> None:
         try:
-            for line in proc.stderr:  # type: ignore[union-attr]
+            while True:
+                line = proc.stderr.readline(STDERR_TAIL)  # type: ignore[union-attr]
+                if not line:
+                    break
                 tail.append(line)
                 while sum(len(x) for x in tail) > STDERR_TAIL and len(tail) > 1:
                     tail.pop(0)
@@ -235,6 +288,12 @@ class IsolatedHarness:
                 pass
             self._container = None
         if proc is not None:
+            if os.name == "posix" and self.mode == "process":
+                try:
+                    import signal
+                    os.killpg(proc.pid, signal.SIGKILL)  # the whole session: grandchildren too
+                except (OSError, ProcessLookupError):
+                    pass
             try:
                 proc.kill()
             except OSError:
@@ -264,6 +323,9 @@ class IsolatedHarness:
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 pass
         self._kill()
+        if self._workdir:
+            shutil.rmtree(self._workdir, ignore_errors=True)
+            self._workdir = None
 
     def __enter__(self) -> "IsolatedHarness":
         return self
@@ -277,6 +339,9 @@ class IsolatedHarness:
                 self.restarts += 1
                 if self._proc is not None:
                     self._kill()
+                if self._workdir:
+                    shutil.rmtree(self._workdir, ignore_errors=True)
+                    self._workdir = None
             self.start()
             if trace is not None:
                 for warning in self.warnings:
@@ -304,12 +369,16 @@ class IsolatedHarness:
         return IsolationError(f"harness process died (exit {code}; memory or CPU limit, or a crash)"
                               + (f": {tail}" if tail else ""))
 
+    def _broken(self, why: str) -> IsolationError:
+        self._kill()
+        return IsolationError(f"protocol violation: {why}; harness process killed")
+
     def _exchange(self, message: Mapping[str, Any], model: Any, trace: Any,
                   timeout: float | None) -> Any:
         deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
         try:
             self._send(message)
-        except (OSError, ValueError):
+        except (OSError, ValueError, AssertionError):
             raise self._died() from None
         while True:
             wait = None if deadline is None else deadline - time.monotonic()
@@ -322,10 +391,14 @@ class IsolatedHarness:
                 continue
             if line is None:
                 raise self._died()
+            if line is _OVERFLOW:
+                raise self._broken(f"frame larger than {MAX_FRAME_BYTES} bytes")
             try:
                 reply = json.loads(line)
             except ValueError:
-                continue  # stray output on the protocol stream is ignored
+                raise self._broken("frame is not JSON") from None
+            if not isinstance(reply, dict):
+                raise self._broken("frame is not a JSON object")
             op = reply.get("op")
             if op == "result":
                 return reply.get("result")
@@ -333,15 +406,22 @@ class IsolatedHarness:
                 raise IsolationError(str(reply.get("error")))
             if op == "trace":
                 if trace is not None:
-                    fields = reply.get("fields") or {}
-                    trace.event(str(reply.get("event")), reply.get("payload"),
-                                **{str(k): v for k, v in fields.items()})
+                    fields = reply.get("fields")
+                    fields = fields if isinstance(fields, dict) else {}
+                    trace.event(f"harness.{reply.get('event')}", reply.get("payload"),
+                                **{str(k): v for k, v in fields.items() if str(k) not in RESERVED_FIELDS})
+            elif op == "learn_error":
+                if trace is not None:
+                    trace.event("learn_error", None, error=str(reply.get("error")))
             elif op == "model_call":
                 self._serve_model(reply, model, trace)
+            else:
+                raise self._broken(f"unknown op {op!r}")
 
     def _serve_model(self, reply: Mapping[str, Any], model: Any, trace: Any) -> None:
         prompt = str(reply.get("prompt", ""))
-        kwargs = dict(reply.get("kwargs") or {})
+        raw = reply.get("kwargs")
+        kwargs = model_kwargs(raw if isinstance(raw, dict) else {}, self.max_tokens)
         try:
             if model is None:
                 text, usage = "validation-response", {}
@@ -355,7 +435,7 @@ class IsolatedHarness:
             answer = {"op": "model_result", "error": f"{type(exc).__name__}: {exc}"}
         try:
             self._send(answer)
-        except (OSError, ValueError):
+        except (OSError, ValueError, AssertionError):
             pass  # the read loop sees the EOF
 
     # public API --------------------------------------------------------------------------------
@@ -381,7 +461,58 @@ class IsolatedHarness:
         return self._proc is not None and self._proc.poll() is None
 
 
+def docker_argv(name: str, source: Path, memory_mb: int, cpu_seconds: int, image: str) -> list[str]:
+    source = Path(source)
+    return ["docker", "run", "-i", "--rm", "--network", "none", "--cap-drop", "ALL",
+            "--read-only", "--tmpfs", "/tmp", "--user", "65534:65534",
+            "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m", "--cpus", "1",
+            "--pids-limit", "256", "--security-opt", "no-new-privileges", "--name", name,
+            "--ulimit", f"cpu={cpu_seconds}", "-w", "/tmp",
+            "-v", f"{PACKAGE_ROOT / 'meta_harness'}:/mh/meta_harness:ro",
+            "-v", f"{source.parent}:/c:ro", "-e", "PYTHONDONTWRITEBYTECODE=1",
+            image, "python", "-I", "-c", BOOTSTRAP, "/mh", f"/c/{source.name}"]
+
+
 # -- child side -----------------------------------------------------------------------------------
+
+def install_guards(candidate: Path) -> None:
+    """Best-effort, BYPASSABLE guards (ctypes, os.open, _socket, subprocess all get around them):
+    no socket connects, no open() outside the candidate dir, cwd, package and Python install."""
+    import builtins
+    import io
+    import socket
+    import sysconfig
+
+    def refuse(*_: Any, **__: Any) -> Any:
+        raise PermissionError("network access is blocked under isolation")
+
+    socket.socket.connect = refuse  # type: ignore[method-assign]
+    socket.socket.connect_ex = refuse  # type: ignore[method-assign]
+    socket.create_connection = refuse  # type: ignore[assignment]
+
+    roots = {Path(candidate).resolve().parent, Path.cwd().resolve(), Path(__file__).resolve().parent,
+             Path(tempfile.gettempdir()).resolve()}
+    for key in ("stdlib", "platstdlib", "purelib", "platlib"):
+        try:
+            roots.add(Path(sysconfig.get_paths()[key]).resolve())
+        except (KeyError, OSError):
+            pass
+    for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix}:
+        roots.add(Path(prefix).resolve() / ("Lib" if os.name == "nt" else "lib"))
+    allowed = tuple(roots)
+    real_open = builtins.open
+
+    def guarded_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, (str, bytes, os.PathLike)):
+            raw = os.fsdecode(file)
+            target = Path(raw).resolve()
+            if not any(target == root or root in target.parents for root in allowed):
+                raise PermissionError(f"open() outside the sandbox is refused: {raw}")
+        return real_open(file, *args, **kwargs)
+
+    builtins.open = guarded_open
+    io.open = guarded_open  # type: ignore[assignment]
+
 
 class _Channel:
     def __init__(self, inp, out):
@@ -432,6 +563,9 @@ class _RemoteModel:
     def __call__(self, prompt: str, **kwargs: Any) -> str:
         return self.call(prompt, **kwargs)[0]
 
+    def chat(self, *_: Any, **__: Any) -> Any:
+        raise RuntimeError(CHAT_UNAVAILABLE)
+
 
 def _build(path: Path) -> Any:
     import importlib.util
@@ -466,6 +600,8 @@ def child_main(argv: list[str]) -> int:
     harness: Any = None
     saved: Any = None
     default_path = Path(argv[0]) if argv else None
+    if default_path is not None and os.environ.get(GUARDS_ENV, "1") != "0":
+        install_guards(default_path)
     while True:
         message = channel.receive()
         if message is None or message.get("op") == "exit":
@@ -484,7 +620,7 @@ def child_main(argv: list[str]) -> int:
                     try:
                         call_learn(harness, task, result, model)
                     except Exception as exc:  # the score stands; the failure is visible
-                        trace.event("learn_error", None, error=f"{type(exc).__name__}: {exc}")
+                        channel.send({"op": "learn_error", "error": f"{type(exc).__name__}: {exc}"})
                 channel.send({"op": "result", "result": _json_safe(result)})
             elif op == "snapshot":
                 saved = copy.deepcopy(harness)

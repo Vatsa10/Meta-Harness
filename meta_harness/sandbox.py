@@ -74,14 +74,16 @@ def validate_in_subprocess(source: Path | str, timeout: float = 20.0,
     it the legacy {"input": "validation"} row is used. `probe_dir` is accepted for compatibility
     (the probe now travels over the protocol, no temp file). `import_only` checks the import and
     the harness interface without running it (domains whose harnesses need a task container).
-    `isolation="none"` still uses a child process (validation is never in-process).
+    `isolation="none"` still uses a child process (validation is never in-process), but with
+    the parent environment passed through, as the evaluation itself would see it.
     """
     from .core import HarnessValidationError  # local import breaks the import cycle
     from .isolation import DEFAULT_IMAGE, IsolatedHarness, IsolationError, IsolationTimeout
 
     mode = "docker" if isolation == "docker" else "process"
     started = time.monotonic()
-    child = IsolatedHarness(Path(source), mode, memory_mb, cpu_seconds, image or DEFAULT_IMAGE)
+    child = IsolatedHarness(Path(source), mode, memory_mb, cpu_seconds, image or DEFAULT_IMAGE,
+                            inherit_env=isolation == "none")
     try:
         child.start(timeout=timeout)
         if import_only:

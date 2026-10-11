@@ -6,17 +6,21 @@ import time
 import pytest
 
 from meta_harness.core import CandidateEvaluator
-from meta_harness.isolation import IsolatedHarness, IsolationError, IsolationTimeout, scrubbed_env
+from meta_harness import isolation
+from meta_harness.isolation import (PACKAGE_ROOT, IsolatedHarness, IsolationError, IsolationTimeout,
+                                    docker_argv, scrubbed_env)
 from meta_harness.sandboxes import preflight
 
 
 class Recorder:
     def __init__(self, reply="pong"):
         self.prompts = []
+        self.kwargs = []
         self.reply = reply
 
     def __call__(self, prompt, **kwargs):
         self.prompts.append(prompt)
+        self.kwargs.append(kwargs)
         return self.reply
 
 
@@ -74,17 +78,21 @@ ENV = """
 import os
 class Harness:
     def run(self, task, model, trace):
-        return {"output": os.environ.get("UNIKEY_API_KEY", "") + "|" + os.environ.get("GH_TOKEN", "")}
+        names = ("UNIKEY_API_KEY", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "DATABASE_URL", "FOO_PASSWORD")
+        return {"output": "|".join(os.environ.get(n, "") for n in names)}
 """
 
 
 def test_child_sees_no_api_keys(tmp_path, monkeypatch):
     monkeypatch.setenv("UNIKEY_API_KEY", "uk-test-not-a-real-key")
     monkeypatch.setenv("GH_TOKEN", "gh-test-not-a-real-token")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-test-not-real")
+    monkeypatch.setenv("DATABASE_URL", "postgres://user:pw@host/db")
+    monkeypatch.setenv("FOO_PASSWORD", "hunter2")
     with IsolatedHarness(_harness(tmp_path, ENV)) as child:
         result = child.run({"input": "x"}, Recorder(), Trace(), timeout=30.0)
-    assert result["output"] == "|"
-    assert "UNIKEY_API_KEY" not in scrubbed_env({"UNIKEY_API_KEY": "v", "PATH": "p"})
+    assert result["output"] == "||||"
+    assert scrubbed_env({"DATABASE_URL": "v", "PATH": "p", "LC_ALL": "C"}) == {"PATH": "p", "LC_ALL": "C"}
 
 
 HOG = """
@@ -122,7 +130,7 @@ def test_model_calls_round_trip_through_the_parent(tmp_path):
         result = child.run({"input": "life"}, model, trace, timeout=30.0)
     assert model.prompts == ["question: life"]
     assert result["output"] == "answer-42"
-    assert ("thinking", {"step": 1}, {}) in trace.events
+    assert ("harness.thinking", {"step": 1}, {}) in trace.events
 
 
 def test_evaluator_meters_isolated_model_calls(tmp_path):
@@ -188,3 +196,144 @@ def test_docker_mode_runs_one_task(tmp_path):
     with IsolatedHarness(_harness(tmp_path, ECHO), mode="docker", memory_mb=256) as child:
         result = child.run({"input": "d"}, model, Trace(), timeout=120.0)
     assert result["output"] == "from-parent" and model.prompts == ["question: d"]
+
+
+GRANDCHILD = """
+import subprocess, sys, time
+class Harness:
+    def run(self, task, model, trace):
+        beat = task["beat"]
+        code = ("import time, pathlib\\n"
+                "p = pathlib.Path(%r)\\n"
+                "end = time.time() + 15\\n"
+                "while time.time() < end:\\n"
+                "    p.write_text(str(time.time()))\\n"
+                "    time.sleep(0.1)\\n") % beat
+        subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(30)
+        return {"output": "never"}
+"""
+
+
+def test_timeout_kills_grandchildren(tmp_path):
+    beat = tmp_path / "beat.txt"
+    with IsolatedHarness(_harness(tmp_path, GRANDCHILD)) as child:
+        child.start()
+        if not child.limits_applied:
+            pytest.skip("no job object: grandchildren cannot be reaped on this host")
+        with pytest.raises(IsolationTimeout):
+            child.run({"input": "x", "beat": str(beat)}, Recorder(), Trace(), timeout=3.0)
+    assert beat.exists(), "the grandchild never started"
+    time.sleep(1.0)
+    first = beat.read_text(encoding="utf-8")
+    time.sleep(1.0)
+    assert beat.read_text(encoding="utf-8") == first, "a grandchild survived the kill"
+
+
+GUARDS = """
+import socket
+class Harness:
+    def run(self, task, model, trace):
+        out = []
+        try:
+            open(task["secret"], "r")
+            out.append("opened")
+        except PermissionError:
+            out.append("refused")
+        except OSError:
+            out.append("missing-but-allowed")
+        try:
+            socket.create_connection(("127.0.0.1", 9), timeout=1)
+            out.append("connected")
+        except PermissionError:
+            out.append("blocked")
+        except OSError:
+            out.append("unblocked")
+        with open("scratch.txt", "w") as f:
+            f.write("ok")
+        out.append("cwd-ok")
+        return {"output": ",".join(out)}
+"""
+
+
+def test_guards_refuse_repo_env_and_sockets(tmp_path):
+    secret = PACKAGE_ROOT / ".env"
+    with IsolatedHarness(_harness(tmp_path, GUARDS)) as child:
+        result = child.run({"input": "x", "secret": str(secret)}, Recorder(), Trace(), timeout=30.0)
+    assert result["output"] == "refused,blocked,cwd-ok"
+    assert not (tmp_path / "scratch.txt").exists()  # cwd is a fresh temp dir, not the candidate dir
+
+
+def test_docker_argv_is_hardened(tmp_path):
+    argv = docker_argv("n", tmp_path / "harness.py", 256, 30, "python:3.12-slim")
+    joined = " ".join(argv)
+    for flag in ("--network none", "--cap-drop ALL", "--read-only", "--tmpfs /tmp",
+                 "--user 65534:65534", "--memory 256m", "--cpus 1"):
+        assert flag in joined
+
+
+def test_oversized_frame_kills_child(tmp_path, monkeypatch):
+    monkeypatch.setattr(isolation, "MAX_FRAME_BYTES", 1024)
+    body = """
+import sys
+class Harness:
+    def run(self, task, model, trace):
+        sys.__stdout__.write("x" * 4096)
+        sys.__stdout__.flush()
+        return {"output": "x"}
+"""
+    with IsolatedHarness(_harness(tmp_path, body)) as child:
+        with pytest.raises(IsolationError, match="larger than"):
+            child.run({"input": "x"}, Recorder(), Trace(), timeout=30.0)
+        assert not child.alive()
+
+
+def test_non_object_frame_rejected(tmp_path):
+    body = """
+import sys
+class Harness:
+    def run(self, task, model, trace):
+        sys.__stdout__.write("[1, 2]\\n")
+        sys.__stdout__.flush()
+        return {"output": "x"}
+"""
+    with IsolatedHarness(_harness(tmp_path, body)) as child:
+        with pytest.raises(IsolationError, match="not a JSON object"):
+            child.run({"input": "x"}, Recorder(), Trace(), timeout=30.0)
+
+
+def test_trace_events_prefixed_and_reserved_fields_dropped(tmp_path):
+    body = """
+class Harness:
+    def run(self, task, model, trace):
+        trace.event("task_end", {"reward": 1.0}, time=0, event="forged", error="e")
+        return {"output": "x"}
+"""
+    trace = Trace()
+    with IsolatedHarness(_harness(tmp_path, body)) as child:
+        child.run({"input": "x"}, Recorder(), trace, timeout=30.0)
+    assert trace.events == [("harness.task_end", {"reward": 1.0}, {"error": "e"})]
+
+
+def test_model_kwargs_whitelisted_and_capped(tmp_path):
+    body = """
+class Harness:
+    def run(self, task, model, trace):
+        return {"output": model("p", temperature=0.1, max_tokens=10**9, api_key="x", base_url="y")}
+"""
+    model = Recorder()
+    with IsolatedHarness(_harness(tmp_path, body), max_tokens=4096) as child:
+        child.run({"input": "x"}, model, Trace(), timeout=30.0)
+    assert model.kwargs == [{"temperature": 0.1, "max_tokens": 4096}]
+
+
+def test_chat_in_child_gives_clear_error(tmp_path):
+    body = """
+class Harness:
+    def run(self, task, model, trace):
+        return {"output": model.chat("s", [])}
+"""
+    with IsolatedHarness(_harness(tmp_path, body)) as child:
+        with pytest.raises(IsolationError, match=r"chat\(\) is unavailable under --isolation process"):
+            child.run({"input": "x"}, Recorder(), Trace(), timeout=30.0)

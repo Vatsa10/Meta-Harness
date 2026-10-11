@@ -415,6 +415,8 @@ def _load_harness(path: Path) -> Any:
 
 
 MAX_ABANDONED_THREADS = 8
+# CandidateEvaluator's isolation when none is given (the test suite sets "none" for speed).
+DEFAULT_ISOLATION = "process"
 _abandoned: list[threading.Thread] = []
 _abandoned_lock = threading.Lock()
 
@@ -496,7 +498,7 @@ class CandidateEvaluator:
                  train_tasks: Sequence[Mapping[str, Any]] = (), evaluation_timeout: float | None = None,
                  harness_wrapper: Callable[[Any], Any] | None = None,
                  source_validator: Callable[[Path, Sequence[Mapping[str, Any]]], None] | None = None,
-                 import_only_validation: bool = False, isolation: str = "process",
+                 import_only_validation: bool = False, isolation: str | None = None,
                  memory_mb: int = 2048, cpu_seconds: int = 600, docker_image: str = "python:3.12-slim"):
         """`harness_wrapper` wraps each loaded harness (a domain's HARNESS_WRAPPER);
         `source_validator(source, tasks)` raises to reject a candidate's source before it runs
@@ -509,6 +511,7 @@ class CandidateEvaluator:
         "docker" runs it in a networkless container; "none" runs it in-process (threads, no
         preemptive kill). A domain with a `harness_wrapper` (terminal) always runs in-process:
         its harness drives its own task container."""
+        isolation = DEFAULT_ISOLATION if isolation is None else isolation
         if isolation not in ISOLATION_MODES:
             raise ValueError(f"isolation must be one of {ISOLATION_MODES}")
         self.isolation = isolation
@@ -597,7 +600,7 @@ class CandidateEvaluator:
                              timeout=max(0.0, remaining - (time.monotonic() - begun)))
         finally:
             if iso.alive():
-                iso.restore()
+                iso.restore(timeout=max(1.0, remaining - (time.monotonic() - begun)))
         return float(self.metric(task, result)), result
 
     def _evaluate_loaded(self, harness: Any, isolated: IsolatedHarness | None,

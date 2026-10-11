@@ -316,3 +316,9 @@ python -m pytest -q
 
 No network calls. The hook layer is covered by Node tests under `hooks/` that the
 Python suite shells out to; they are skipped, with the reason stated, when `node` is absent.
+
+## Candidate isolation
+
+`meta-harness search` evaluates each candidate harness with `--isolation process` (the default) unless told otherwise. The candidate runs in a child process with an allowlisted environment, so it gets no API keys or other secrets. Its working directory is a fresh temp dir, and memory/CPU limits apply: `--memory-mb` and `--cpu-seconds`, enforced by rlimits on POSIX and a Job Object on Windows. Model calls are answered by the parent process. Per-task timeouts kill the child and its process group or job, including any grandchildren.
+
+The child also blocks socket connects and refuses `open()` outside its own directories, which keeps it away from the repo `.env`. These guards are best-effort and bypassable: `ctypes`, `os.open`, `_socket` and subprocesses get around them, and the child runs as your OS user. `--isolation docker` is the real boundary. It runs the candidate with no network, `--cap-drop ALL`, a read-only root filesystem, user 65534, and only the package and the candidate mounted read-only. `--isolation none` runs candidates in-process. Native `model.chat()` is not available under `process`.
