@@ -68,3 +68,19 @@ def test_list_unikey_models_parses_data(monkeypatch):
 
     monkeypatch.setattr(providers, "_http_get_json", fake_get)
     assert providers.list_unikey_models(api_key="k") == ["claude-sonnet-4-6", "gpt-5.2"]
+
+
+def test_list_models_generic_and_alias_agree(monkeypatch):
+    monkeypatch.delenv("UNIKEY_BASE_URL", raising=False)
+    monkeypatch.setattr(providers, "_http_get_json", lambda url, headers, timeout: {"data": [{"id": "x"}]})
+    assert providers.list_models("unikey", api_key="k") == providers.list_unikey_models(api_key="k") == ["x"]
+
+
+def test_missing_key_message_names_variable(monkeypatch):
+    monkeypatch.delenv("UNIKEY_API_KEY", raising=False)
+    try:
+        providers.UnikeyModel("m")
+    except providers.ProviderError as error:
+        assert str(error) == "UNIKEY_API_KEY is not set"
+    else:
+        raise AssertionError("expected ProviderError")

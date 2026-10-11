@@ -1,0 +1,4 @@
+{"id": "chatcmpl-3", "object": "chat.completion", "model": "gpt-5-mini",
+ "choices": [{"index": 0, "finish_reason": "stop",
+   "message": {"role": "assistant", "content": "The frontier has three candidates."}}],
+ "usage": {"prompt_tokens": 90, "completion_tokens": 8, "total_tokens": 98}}

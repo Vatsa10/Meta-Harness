@@ -1,0 +1,8 @@
+{"id": "chatcmpl-1", "object": "chat.completion", "model": "gpt-5-mini",
+ "choices": [{"index": 0, "finish_reason": "tool_calls",
+   "message": {"role": "assistant", "content": null,
+     "tool_calls": [{"id": "call_1", "type": "function",
+                     "function": {"name": "grep", "arguments": "{\"pattern\": \"label\", \"path\": \"candidates\"}"}}]}}],
+ "usage": {"prompt_tokens": 700, "completion_tokens": 30, "total_tokens": 730,
+           "prompt_tokens_details": {"cached_tokens": 512},
+           "completion_tokens_details": {"reasoning_tokens": 12}}}
