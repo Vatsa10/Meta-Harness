@@ -112,7 +112,9 @@ class TaskSandbox(DockerSandbox):
             args += ["--memory", f"{self.memory_mb}m"]
         if self.cpus is not None:
             args += ["--cpus", str(self.cpus)]
-        return args + ["-w", self.workdir, self.image, "sleep", "infinity"]
+        # --entrypoint: `sleep infinity` runs directly whatever ENTRYPOINT the image sets, so
+        # the container survives `docker restart` before scoring.
+        return args + ["-w", self.workdir, "--entrypoint", "sleep", self.image, "infinity"]
 
     def start(self) -> None:
         if self._started:
@@ -214,6 +216,11 @@ class Container:
                          encoding="utf-8", errors="replace", timeout=timeout)
         if done.returncode != 0:
             raise RuntimeError(f"docker restart failed: {(done.stderr or '').strip()[-500:]}")
+        alive = self._run(["docker", "exec", str(self.id), "true"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+        if alive.returncode != 0:
+            raise RuntimeError(f"container {self.id} is not running after docker restart; refusing to "
+                               f"score: {(alive.stderr or '').strip()[-500:]}")
 
     def diff(self, timeout: float = 120.0) -> list[tuple[str, str]]:
         """`docker diff`: (kind, path) for every change against the image; kind is A, C or D."""

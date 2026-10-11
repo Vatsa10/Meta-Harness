@@ -405,3 +405,61 @@ def test_no_network_guard_blocks_connect_and_connect_ex():
                 getattr(sock, method)(("127.0.0.1", 9))
         finally:
             sock.close()
+
+
+# -- review round 1 ----------------------------------------------------------------------------
+
+def test_run_json_records_the_resolved_metric_and_its_source(tmp_path, capsys):
+    data = tmp_path / "m.jsonl"
+    data.write_text("".join(json.dumps({"problem": f"{i}+0", "answer": str(i)}) + "\n" for i in range(4)),
+                    encoding="utf-8")
+    common = ["search", "--domain", "math", "--harness", str(SMOKE / "seed.py"), "--data", str(data),
+              "--provider", "scripted", "--model", str(SMOKE / "base.jsonl"), "--iterations", "0", "--no-cache"]
+    assert cli.main([*common, "--root", str(tmp_path / "a")]) == 0
+    meta = json.loads((tmp_path / "a" / "run.json").read_text(encoding="utf-8"))["run_meta"]
+    assert meta["metric"] == "numeric" and meta["metric_source"] == "domain_default"
+    assert cli.main([*common, "--root", str(tmp_path / "b"), "--metric", "contains"]) == 0
+    meta = json.loads((tmp_path / "b" / "run.json").read_text(encoding="utf-8"))["run_meta"]
+    assert meta["metric"] == "contains" and meta["metric_source"] == "flag"
+
+
+def test_receipt_records_the_validation_mode(terminal_search, tmp_path, capsys):
+    run, root = terminal_search
+    assert run(TERMINAL_SEED) == 0
+    receipt = json.loads((root / "candidates" / "initial-0000" / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["validation_mode"] == "import_only"
+    assert cli.main(["search", "--harness", str(SMOKE / "seed.py"), "--data", str(SMOKE / "data.jsonl"),
+                     "--provider", "scripted", "--model", str(SMOKE / "base.jsonl"), "--iterations", "0",
+                     "--root", str(tmp_path / "g"), "--no-cache"]) == 0
+    receipt = json.loads((tmp_path / "g" / "candidates" / "initial-0000" / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["validation_mode"] == "full"
+
+
+def _docker_runner(alive=True):
+    import subprocess
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs.get("encoding") == "utf-8" and kwargs.get("timeout")
+        code = 1 if (argv[1] == "exec" and argv[-1] == "true" and not alive) else 0
+        return subprocess.CompletedProcess(argv, code, "", "" if code == 0 else "is not running")
+    return runner, calls
+
+
+def test_restart_verifies_the_container_is_running():
+    from meta_harness.terminal import Container
+
+    runner, calls = _docker_runner(alive=True)
+    Container.attach("cid-3", "/app", runner=runner).restart()
+    assert calls == [["docker", "restart", "-t", "0", "cid-3"], ["docker", "exec", "cid-3", "true"]]
+    runner, calls = _docker_runner(alive=False)
+    with pytest.raises(RuntimeError, match="not running after docker restart"):
+        Container.attach("cid-3", "/app", runner=runner).restart()
+
+
+def test_task_containers_override_the_image_entrypoint():
+    from meta_harness.terminal import TaskSandbox
+
+    args = TaskSandbox("img", workdir="/app").run_args("n1")
+    assert args[-4:] == ["--entrypoint", "sleep", "img", "infinity"]

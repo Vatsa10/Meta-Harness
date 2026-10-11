@@ -847,6 +847,8 @@ class SearchRunner:
             return self._reject(candidate_id, directory, receipt, "rejected_invalid_source",
                                 f"validation failed: {exc}", split)
         receipt["validation"] = {"ok": True}
+        receipt["validation_mode"] = ("import_only" if getattr(self.evaluator, "import_only_validation", False)
+                                      else "full")
         self._write_receipt(directory, receipt)
         harness_path = directory / "harness.py"
         runs = []

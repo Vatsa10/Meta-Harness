@@ -185,15 +185,17 @@ def _train_tasks(args, domain, search_tasks: list[dict]) -> tuple[list[dict], li
                      "disjoint from search: give --train, or --data for a seeded three-way split")
 
 
-def default_metric(name: str, domain) -> Any:
-    """The domain's own metric (terminal: METRICS["terminal"]), else the shared task-type map."""
+def default_metric(name: str, domain) -> tuple[str, Any]:
+    """(resolved name, metric): the domain's own METRICS[name] (terminal), else the shared
+    task-type map, else exact."""
     own = getattr(domain, "METRICS", None) or {}
     if name in own:
-        return own[name]
+        return name, own[name]
     try:
-        return metric_for(name)
+        metric = metric_for(name)
     except KeyError:
-        return resolve_metric("exact")
+        return "exact", resolve_metric("exact")
+    return getattr(metric, "__name__", name), metric
 
 
 def _verdicts(root: Path) -> dict[str, int]:
@@ -246,8 +248,11 @@ def _prepare(args):
         domain = get_domain(args.domain)
     except KeyError as exc:
         raise UsageError(str(exc.args[0] if exc.args else exc)) from None
-    metric = (resolve_metric(args.metric, extra=getattr(domain, "METRICS", None) or None)
-              if args.metric else default_metric(args.domain, domain))
+    if args.metric:
+        metric_name, metric_source = args.metric, "flag"
+        metric = resolve_metric(args.metric, extra=getattr(domain, "METRICS", None) or None)
+    else:
+        (metric_name, metric), metric_source = default_metric(args.domain, domain), "domain_default"
     search_tasks, test_tasks = _load_tasks(args, domain)
     protocol = getattr(domain, "PROTOCOL", "plain")
     train_tasks: list[dict] = []
@@ -276,7 +281,8 @@ def _prepare(args):
     run_meta = {"provider": args.provider, "model": args.model,
                 "proposer_provider": proposer_provider, "proposer_model": proposer_model_name,
                 "optimizer": "command" if args.proposer_command else "metaharness",
-                "view": args.view, "domain": args.domain, "metric": args.metric or "default"}
+                "view": args.view, "domain": args.domain, "metric": metric_name,
+                "metric_source": metric_source}
     if args.domain == "terminal":
         from ..loaders import terminalbench
         version = args.dataset_version or terminalbench.DEFAULT_VERSION

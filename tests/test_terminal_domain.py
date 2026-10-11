@@ -374,5 +374,6 @@ def test_container_restart_and_diff_use_the_docker_cli():
     box = Container.attach("cid-7", "/app", runner=runner)
     box.restart()
     assert box.diff() == [("C", "/bin"), ("C", "/bin/bash"), ("A", "/app/x")]
-    assert calls == [["docker", "restart", "-t", "0", "cid-7"], ["docker", "diff", "cid-7"]]
+    assert calls == [["docker", "restart", "-t", "0", "cid-7"], ["docker", "exec", "cid-7", "true"],
+                     ["docker", "diff", "cid-7"]]
     assert domain.tampered_paths(box.diff()) == ["C /bin", "C /bin/bash"]
