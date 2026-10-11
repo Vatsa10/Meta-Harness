@@ -334,3 +334,47 @@ def test_cosine():
     assert embeddings.cosine([1, 0], [0, 2]) == pytest.approx(0.0)
     assert embeddings.cosine([1, 1], [-1, -1]) == pytest.approx(-1.0)
     assert embeddings.cosine([0, 0], [1, 0]) == 0.0
+
+
+# --- review fixes: redaction, tool errors, Retry-After floor -----------------------------------
+
+def test_http_error_body_and_configured_key_are_redacted():
+    key = "plain-configured-key-0123456789"
+    body = b'{"error": "Incorrect API key provided: sk-proj-abc123def456. Key ' + key.encode() + b'"}'
+
+    def urlopen(request, timeout):
+        raise urllib.error.HTTPError("http://x", 401, "err", {}, io.BytesIO(body))
+
+    client = providers._HttpClient(urlopen=urlopen, sleep=lambda s: None)
+    with pytest.raises(providers.ProviderError) as info:
+        client.post("http://x", {"Authorization": f"Bearer {key}"}, {})
+    text = str(info.value)
+    assert "HTTP 401" in text
+    assert "sk-proj-abc123" not in text and key not in text
+
+
+def test_unexpected_response_with_env_key_is_redacted(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key-value-9876543210")
+    with pytest.raises(providers.ProviderError) as info:
+        providers.parse_openai({"echo": "env-key-value-9876543210"})
+    assert "env-key-value-9876543210" not in str(info.value)
+
+
+def test_anthropic_tool_errors_are_flagged_openai_ignores_flag():
+    messages = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "text": "", "tool_calls": [ToolCall("c1", "read", {}), ToolCall("c2", "read", {}),
+                                                        ToolCall("c3", "read", {})]},
+        {"role": "tool", "tool_call_id": "c1", "name": "read", "content": "ok"},
+        {"role": "tool", "tool_call_id": "c2", "name": "read", "content": "boom", "is_error": True},
+    ]
+    blocks = providers.anthropic_request("m", "s", messages, [], 10)["messages"][2]["content"]
+    assert [b.get("is_error", False) for b in blocks] == [False, True, True]
+    tools = [m for m in providers.openai_request("m", "s", messages, [], 10)["messages"] if m["role"] == "tool"]
+    assert all(set(m) == {"role", "tool_call_id", "content"} for m in tools)
+
+
+def test_retry_after_zero_floors_at_half_second():
+    client, _, sleeps = _client([_http_error(429, {"Retry-After": "0"}), OK])
+    client.post("http://x", {}, {})
+    assert sleeps == [0.5]

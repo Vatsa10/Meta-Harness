@@ -21,16 +21,25 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from .redact import REDACTED, redact
 from .chat_types import AssistantTurn, ToolCall, ToolSpec, Usage
 
 UNIKEY_BASE_URL = "https://www.getunikey.ai/v1"
 UNIKEY_ANTHROPIC_BASE_URL = "https://www.getunikey.ai"
+RETRY_AFTER_FLOOR = 0.5
 ORPHAN_RESULT = "error: no result (turn ended)"
 RETRY_AFTER_CAP = 60.0
 
 
 class ProviderError(RuntimeError):
-    pass
+    """Provider failure. The message is always redacted: secret patterns, loaded *_API_KEY values
+    and any extra `secrets` (e.g. an explicitly passed key) never appear in str(exc)."""
+
+    def __init__(self, message: str = "", secrets: Sequence[str] = ()):
+        text = str(message)
+        for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+            text = text.replace(secret, REDACTED)
+        super().__init__(redact(text))
 
 
 @dataclass
@@ -61,7 +70,7 @@ def _retry_after(value: str | None) -> float | None:
         if when is None:
             return None
         seconds = when.timestamp() - time.time()
-    return max(0.0, min(RETRY_AFTER_CAP, seconds))
+    return max(RETRY_AFTER_FLOOR, min(RETRY_AFTER_CAP, seconds))
 
 
 def _is_empty(value: Mapping[str, Any]) -> bool:
@@ -116,6 +125,14 @@ class _HttpClient:
 
     def post(self, url: str, headers: Mapping[str, str], body: Mapping[str, Any]) -> dict[str, Any]:
         payload = json.dumps(body).encode("utf-8")
+        secrets = [value.split()[-1] for name, value in headers.items()
+                   if name.lower() in {"authorization", "x-api-key"} and value.strip()]
+        try:
+            return self._post(url, headers, payload)
+        except ProviderError as error:
+            raise ProviderError(str(error.args[0] if error.args else error), secrets) from error.__cause__
+
+    def _post(self, url: str, headers: Mapping[str, str], payload: bytes) -> dict[str, Any]:
         attempts = max(1, self.retry.attempts)
         for attempt in range(attempts):
             try:
@@ -196,7 +213,8 @@ def _close_orphans(messages: Sequence[Mapping[str, Any]]) -> list[Mapping[str, A
 
     def flush() -> None:
         for call in pending:
-            out.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": ORPHAN_RESULT})
+            out.append({"role": "tool", "tool_call_id": call.id, "name": call.name, "content": ORPHAN_RESULT,
+                        "is_error": True})
         pending.clear()
 
     for message in messages:
@@ -250,6 +268,8 @@ def anthropic_request(model: str, system: str, messages: list[dict], tools: Sequ
         elif role == "tool":
             block = {"type": "tool_result", "tool_use_id": message["tool_call_id"],
                      "content": str(message["content"])}
+            if message.get("is_error"):
+                block["is_error"] = True
             # Several results for one assistant turn go in ONE user message.
             if wire and wire[-1]["role"] == "user" and isinstance(wire[-1]["content"], list):
                 wire[-1]["content"].append(block)
@@ -453,7 +473,10 @@ def list_models(provider: str, api_key: str | None = None, base_url: str | None 
         raise ValueError(f"list_models supports {', '.join(OPENAI_COMPATIBLE)}; got {provider!r}")
     key = _require_key(cls, api_key)
     root = (base_url or os.environ.get(cls.BASE_URL_ENV) or cls.DEFAULT_BASE_URL).rstrip("/")
-    payload = _http_get_json(root + "/models", {"Authorization": f"Bearer {key}"}, timeout)
+    try:
+        payload = _http_get_json(root + "/models", {"Authorization": f"Bearer {key}"}, timeout)
+    except ProviderError as error:
+        raise ProviderError(str(error), [key]) from error
     return sorted(str(item.get("id", "")) for item in payload.get("data", []) if item.get("id"))
 
 
