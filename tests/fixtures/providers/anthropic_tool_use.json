@@ -1,0 +1,6 @@
+{"id": "msg_01", "type": "message", "role": "assistant", "model": "claude-haiku-4-5",
+ "content": [{"type": "text", "text": "Reading the frontier first."},
+             {"type": "tool_use", "id": "toolu_01", "name": "read", "input": {"path": "frontier.json"}},
+             {"type": "tool_use", "id": "toolu_02", "name": "list", "input": {"path": "candidates"}}],
+ "stop_reason": "tool_use",
+ "usage": {"input_tokens": 812, "output_tokens": 64, "cache_read_input_tokens": 2048, "cache_creation_input_tokens": 128}}

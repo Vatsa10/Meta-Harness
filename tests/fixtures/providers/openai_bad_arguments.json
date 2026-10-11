@@ -1,0 +1,6 @@
+{"id": "chatcmpl-2", "object": "chat.completion", "model": "gpt-5-mini",
+ "choices": [{"index": 0, "finish_reason": "tool_calls",
+   "message": {"role": "assistant", "content": null,
+     "tool_calls": [{"id": "call_1", "type": "function",
+                     "function": {"name": "grep", "arguments": "{\"pattern\": "}}]}}],
+ "usage": {"prompt_tokens": 700, "completion_tokens": 30, "total_tokens": 730}}
