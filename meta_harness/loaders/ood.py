@@ -12,7 +12,8 @@ Sources, verified against what the servers actually return (2026-10-11):
 * finer139   HF nlpaueb/finer-139, config finer-139, split test (108378 rows); fields `tokens`,
              `ner_tags` (279 BIO tags over 139 XBRL types, names served in the features).
 * amazon5    HF SetFit/amazon_reviews_multi_en, config default, split test (5000 rows); fields
-             `text`, `label_text`. Served label_text is the 0-based star rating "0".."4".
+             `text`, int `label` 0..4 (0-based star rating; `label_text` is just that number as a string),
+             rendered as "1 star".."5 stars".
 * fpb        zip `FinancialPhraseBank-v1.0/Sentences_AllAgree.txt` (2264 lines, latin-1,
              `sentence@label`); there is no official split, so the whole file is the pool.
              https://huggingface.co/datasets/takala/financial_phrasebank/resolve/main/data/FinancialPhraseBank-v1.0.zip
@@ -38,8 +39,7 @@ Framing decisions:
   names, without the B-/I- prefix.
 * Where an int label is served, it is mapped to its name: first from `OodSpec.label_names`, else
   from the ClassLabel names served with the rows.
-* `labels` of a string-labelled HF set (amazon5, scitail) is the sorted set of labels in the sample;
-  for the raw files (scicite, fpb, banking77) it is the sorted set over the whole file.
+* `labels` of amazon5 and scitail is the dataset's full class set, fixed in the spec; for the raw files (scicite, fpb, banking77) it is the sorted set over the whole file.
 * HF sets are sampled by `block`-sized pages in a seeded order until `limit` kept rows are
   collected (at most `MAX_PAGES` page requests), then shuffled and cut to `limit`.
 """
@@ -88,7 +88,8 @@ class OodSpec:
 OOD_SPECS: dict[str, OodSpec] = {
     "scicite": OodSpec("scicite", "raw: allenai scicite jsonl (scicite.tar.gz)", "string", "label"),
     "finer139": OodSpec("finer139", "hf:nlpaueb/finer-139/finer-139", "tokens", "ner_tags"),
-    "amazon5": OodSpec("amazon5", "hf:SetFit/amazon_reviews_multi_en/default", "text", "label_text"),
+    "amazon5": OodSpec("amazon5", "hf:SetFit/amazon_reviews_multi_en/default", "text", "label",
+                       ("1 star", "2 stars", "3 stars", "4 stars", "5 stars")),
     "fpb": OodSpec("fpb", "zip: takala/financial_phrasebank FinancialPhraseBank-v1.0 "
                           "Sentences_AllAgree.txt", "sentence", "label"),
     "goemotions": OodSpec("goemotions", "hf:google-research-datasets/go_emotions/simplified",
@@ -97,7 +98,8 @@ OOD_SPECS: dict[str, OodSpec] = {
                          "text", "category"),
     "agnews": OodSpec("agnews", "hf:fancyzhx/ag_news/default", "text", "label",
                       ("World", "Sports", "Business", "Sci/Tech")),
-    "scitail": OodSpec("scitail", "hf:allenai/scitail/tsv_format", ("premise", "hypothesis"), "label"),
+    "scitail": OodSpec("scitail", "hf:allenai/scitail/tsv_format", ("premise", "hypothesis"), "label",
+                        ("entails", "neutral")),
     "tweet_hate": OodSpec("tweet_hate", "hf:cardiffnlp/tweet_eval/hate", "text", "label",
                           ("non-hate", "hate")),
 }

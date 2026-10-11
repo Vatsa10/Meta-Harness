@@ -1,4 +1,6 @@
-"""`meta-harness ood`: evaluate frozen harnesses on the nine out-of-distribution sets."""
+"""`meta-harness ood`: evaluate frozen harnesses on the nine out-of-distribution sets.
+
+Default is a small run (--limit 20 tasks per dataset); pass --limit 1000 for the paper's scale."""
 
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from ..loaders.ood import OOD_SPECS, fetch_one
 from ..protocol import exact
 from ..providers import model_from_environment
 
+DEFAULT_LIMIT = 20
 NAME = "ood"
 HELP = "evaluate harnesses frozen on the nine out-of-distribution classification sets"
 
@@ -29,7 +32,9 @@ def add_arguments(parser) -> None:
                         help="stream this loader's train split to each harness first (default: zero-shot)")
     parser.add_argument("--train-limit", type=int, default=50,
                         help="train tasks streamed per harness (owner-scale default 50)")
-    parser.add_argument("--limit", type=int, help="tasks per dataset (default: the spec's 1000)")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                        help="tasks per dataset (default 20, the small-run cap; "
+                             "--limit 1000 is the paper's scale)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cache-dir", default=str(CACHE_ROOT))
     parser.add_argument("--out", default=".meta-harness/ood", help="directory receiving ood.json")
@@ -72,6 +77,10 @@ def run(args) -> int:
         missing = [str(h) for h in harnesses if not h.is_file()]
         if missing:
             raise ValueError(f"harness file not found: {', '.join(missing)}")
+        stems = [h.stem for h in harnesses]
+        duplicates = sorted({s for s in stems if stems.count(s) > 1})
+        if duplicates:
+            raise ValueError(f"harness file names must be unique, repeated: {', '.join(duplicates)}")
         cache = Path(args.cache_dir)
         train = _train_tasks(args, cache)
         data = {name: read_jsonl(fetch_one(name, cache / "ood", limit=args.limit, seed=args.seed))

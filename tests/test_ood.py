@@ -127,8 +127,12 @@ def test_raw_sources(tmp_path):
     assert len(bank) == 4 and len(set(t["label"] for t in bank)) == 4
 
 
-def test_amazon_uses_served_label_text(tmp_path):
-    assert load("amazon5", tmp_path)[0]["label"] == fixture("amazon5")["rows"][0]["row"]["label_text"]
+def test_amazon_stars_and_full_label_sets(tmp_path):
+    tasks = load("amazon5", tmp_path)
+    assert tasks[0]["label"] == "1 star"            # served label 0
+    assert tasks[0]["labels"] == ["1 star", "2 stars", "3 stars", "4 stars", "5 stars"]
+    one = load("scitail", tmp_path / "s", limit=1)
+    assert one[0]["labels"] == ["entails", "neutral"]    # full class set, not the sample
 
 
 def test_limit_subsampling_is_seeded_and_stable(tmp_path):
@@ -167,7 +171,7 @@ def test_ood_command_writes_one_row_per_dataset_per_harness(tmp_path, capsys):
     cache = tmp_path / "cache"
     http = FakeHttp()
     for name in ("agnews", "scitail"):
-        fetch_one(name, cache / "ood", http)
+        fetch_one(name, cache / "ood", http, limit=20)
     second = tmp_path / "second.py"
     second.write_text("class Harness:\n    def run(self, task, model):\n        return 'neutral'\n",
                       encoding="utf-8")
@@ -196,3 +200,23 @@ def test_ood_command_rejects_unknown_dataset(tmp_path, capsys):
                      "--model", str(_script(tmp_path)), "--cache-dir", str(tmp_path),
                      "--out", str(tmp_path / "o")])
     assert code == 2 and "agnews" in capsys.readouterr().err
+
+
+def test_ood_default_limit_is_twenty():
+    import argparse
+    from meta_harness.commands import ood as command
+    parser = argparse.ArgumentParser()
+    command.add_arguments(parser)
+    assert parser.parse_args(["--harness", "h.py", "--model", "m"]).limit == 20
+    assert "1000" in command.__doc__
+
+
+def test_ood_rejects_duplicate_harness_names(tmp_path, capsys):
+    other = tmp_path / "sub"
+    other.mkdir()
+    copy = other / BASELINE.name
+    copy.write_text(BASELINE.read_text(encoding="utf-8"), encoding="utf-8")
+    code = cli.main(["ood", "--harness", str(BASELINE), "--harness", str(copy), "--datasets", "agnews",
+                     "--provider", "scripted", "--model", str(_script(tmp_path)),
+                     "--cache-dir", str(tmp_path), "--out", str(tmp_path / "o")])
+    assert code == 2 and "unique" in capsys.readouterr().err
