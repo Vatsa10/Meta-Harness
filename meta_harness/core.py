@@ -954,6 +954,25 @@ class SearchRunner:
                     sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return kept
 
+    def _is_finished(self, label: str) -> bool:
+        directory = self.experience.candidate_dir(label)
+        receipt = self.read_receipt(directory) or {}
+        return (self._resuming and (directory / "scores.json").is_file()
+                and receipt.get("verdict") not in (None, "incomplete"))
+
+    def _budget_flags(self, work: Sequence[tuple[Path, str]]) -> list[bool]:
+        """over_budget per item; only unfinished items consume the remaining evaluation slots."""
+        remaining = self._remaining()
+        slots = None if remaining is None else remaining // self.config.repeats
+        flags = []
+        for _, label in work:
+            if slots is None or self._is_finished(label):
+                flags.append(False)
+            else:
+                flags.append(slots <= 0)
+                slots -= 1
+        return flags
+
     # -- the loop ------------------------------------------------------------------------------
 
     def run(self, initial: Sequence[Path | str], search_tasks: Sequence[Mapping[str, Any]],
@@ -969,9 +988,7 @@ class SearchRunner:
         self._manifest = self._run_manifest(search_tasks, test_tasks)
         self._checkpoint()
         seeds = [(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)]
-        remaining = self._remaining()
-        fits = len(seeds) if remaining is None else remaining // self.config.repeats
-        self._evaluate_many(seeds, search_tasks, over_budget=[i >= fits for i in range(len(seeds))])
+        self._evaluate_many(seeds, search_tasks, over_budget=self._budget_flags(seeds))
         count = self.config.candidates_per_iteration
         for iteration in range(1, self.config.iterations + 1):
             remaining = self._remaining()
@@ -995,8 +1012,7 @@ class SearchRunner:
                 with self._lock:
                     self.budget.proposals += len(proposals)
             work = [(Path(s), f"iteration-{iteration:04d}-{i:02d}") for i, s in enumerate(proposals)]
-            fits = len(work) if remaining is None else remaining // self.config.repeats
-            over = [index >= fits for index in range(len(work))]
+            over = self._budget_flags(work)
             self._evaluate_many(work, search_tasks, fingerprint_now=fingerprint(self.experience.root),
                                 over_budget=over)
             with self._lock:

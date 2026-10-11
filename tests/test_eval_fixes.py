@@ -474,3 +474,16 @@ def test_torn_test_trace_is_repaired_on_resume(tmp_path):
         handle.write('{"event": "tor')
     SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), lambda *a: []).run([seed], tasks, tasks, resume=True)
     assert read_jsonl(trace, tolerate_torn=False)
+
+
+def test_resumed_seeds_only_unfinished_ones_use_budget_slots(tmp_path):
+    seeds = []
+    for i in range(3):
+        seeds.append(tmp_path / f"s{i}.py")
+        seeds[-1].write_text(ECHO, encoding="utf-8")
+    config = SearchConfig(root=tmp_path / "r", iterations=0, max_evaluations=3)
+    tasks = [{"input": "a", "label": "x"}]
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), lambda *a: []).run(seeds[:2], tasks)
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "x"), lambda *a: []).run(seeds, tasks, resume=True)
+    assert _receipt(config.root, "initial-0002")["verdict"] == "accepted"
+    assert json.loads((config.root / "run.json").read_text(encoding="utf-8"))["budget"]["harness_evaluations"] == 3
