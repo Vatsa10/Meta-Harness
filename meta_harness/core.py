@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from . import protocol as _protocol
+from .isolation import MODES as ISOLATION_MODES, IsolatedHarness, IsolationTimeout
 from .metrics import estimate_tokens
 from .redact import bounded, redact_obj
 from .timeouts import Aborted, Watchdog
@@ -459,6 +460,27 @@ def _bounded_call(watchdog: Watchdog, fn: Callable[[], Any]) -> tuple[Any, str |
     return box.get("value"), box.get("error"), None
 
 
+def _isolated_call(watchdog: Watchdog, fn: Callable[[float], Any]) -> tuple[Any, str | None, str | None]:
+    """Like _bounded_call for an isolated harness: fn(remaining) runs inline and the child
+    process is killed preemptively at the limit, so no thread or process is left behind."""
+    watchdog.kick()
+    try:
+        watchdog.check()
+    except Aborted as exc:
+        return None, f"timeout: {exc.reason}", exc.reason
+    try:
+        return fn(watchdog.remaining()), None, None
+    except IsolationTimeout:
+        reason = "idle"
+        try:
+            watchdog.check()
+        except Aborted as exc:
+            reason = exc.reason
+        return None, f"timeout: harness killed at the {reason} limit", reason
+    except Exception as exc:  # noqa: BLE001 - a harness failure is a task score
+        return None, f"{type(exc).__name__}: {exc}", None
+
+
 class CandidateEvaluator:
     """Scores one harness on a task list.
 
@@ -474,12 +496,25 @@ class CandidateEvaluator:
                  train_tasks: Sequence[Mapping[str, Any]] = (), evaluation_timeout: float | None = None,
                  harness_wrapper: Callable[[Any], Any] | None = None,
                  source_validator: Callable[[Path, Sequence[Mapping[str, Any]]], None] | None = None,
-                 import_only_validation: bool = False):
+                 import_only_validation: bool = False, isolation: str = "process",
+                 memory_mb: int = 2048, cpu_seconds: int = 600, docker_image: str = "python:3.12-slim"):
         """`harness_wrapper` wraps each loaded harness (a domain's HARNESS_WRAPPER);
         `source_validator(source, tasks)` raises to reject a candidate's source before it runs
         (a domain's VALIDATE, e.g. the terminal leakage audit); `import_only_validation` makes
         the subprocess validation import the candidate without smoke-running it (a domain whose
-        harnesses need a task container, VALIDATE_IMPORT_ONLY)."""
+        harnesses need a task container, VALIDATE_IMPORT_ONLY).
+
+        `isolation`: "process" (default) runs the candidate in a child process with no API keys
+        in its environment and memory/CPU limits; model calls come back through this process.
+        "docker" runs it in a networkless container; "none" runs it in-process (threads, no
+        preemptive kill). A domain with a `harness_wrapper` (terminal) always runs in-process:
+        its harness drives its own task container."""
+        if isolation not in ISOLATION_MODES:
+            raise ValueError(f"isolation must be one of {ISOLATION_MODES}")
+        self.isolation = isolation
+        self.memory_mb = int(memory_mb)
+        self.cpu_seconds = int(cpu_seconds)
+        self.docker_image = docker_image
         if protocol not in ("plain", "online"):
             raise ValueError("protocol must be 'plain' or 'online'")
         self.model = model
@@ -525,13 +560,49 @@ class CandidateEvaluator:
     def evaluate(self, source: Path | str, tasks: Sequence[Mapping[str, Any]], candidate_id: str,
                  trace_path: Path, sample_index: int = 0) -> EvaluationResult:
         started = time.perf_counter()
+        isolated: IsolatedHarness | None = None
+        harness: Any = None
         try:
-            harness = _load_harness(Path(source))
-            if self.harness_wrapper is not None:
-                harness = self.harness_wrapper(harness)
+            if self.isolation != "none" and self.harness_wrapper is None:
+                isolated = IsolatedHarness(Path(source), self.isolation, self.memory_mb, self.cpu_seconds,
+                                           self.docker_image)
+                isolated.start()
+            else:
+                harness = _load_harness(Path(source))
+                if self.harness_wrapper is not None:
+                    harness = self.harness_wrapper(harness)
         except Exception as exc:
+            if isolated is not None:
+                isolated.close()
             return EvaluationResult(candidate_id, float("-inf"), {}, float("inf"), len(tasks),
                                     time.perf_counter() - started, False, repr(exc))
+        try:
+            return self._evaluate_loaded(harness, isolated, tasks, candidate_id, trace_path,
+                                         sample_index, started)
+        finally:
+            if isolated is not None:
+                isolated.close()
+
+    def _iso_plain(self, iso: IsolatedHarness, task: Mapping[str, Any], model: MeteredModel,
+                   trace: TraceRecorder, remaining: float) -> tuple[float, dict]:
+        result = iso.run(task, model, trace, learn=True, timeout=remaining)
+        return float(self.metric(task, result)), result
+
+    def _iso_frozen(self, iso: IsolatedHarness, task: Mapping[str, Any], model: MeteredModel,
+                    trace: TraceRecorder, remaining: float) -> tuple[float, dict]:
+        begun = time.monotonic()
+        iso.snapshot(timeout=remaining)
+        try:
+            result = iso.run(_protocol.hide_target(task), model, trace, learn=False,
+                             timeout=max(0.0, remaining - (time.monotonic() - begun)))
+        finally:
+            if iso.alive():
+                iso.restore()
+        return float(self.metric(task, result)), result
+
+    def _evaluate_loaded(self, harness: Any, isolated: IsolatedHarness | None,
+                         tasks: Sequence[Mapping[str, Any]], candidate_id: str, trace_path: Path,
+                         sample_index: int, started: float) -> EvaluationResult:
         online = self.protocol == "online"
         steps = len(tasks) + (len(self.train_tasks) if online else 0)
         deadline = self.evaluation_timeout or self.task_timeout * max(1, steps)
@@ -544,23 +615,43 @@ class CandidateEvaluator:
         train_tokens = 0
         with TraceRecorder(trace_path) as trace:
             metered = MeteredModel(self.model, trace, sample_index)
-            try:
-                if online:
-                    for index, task in enumerate(self.train_tasks):
-                        trace.event("train_task", {"index": index, "input": task.get("input")})
+
+            def train_stream(replay: bool = False) -> str | None:
+                for index, task in enumerate(self.train_tasks):
+                    trace.event("train_replay" if replay else "train_task",
+                                {"index": index, "input": task.get("input")})
+                    if isolated is not None:
+                        _, error, reason = _isolated_call(
+                            watchdog, lambda remaining, task=task: isolated.run(
+                                task, metered, trace, learn=True, timeout=remaining))
+                    else:
                         _, error, reason = _bounded_call(
                             watchdog, lambda task=task: self._train(harness, task, metered, trace))
-                        if error:
-                            trace.event("train_error", {"index": index}, error=error)
-                        if reason == "deadline":
-                            abort = abort or reason
-                            break
+                    if error:
+                        trace.event("train_error", {"index": index}, error=error)
+                    if reason == "deadline":
+                        return reason
+                return None
+
+            try:
+                if online:
+                    abort = train_stream()
                     train_tokens = metered.prompt_tokens
                 run_one = self._frozen if online else self._plain
+                iso_one = self._iso_frozen if online else self._iso_plain
                 for index, task in enumerate(tasks):
                     trace.event("task_start", {"index": index, "task": dict(task)})
+                    if online and isolated is not None and not isolated.alive() and abort != "deadline":
+                        # a kill lost the learned state: rebuild it by replaying the train stream
+                        before = metered.prompt_tokens
+                        abort = train_stream(replay=True) or abort
+                        train_tokens += metered.prompt_tokens - before
                     if abort == "deadline":
                         value, error, reason = None, "timeout: evaluation deadline already passed", "deadline"
+                    elif isolated is not None:
+                        value, error, reason = _isolated_call(
+                            watchdog, lambda remaining, task=task: iso_one(isolated, task, metered, trace,
+                                                                         remaining))
                     else:
                         value, error, reason = _bounded_call(
                             watchdog, lambda task=task: run_one(harness, task, metered, trace))
@@ -841,7 +932,12 @@ class SearchRunner:
         try:
             validate_in_subprocess(directory / "harness.py", self.config.validation_timeout, self.probe,
                                    self.experience.root,
-                                   import_only=bool(getattr(self.evaluator, "import_only_validation", False)))
+                                   import_only=bool(getattr(self.evaluator, "import_only_validation", False)),
+                                   isolation=("process" if getattr(self.evaluator, "harness_wrapper", None)
+                                              else getattr(self.evaluator, "isolation", "process")),
+                                   memory_mb=getattr(self.evaluator, "memory_mb", 2048),
+                                   cpu_seconds=getattr(self.evaluator, "cpu_seconds", 600),
+                                   image=getattr(self.evaluator, "docker_image", None))
         except Exception as exc:
             receipt["validation"] = {"ok": False, "error": bounded(str(exc))}
             return self._reject(candidate_id, directory, receipt, "rejected_invalid_source",

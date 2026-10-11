@@ -71,6 +71,11 @@ def add_arguments(p) -> None:
     p.add_argument("--proposer-timeout", type=float, default=1800.0)
     p.add_argument("--validation-timeout", type=float, default=20.0)
     p.add_argument("--task-timeout", type=float, default=600.0)
+    p.add_argument("--isolation", choices=["none", "process", "docker"], default="process",
+                   help="where candidates run: a limited child process with no API keys (default), "
+                        "a networkless Docker container, or in-process")
+    p.add_argument("--memory-mb", type=int, default=2048, help="candidate memory limit (MiB)")
+    p.add_argument("--cpu-seconds", type=int, default=600, help="candidate CPU-time limit (seconds)")
     p.add_argument("--resume", action="store_true", help="continue the run stored under --root")
     p.add_argument("--force-resume", action="store_true",
                    help="resume even past the automatic-resume limit (resets .resume_attempts)")
@@ -272,6 +277,14 @@ def _prepare(args):
             raise UsageError(f"{root} was already resumed {attempts} times automatically "
                              f"(limit {MAX_AUTOMATIC_RESUMES}); inspect it and use --force-resume")
 
+    if args.memory_mb <= 0 or args.cpu_seconds <= 0:
+        raise UsageError("--memory-mb and --cpu-seconds must be positive")
+    if args.isolation == "docker" and not getattr(domain, "HARNESS_WRAPPER", None):
+        from ..sandboxes import preflight
+        check = preflight()
+        if not check.ok:  # abort with the install hint; never fall back silently
+            raise UsageError(f"--isolation docker: {check.problem}. {check.hint}")
+
     base_model = _make_model(args.provider, args.model, args.base_url)
     proposer_provider = args.proposer_provider or args.provider
     proposer_model_name = args.proposer_model or args.model
@@ -282,7 +295,7 @@ def _prepare(args):
                 "proposer_provider": proposer_provider, "proposer_model": proposer_model_name,
                 "optimizer": "command" if args.proposer_command else "metaharness",
                 "view": args.view, "domain": args.domain, "metric": metric_name,
-                "metric_source": metric_source}
+                "metric_source": metric_source, "isolation": args.isolation}
     if args.domain == "terminal":
         from ..loaders import terminalbench
         version = args.dataset_version or terminalbench.DEFAULT_VERSION
@@ -306,7 +319,9 @@ def _prepare(args):
                                    train_tasks=train_tasks,
                                    harness_wrapper=getattr(domain, "HARNESS_WRAPPER", None),
                                    source_validator=getattr(domain, "VALIDATE", None),
-                                   import_only_validation=bool(getattr(domain, "VALIDATE_IMPORT_ONLY", False)))
+                                   import_only_validation=bool(getattr(domain, "VALIDATE_IMPORT_ONLY", False)),
+                                   isolation=args.isolation, memory_mb=args.memory_mb,
+                                   cpu_seconds=args.cpu_seconds)
     runner = SearchRunner(config, evaluator, proposer, prices=bare_prices(prices))
     return lambda: _execute(args, runner, model, config, root, harnesses, search_tasks, test_tasks,
                             train_tasks, resume, prices, proposer_provider, proposer_model_name)
