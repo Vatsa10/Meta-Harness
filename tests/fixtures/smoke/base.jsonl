@@ -1,0 +1,3 @@
+{"match": "(?i)label primed", "text": "PRIMED"}
+{"match": "apple|pear|plum|banana|grape", "text": "fruit"}
+{"default": "vehicle"}

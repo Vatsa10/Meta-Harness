@@ -1,0 +1,10 @@
+{"input": "a green apple", "label": "fruit"}
+{"input": "a ripe pear", "label": "fruit"}
+{"input": "a purple plum", "label": "fruit"}
+{"input": "a yellow banana", "label": "fruit"}
+{"input": "a bunch of grape", "label": "fruit"}
+{"input": "a fast car", "label": "vehicle"}
+{"input": "a red truck", "label": "vehicle"}
+{"input": "a blue van", "label": "vehicle"}
+{"input": "a city bus", "label": "vehicle"}
+{"input": "a old tractor", "label": "vehicle"}
