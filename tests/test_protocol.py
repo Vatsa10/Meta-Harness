@@ -83,3 +83,13 @@ def test_unresolvable_metric_raises_value_error_naming_spec(tmp_path):
     for spec in ("no_such_mod_xyz:fn", "m2:missing"):
         with pytest.raises(ValueError, match="(?s)" + spec.split(":")[0]):
             protocol.resolve_metric(spec, base=tmp_path)
+
+
+def test_py_metric_missing_or_broken_raises_valueerror(tmp_path):
+    import pytest
+    from meta_harness.protocol import resolve_metric
+    with pytest.raises(ValueError, match=r"nope\.py"):
+        resolve_metric("nope.py:f", base=tmp_path)
+    (tmp_path / "bad.py").write_text("def f(:\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"bad\.py.*SyntaxError"):
+        resolve_metric("bad.py:f", base=tmp_path)

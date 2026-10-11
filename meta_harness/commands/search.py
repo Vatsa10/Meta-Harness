@@ -29,6 +29,15 @@ DEFAULT_OPTIMIZER = "metaharness"
 DOMAINS = ("classification", "math", "generic", "terminal")
 
 
+def _optimizer_name(text: str) -> str:
+    """Canonical optimizer NAME for either spelling (ttt-discover / ttt_discover)."""
+    key = text.strip().lower().replace("-", "_")
+    for name in all_optimizers():
+        if name.replace("-", "_") == key:
+            return name
+    return text
+
+
 class UsageError(Exception):
     """A user-facing setup error: printed as one line on stderr, exit code 2."""
 
@@ -58,7 +67,7 @@ def add_arguments(p) -> None:
     p.add_argument("--base-url", help="API base URL for an OpenAI-compatible provider (default: environment)")
     p.add_argument("--proposer-provider", choices=PROVIDERS, help="default: --provider")
     p.add_argument("--proposer-model", help="default: --model")
-    p.add_argument("--optimizer", choices=sorted(all_optimizers()), default=DEFAULT_OPTIMIZER,
+    p.add_argument("--optimizer", type=_optimizer_name, choices=sorted(all_optimizers()), default=DEFAULT_OPTIMIZER,
                    help="which registered optimizer proposes candidates (all share the same budget)")
     p.add_argument("--max-evaluations", type=int, default=None,
                    help="equal-budget cap on search-split harness evaluations, for any optimizer")

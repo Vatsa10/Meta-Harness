@@ -95,7 +95,12 @@ def _load_file(path: Path):
     if spec is None or spec.loader is None:
         raise ValueError(f"cannot load metric file {str(path)!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except FileNotFoundError:
+        raise ValueError(f"metric file {str(path)!r} not found") from None
+    except SyntaxError as exc:
+        raise ValueError(f"cannot load metric file {str(path)!r}: SyntaxError: {exc.msg} (line {exc.lineno})") from exc
     return module
 
 
