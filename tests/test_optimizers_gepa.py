@@ -147,7 +147,7 @@ def test_partial_candidate_cannot_win_unscored_tasks():
     wins = gepa.task_wins(matrix)
     assert wins == {"A": set(), "P": {0}}                        # tasks 1 and 2 are not commonly scored
     matrix = {"A": {0: 0.5, 1: 0.5}, "P": {0: 0.1, 2: 0.9}}
-    assert gepa.task_wins(matrix) == {"A": {0}, "P": set()} or gepa.task_wins(matrix)["P"] <= {0}
+    assert gepa.task_wins(matrix) == {"A": {0}, "P": set()}      # only task 0 is common; A beats P there
 
 
 def test_invalid_candidates_are_never_parents(tmp_path):
