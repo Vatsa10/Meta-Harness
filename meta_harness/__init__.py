@@ -12,7 +12,7 @@ from .core import (
     SearchRunner,
     TraceRecorder,
 )
-from .agent_proposer import build_view
+from .views import build_view
 from .cache import CachedModel, DiskCache
 from .chat_types import AssistantTurn, ToolCall, ToolSpec, Usage
 from .envfile import load_env, parse_env
