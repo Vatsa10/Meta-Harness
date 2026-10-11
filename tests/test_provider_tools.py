@@ -378,3 +378,11 @@ def test_retry_after_zero_floors_at_half_second():
     client, _, sleeps = _client([_http_error(429, {"Retry-After": "0"}), OK])
     client.post("http://x", {}, {})
     assert sleeps == [0.5]
+
+
+@pytest.mark.parametrize("fixture", ["live_tool_calls.json"])
+def test_recorded_live_response_parses_one_list_call(fixture):
+    turn = providers.parse_openai(load(fixture))
+    assert [(c.name, c.arguments) for c in turn.tool_calls] == [("list", {"path": "."})]
+    assert turn.stop_reason == "tool_use"
+    assert turn.usage.input > 0 and turn.usage.output > 0
