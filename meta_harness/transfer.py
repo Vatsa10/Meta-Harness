@@ -53,16 +53,21 @@ def task_outcomes(trace_path: Path, price: Price | None) -> list[dict[str, Any]]
         record = json.loads(line)
         event, payload = record.get("event"), record.get("payload") or {}
         if event == "task_start":
-            current = {"task": payload.get("index"), "prompt_tokens": 0, "completion_tokens": 0}
+            current = {"task": payload.get("index"), "prompt_tokens": 0, "completion_tokens": 0,
+                       "cache_read_tokens": 0, "cache_write_tokens": 0}
         elif event == "model_call" and current is not None:
             usage = payload.get("usage") or {}
             current["prompt_tokens"] += int(payload.get("tokens") or 0)
             current["completion_tokens"] += int(usage.get("completion_tokens") or usage.get("output") or 0)
+            current["cache_read_tokens"] += int(usage.get("cache_read") or 0)
+            current["cache_write_tokens"] += int(usage.get("cache_write") or 0)
         elif event == "task_end" and current is not None:
             current["reward"] = float(payload.get("reward") or 0.0)
             current["stop_reason"] = payload.get("stop_reason")
             current["cost_usd"] = cost_usd(
-                Usage(input=current["prompt_tokens"], output=current["completion_tokens"]), price)
+                Usage(input=current["prompt_tokens"], output=current["completion_tokens"],
+                      cache_read=current["cache_read_tokens"], cache_write=current["cache_write_tokens"]),
+                price)
             outcomes.append(current)
             current = None
     return outcomes
@@ -79,6 +84,8 @@ def _merge_repeats(runs: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
             "task": cells[0]["task"], "reward": reward, "pass": reward > PASS_THRESHOLD,
             "prompt_tokens": sum(c["prompt_tokens"] for c in cells) / len(cells),
             "completion_tokens": sum(c["completion_tokens"] for c in cells) / len(cells),
+            "cache_read_tokens": sum(c["cache_read_tokens"] for c in cells) / len(cells),
+            "cache_write_tokens": sum(c["cache_write_tokens"] for c in cells) / len(cells),
             "cost_usd": None if any(c is None for c in costs) else sum(costs) / len(costs),
         })
     return merged
@@ -92,10 +99,17 @@ def transfer(harnesses: Sequence[Path], tasks: Sequence[Mapping], models: Sequen
 
     Each row carries "outcomes": one {task, reward, pass, prompt_tokens, completion_tokens,
     cost_usd} per task, aligned by task index across rows, which is the paired shape a
-    significance test consumes. Every (harness, model, repeat) evaluation loads the harness
+    significance test consumes. Row "cost_usd" is the TOTAL billed cost of the n tasks (mean over
+    repeats); "cost_usd_per_task" is that total divided by n. Both are None when the model's price is
+    unknown (META_HARNESS_PRICES keyed by model id). Cost covers evaluation only: tokens spent
+    streaming train_tasks under the online protocol are excluded (see context_cost, also eval-only). Every (harness, model, repeat) evaluation loads the harness
     afresh, so nothing a harness memorises under one model reaches another. A model that cannot
     be built, or a harness that cannot be loaded, yields a row with "error" and the run goes on.
     """
+    stems = [Path(h).stem for h in harnesses]
+    duplicates = sorted({x for x in stems if stems.count(x) > 1})
+    if duplicates:
+        raise ValueError(f"harness file names must be unique (same stem would share a trace directory): {duplicates}")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     built: dict[tuple[str, str], Any] = {}
@@ -140,9 +154,10 @@ def transfer(harnesses: Sequence[Path], tasks: Sequence[Mapping], models: Sequen
             std = (sum((s - mean) ** 2 for s in scores) / len(scores)) ** 0.5
             outcomes = _merge_repeats(runs)
             usd = [o["cost_usd"] for o in outcomes]
+            total = None if not usd or any(u is None for u in usd) else sum(usd)
             rows.append({**row, "score": mean, "score_std": std,
                          "context_cost": sum(costs) / len(costs), "n": len(tasks),
-                         "cost_usd": None if not usd or any(u is None for u in usd) else sum(usd),
+                         "cost_usd": total, "cost_usd_per_task": None if total is None else total / len(usd),
                          "outcomes": outcomes})
     report = {"rows": rows, "repeats": max(1, repeats), "protocol": protocol}
     atomic_write(root / "transfer.json", json.dumps(report, indent=2))

@@ -105,3 +105,34 @@ def test_cli_prints_table(tmp_path, capsys):
                  "--models", f"scripted:{yes},nonesuch:m", "--root", str(tmp_path / "out")])
     out = capsys.readouterr().out
     assert code == 0 and "echo" in out and "0.667" in out and "ERR" in out
+
+
+def test_known_price_gives_total_and_per_task_cost(tmp_path, monkeypatch):
+    yes = script(tmp_path / "yes.jsonl", "yes")
+    monkeypatch.setenv("META_HARNESS_PRICES", json.dumps({yes: {"input": 1000000.0, "output": 1000000.0}}))
+    report = transfer([harness(tmp_path / "echo.py", ECHO)], TASKS, [("scripted", yes)], exact, tmp_path / "out")
+    row = report["rows"][0]
+    per = [o["cost_usd"] for o in row["outcomes"]]
+    assert all(c is not None and c > 0 for c in per)
+    assert row["cost_usd"] == sum(per)
+    assert row["cost_usd_per_task"] == row["cost_usd"] / 3
+
+
+def test_cache_tokens_are_priced(tmp_path):
+    from meta_harness.providers import Price
+    trace = tmp_path / "t.jsonl"
+    events = [{"event": "task_start", "payload": {"index": 0}},
+              {"event": "model_call", "payload": {"tokens": 0, "usage": {"cache_read": 1000000, "cache_write": 1000000}}},
+              {"event": "task_end", "payload": {"reward": 1.0}}]
+    trace.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+    from meta_harness.transfer import task_outcomes
+    out = task_outcomes(trace, Price(0.0, 0.0, cache_read=2.0, cache_write=3.0))
+    assert out[0]["cost_usd"] == 5.0
+
+
+def test_duplicate_harness_stems_rejected(tmp_path):
+    import pytest
+    (tmp_path / "x").mkdir(); (tmp_path / "y").mkdir()
+    a, b = harness(tmp_path / "x" / "h.py", ECHO), harness(tmp_path / "y" / "h.py", FLIP)
+    with pytest.raises(ValueError, match="unique"):
+        transfer([a, b], TASKS, [], exact, tmp_path / "out")
