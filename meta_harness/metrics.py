@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import re
-import subprocess
 from typing import Any, Mapping
 
 _BOXED = re.compile(r"\\boxed\s*\{")
@@ -79,22 +78,30 @@ def math_equivalence(prediction: Any, task: Mapping[str, Any], tolerance: float 
     return 0.0
 
 
-def terminal_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 120.0) -> float:
-    """Run the task's verification command. An empty command scores zero, never one."""
-    command = str(task.get("test_command", "")).strip()
-    if not command:
+def terminal_metric(task: Any, result: Any = None, timeout: float | None = None) -> float:
+    """Score a terminal task by running its `test_command` INSIDE the task's container.
+
+    Requires `task["container"]` (the id the terminal domain started and the harness worked in):
+    `docker exec -w <workdir> <id> bash -lc <test_command>`; exit code 0 scores 1.0. With no
+    container, or no test command, the score is 0.0 and nothing runs - never on the host.
+    The legacy `(prediction, task)` argument order is still accepted.
+    """
+    if not isinstance(task, Mapping) and isinstance(result, Mapping):
+        task, result = result, task  # legacy (prediction, task)
+    if not isinstance(task, Mapping):
         return 0.0
-    workdir = task.get("workdir")
+    command = str(task.get("test_command") or "").strip()
     container = task.get("container")
-    argv: Any = (["docker", "exec", "-w", str(workdir or "/app"), str(container), "bash", "-lc", command]
-                 if container else command)
-    try:
-        completed = subprocess.run(argv, shell=not container, capture_output=True, text=True,
-                                   timeout=timeout, encoding="utf-8", errors="replace",
-                                   cwd=None if container else (workdir or None))
-    except (OSError, subprocess.SubprocessError):
+    if not command or not container:
         return 0.0
-    return float(completed.returncode == 0)
+    from .terminal import Container  # lazy: terminal imports this module
+
+    limit = float(timeout if timeout is not None else task.get("test_timeout") or 600.0)
+    try:
+        code, _ = Container.attach(str(container), str(task.get("workdir") or "/app")).exec_test(command, limit)
+    except (OSError, RuntimeError, ValueError):
+        return 0.0
+    return float(code == 0)
 
 
 def __getattr__(name: str) -> Any:

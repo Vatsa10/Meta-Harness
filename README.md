@@ -241,16 +241,22 @@ meta-harness run ... --proposer-view full      # everything (default)
 
 ## Agentic coding domain
 
-Terminal tasks run the model's commands inside Docker:
+TerminalBench-2 style tasks run inside Docker. The terminal domain starts one container per
+task, hands its id to the harness as `task["container"]`, then runs the task's tests inside that
+same container (`docker exec ... bash -lc <test_command>`) and removes it. With no container the
+score is 0 and nothing ever runs on your machine.
 
-```bash
-meta-harness run --task-type terminal --tasks data/terminal.jsonl \
-  --provider unikey --model claude-sonnet-4-6
-```
+Seeds: `baselines/terminal/terminus2.py` (Terminus-2: JSON keystroke batches, 30KB observation
+cap, confirmation turn) and `baselines/terminal/terminus_kira.py` (native tool calling,
+completion checklist, in-container environment snapshot). Both share a fuzzy `edit` tool with
+read-before-write checks, stuck detection, staged compaction (`B1`/`B2`) and the `PLANNING` /
+`BASH_ONLY` toggles.
 
-Each row needs an `image`. Rows without one are refused unless you pass
-`--allow-local-shell`, which executes model-authored commands **on your machine** — only do
-that in a throwaway environment.
+Tasks come from a local TerminalBench checkout (`meta_harness.loaders.terminalbench`, `--tb-dir`,
+dataset version as a loader parameter). **Search = test on this domain, as in the paper:** pass
+the same task file to `--tasks` and `--test-tasks`, so the numbers are search scores, not
+held-out ones. `audit_leakage(source, tasks)` flags harness source that names task ids, test
+file names or expected outputs. Keep live runs small (at most 5 TerminalBench tasks).
 
 ## Writing your own harness
 
