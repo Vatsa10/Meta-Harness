@@ -4,6 +4,8 @@ A cheap pass first, retrieval only when needed. Pass 1 is zero-shot (no examples
 a confidence in [0, 1]. If the label is not one of the valid labels, or the stated confidence is missing or below
 `threshold` (0.7), and memory is non-empty, the harness escalates to pass 2: a prompt with the `k` nearest
 examples by TF-IDF. Otherwise pass 1 is the answer. Memory grows only in `learn`.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: threshold=0.7, k=8 nearest examples on escalation.
 """
 
 import re

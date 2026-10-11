@@ -5,6 +5,8 @@ The leading label is that of the nearest example; the remaining labels are ranke
 example is to the query, and the top 3 of them are the confusable labels. For each, the nearest example of that
 label is added in a separate block, so the model sees the closest competitor of every likely confusion.
 Memory grows only in `learn`.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: k=6 nearest examples, 3 confusable labels.
 """
 
 from meta_harness.retrieval import TfidfIndex
@@ -55,7 +57,6 @@ class Harness:
         query = _query(task)
         labels = _labels(task, self.memory)
         ranked = _rank(self.memory, query)
-        top = [r.item for r in ranked[: self.k]]
         alternatives = []
         if ranked:
             seen = {ranked[0].item["label"]}
@@ -65,6 +66,7 @@ class Harness:
                     alternatives.append(r.item)
                 if len(alternatives) >= self.confusable:
                     break
+        top = [r.item for r in ranked[: self.k] if r.item not in alternatives]
         prompt = ("Valid labels: " + ", ".join(labels) + "\n\nMost relevant examples:\n" +
                   "\n".join(_show(m) for m in top) + "\n\nNearest example of each confusable label:\n" +
                   "\n".join(_show(m) for m in alternatives) +

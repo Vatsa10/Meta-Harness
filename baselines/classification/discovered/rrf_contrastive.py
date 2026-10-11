@@ -4,6 +4,8 @@ Hybrid retrieval. The memory is ranked twice, by TF-IDF cosine and by BM25, and 
 reciprocal rank fusion (`meta_harness.retrieval.reciprocal_rank_fusion`). The prompt shows the top `k` fused
 examples, then up to `pair_count` contrastive pairs: each of the top fused examples paired with the best-fused
 example carrying a different label. Memory grows only in `learn`.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: k=6 fused examples, pair_count=3, RRF constant 60, BM25 with default k1=1.5 b=0.75.
 """
 
 from meta_harness.retrieval import BM25Index, TfidfIndex, reciprocal_rank_fusion
@@ -58,12 +60,18 @@ class Harness:
             other = next((x.item for x in fused if x.item["label"] != r.item["label"]), None)
             if other is not None and (r.item, other) not in pairs and (other, r.item) not in pairs:
                 pairs.append((r.item, other))
+        shown, blocks = list(top), []
+        for a, b in pairs:
+            fresh = [m for m in (a, b) if m not in shown]
+            if fresh:
+                shown.extend(fresh)
+                blocks.append("\n".join(_show(m) for m in fresh) + "\n--")
         prompt = ("Valid labels: " + ", ".join(labels) + "\n\nTop fused examples:\n" +
                   "\n".join(_show(m) for m in top) + "\n\nContrastive pairs:\n" +
-                  "\n".join(_show(a) + "\n" + _show(b) + "\n--" for a, b in pairs) +
+                  "\n".join(blocks) +
                   f"\n\nInput: {query}\nReturn exactly one valid label.\nLabel:")
         label = _pick(model(prompt), labels)
-        return _result(label, 1, len(top) + 2 * len(pairs), [prompt])
+        return _result(label, 1, len(shown), [prompt])
 
     def learn(self, task, result):
         if "label" in task:

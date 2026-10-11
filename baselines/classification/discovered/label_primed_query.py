@@ -74,10 +74,16 @@ class Harness:
         pairs = self._pairs(ranked)
         prompt = "Valid labels: " + ", ".join(labels) + "\n\n"
         prompt += "Best example per label:\n" + "\n".join(_show(m) for m in coverage) + "\n\n"
-        prompt += "Contrastive pairs:\n" + "\n".join(_show(a) + "\n" + _show(b) + "\n--" for a, b in pairs)
+        shown, blocks = list(coverage), []
+        for a, b in pairs:
+            fresh = [m for m in (a, b) if m not in shown]
+            if fresh:
+                shown.extend(fresh)
+                blocks.append("\n".join(_show(m) for m in fresh) + "\n--")
+        prompt += "Contrastive pairs:\n" + "\n".join(blocks)
         prompt += f"\n\nInput: {query}\nReturn exactly one valid label.\nLabel:"
         label = _pick(model(prompt), labels)
-        return _result(label, 1, len(coverage) + 2 * len(pairs), [prompt])
+        return _result(label, 1, len(shown), [prompt])
 
     def learn(self, task, result):
         if "label" in task:

@@ -4,6 +4,8 @@ Memory stores a short model-written rationale next to each labelled example. `le
 one extra model call per training example asking for a one-sentence reason the input has its true label, and
 keeps the reply. At inference the `k` nearest examples by TF-IDF are shown with their rationales replayed
 ("Reasoning: ..."), so the model sees worked reasoning rather than bare labels.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: k=6 nearest examples, rationale capped at 300 characters.
 """
 
 from meta_harness.retrieval import TfidfIndex

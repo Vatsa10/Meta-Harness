@@ -4,6 +4,8 @@ A memory harness that records the model's own mistakes. In `learn`, each trainin
 label the model predicted earlier (taken from the run result) when that prediction was wrong. At inference the
 `k` nearest examples by TF-IDF are shown, and any example with a recorded wrong prediction is annotated
 "commonly confused with X", so the prompt exposes the confusions the model actually makes near this query.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: k=8 nearest examples.
 """
 
 from meta_harness.retrieval import TfidfIndex

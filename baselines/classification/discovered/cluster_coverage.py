@@ -4,6 +4,8 @@ Broad coverage of the memory instead of only the neighbourhood of the query. Mem
 vectors and greedily k-center clustered: start from the first example, repeatedly add the example least similar
 to every chosen centre, up to `clusters` centres. The prompt shows one representative (the centre) per cluster
 plus the `k` nearest examples to the query, deduplicated. Memory grows only in `learn`.
+
+Design inferred from the name in Table 9; App. B.1 specifies only draft_verification and label_primed_query. Chosen constants: clusters=5 centres, k=4 nearest examples, first memory row seeds the k-center.
 """
 
 import math
