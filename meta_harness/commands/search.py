@@ -7,16 +7,15 @@ import os
 import shlex
 import sys
 from collections import Counter
-from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from ..cache import CachedModel
 from ..chat_types import Usage
 from ..core import MAX_AUTOMATIC_RESUMES, CandidateEvaluator, CommandProposer, SearchConfig, SearchRunner
 from ..datasets import read_records, split_tasks
-from ..domains import get_domain
+from ..domains import get_domain, metric_for
 from ..optimizers import OptimizerContext, build as build_optimizer
 from ..protocol import resolve_metric
 from ..providers import Price, ProviderError, cost_usd, model_from_environment, price_for
@@ -27,7 +26,7 @@ HELP = "search for a better harness: seed harness files + a JSONL/JSON/CSV eval 
 
 PROVIDERS = ("anthropic", "openai", "compatible", "unikey", "scripted")
 BASE_URL_PROVIDERS = ("compatible", "openai", "unikey")
-DOMAINS = ("classification", "math", "generic")
+DOMAINS = ("classification", "math", "generic", "terminal")
 
 
 class UsageError(Exception):
@@ -46,7 +45,11 @@ def add_arguments(p) -> None:
     p.add_argument("--train-fraction", type=float, default=0.4,
                    help="online domains with --data: share of the non-test rows used as the train split")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--metric", default="exact", help="exact|contains|numeric or module:function")
+    p.add_argument("--metric", default=None,
+                   help="exact|contains|numeric, a domain metric, or module:function "
+                        "(default: the domain's metric, exact for generic)")
+    p.add_argument("--dataset-version", default=None,
+                   help="terminal domain: TerminalBench dataset version recorded in run.json")
     p.add_argument("--provider", choices=PROVIDERS, required=True, help="where the harness model runs")
     p.add_argument("--model", required=True, help="harness model id (scripted: the script path)")
     p.add_argument("--base-url", help="API base URL for compatible/openai/unikey (default: environment)")
@@ -111,30 +114,9 @@ def parse_prices(specs: Sequence[str]) -> dict[str, Price]:
     return prices
 
 
-@contextmanager
-def _price_table(prices: Mapping[str, Price]) -> Iterator[None]:
-    """Expose --price overrides to price_for() for the run (run.json's budget), then restore."""
-    if not prices:
-        yield
-        return
-    previous = os.environ.get("META_HARNESS_PRICES")
-    try:
-        table = json.loads(previous) if previous else {}
-        if not isinstance(table, dict):
-            table = {}
-    except ValueError:
-        table = {}
-    # core's Budget.price looks up the bare model id, so only bare keys go into the table
-    table.update({name: asdict(price) for name, price in prices.items()
-                  if name.split(":", 1)[0] not in PROVIDERS})
-    os.environ["META_HARNESS_PRICES"] = json.dumps(table)
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("META_HARNESS_PRICES", None)
-        else:
-            os.environ["META_HARNESS_PRICES"] = previous
+def bare_prices(prices: Mapping[str, Price]) -> dict[str, Price]:
+    """The --price overrides keyed by bare model id, as core's Budget.price looks them up."""
+    return {name: price for name, price in prices.items() if name.split(":", 1)[0] not in PROVIDERS}
 
 
 def _make_model(provider: str, model: str, base_url: str | None) -> Any:
@@ -189,7 +171,7 @@ def _train_tasks(args, domain, search_tasks: list[dict]) -> tuple[list[dict], li
         return _read(args.train, domain), search_tasks
     provided = getattr(domain, "train_tasks", None)
     if callable(provided):
-        train = provided()
+        train = provided(args.search)
         if train:
             return [dict(t) for t in train], search_tasks
     if args.data:
@@ -201,6 +183,17 @@ def _train_tasks(args, domain, search_tasks: list[dict]) -> tuple[list[dict], li
         return train, search
     raise UsageError(f"domain {args.domain!r} uses the online protocol and needs a train split "
                      "disjoint from search: give --train, or --data for a seeded three-way split")
+
+
+def default_metric(name: str, domain) -> Any:
+    """The domain's own metric (terminal: METRICS["terminal"]), else the shared task-type map."""
+    own = getattr(domain, "METRICS", None) or {}
+    if name in own:
+        return own[name]
+    try:
+        return metric_for(name)
+    except KeyError:
+        return resolve_metric("exact")
 
 
 def _verdicts(root: Path) -> dict[str, int]:
@@ -253,7 +246,8 @@ def _prepare(args):
         domain = get_domain(args.domain)
     except KeyError as exc:
         raise UsageError(str(exc.args[0] if exc.args else exc)) from None
-    metric = resolve_metric(args.metric, extra=getattr(domain, "METRICS", None) or None)
+    metric = (resolve_metric(args.metric, extra=getattr(domain, "METRICS", None) or None)
+              if args.metric else default_metric(args.domain, domain))
     search_tasks, test_tasks = _load_tasks(args, domain)
     protocol = getattr(domain, "PROTOCOL", "plain")
     train_tasks: list[dict] = []
@@ -282,7 +276,11 @@ def _prepare(args):
     run_meta = {"provider": args.provider, "model": args.model,
                 "proposer_provider": proposer_provider, "proposer_model": proposer_model_name,
                 "optimizer": "command" if args.proposer_command else "metaharness",
-                "view": args.view, "domain": args.domain, "metric": args.metric}
+                "view": args.view, "domain": args.domain, "metric": args.metric or "default"}
+    if args.domain == "terminal":
+        from ..loaders import terminalbench
+        version = args.dataset_version or terminalbench.DEFAULT_VERSION
+        run_meta.update(terminalbench.run_meta(version))
     config = SearchConfig(root=root, iterations=args.iterations, candidates_per_iteration=args.candidates,
                           validation_timeout=args.validation_timeout, repeats=args.repeats,
                           max_workers=args.max_workers, task_timeout=args.task_timeout,
@@ -299,8 +297,11 @@ def _prepare(args):
                                           summarizer=summarizer)
         proposer = build_optimizer("metaharness", ctx)
     evaluator = CandidateEvaluator(model, metric, task_timeout=args.task_timeout, protocol=protocol,
-                                   train_tasks=train_tasks)
-    runner = SearchRunner(config, evaluator, proposer)
+                                   train_tasks=train_tasks,
+                                   harness_wrapper=getattr(domain, "HARNESS_WRAPPER", None),
+                                   source_validator=getattr(domain, "VALIDATE", None),
+                                   import_only_validation=bool(getattr(domain, "VALIDATE_IMPORT_ONLY", False)))
+    runner = SearchRunner(config, evaluator, proposer, prices=bare_prices(prices))
     return lambda: _execute(args, runner, model, config, root, harnesses, search_tasks, test_tasks,
                             train_tasks, resume, prices, proposer_provider, proposer_model_name)
 
@@ -310,9 +311,8 @@ def _execute(args, runner, model, config, root, harnesses, search_tasks, test_ta
     """The engine phase: its exceptions propagate with their traceback (not turned into exit 2)."""
     if args.force_resume:
         (root / ".resume_attempts").unlink(missing_ok=True)
-    with _price_table(prices):
-        frontier = runner.run(harnesses, search_tasks, test_tasks or None, resume=resume,
-                              force_resume=args.force_resume)
+    frontier = runner.run(harnesses, search_tasks, test_tasks or None, resume=resume,
+                          force_resume=args.force_resume)
     budget = runner.budget
     test_path = Path(config.test_root) / "test_results.json"
     print(json.dumps({

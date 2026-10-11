@@ -26,6 +26,9 @@ from ..terminal import Container
 NAME = "terminal"
 PROTOCOL = "plain"
 SEARCH_EQUALS_TEST = True
+# Candidate validation imports the harness but never smoke-runs it: a terminal agent needs the
+# task container, and running it on the host is refused.
+VALIDATE_IMPORT_ONLY = True
 SEED_DIR = Path(__file__).resolve().parents[2] / "baselines" / "terminal"
 HIDDEN_FIELDS = ("test_command", "test_files", "tests_dir", "expected_outputs", "solution",
                  "dockerfile_dir")

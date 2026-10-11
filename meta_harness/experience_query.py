@@ -284,7 +284,22 @@ def read_stats(root: Path) -> dict:
     table8 = {"median_files_read": _median(reads), "min_files_read": min(reads, default=0),
               "max_files_read": max(reads, default=0), "total_reads": total,
               "shares_pct": {b: (100.0 * n / total if total else 0.0) for b, n in buckets.items()}}
-    return redact_obj({"iterations": iterations, "medians": medians, "table8": table8})
+    return redact_obj({"iterations": iterations, "medians": medians, "table8": table8,
+                       "phase_rates": phase_rates(root)})
+
+
+PHASE_RATES = ("ended_without_writing_code_rate", "ended_in_understand_rate")
+
+
+def phase_rates(root: Path) -> list[dict]:
+    """Per candidate: the terminal phase rates core aggregates into scores.json (when present)."""
+    out = []
+    for data in _scores(Path(root)):
+        metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+        if any(name in metrics for name in PHASE_RATES):
+            out.append({"candidate_id": data["candidate_id"],
+                        **{name: _num(metrics.get(name)) for name in PHASE_RATES}})
+    return out
 
 
 # -- receipts (spec section 11) --------------------------------------------------------------------

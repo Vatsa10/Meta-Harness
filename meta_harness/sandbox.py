@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 LEGACY_PROBE = {"input": "validation"}
+IMPORT_ONLY = "--import-only"
 
 
 class SandboxError(RuntimeError):
@@ -39,7 +40,7 @@ def _null_model(prompt: str, **_: object) -> str:
     return "validation-response"
 
 
-def _check(path: Path, probe: Mapping[str, Any] | None = None) -> None:
+def _check(path: Path, probe: Mapping[str, Any] | None = None, run: bool = True) -> None:
     from .protocol import call_run
 
 
@@ -56,24 +57,30 @@ def _check(path: Path, probe: Mapping[str, Any] | None = None) -> None:
         raise SandboxError("candidate must expose build_harness() or Harness")
     if not callable(getattr(harness, "run", None)):
         raise SandboxError("harness must implement run(task, model, trace)")
+    if not run:
+        return
     call_run(harness, dict(probe) if probe is not None else dict(LEGACY_PROBE), _null_model, _NullTrace())
 
 
 def validate_in_subprocess(source: Path | str, timeout: float = 20.0,
                            probe: Mapping[str, Any] | None = None,
-                           probe_dir: Path | str | None = None) -> None:
+                           probe_dir: Path | str | None = None, import_only: bool = False) -> None:
     """Import and smoke-run a candidate in a child process. Raises HarnessValidationError.
 
     `probe` is a real task row (targets removed by the caller); it is written to a temp JSON
     file and handed to the child as argv[2]. Without it the legacy {"input": "validation"} row
-    is used. `probe_dir` keeps that temp file inside the run directory.
+    is used. `probe_dir` keeps that temp file inside the run directory. `import_only` checks the
+    import and the harness interface without running it (domains whose harnesses need a task
+    container, like terminal, cannot smoke-run on the host).
     """
     from .core import HarnessValidationError  # local import breaks the import cycle
 
     source = Path(source)
     argv = [sys.executable, "-m", "meta_harness.sandbox", str(source)]
     probe_file = None
-    if probe is not None:
+    if import_only:
+        argv.append(IMPORT_ONLY)
+    elif probe is not None:
         handle, probe_file = tempfile.mkstemp(suffix=".json", prefix="probe-",
                                              dir=str(probe_dir) if probe_dir else None)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
@@ -100,8 +107,11 @@ def main(argv: list[str]) -> int:
         print("usage: python -m meta_harness.sandbox <candidate.py> [probe.json]", file=sys.stderr)
         return 2
     try:
-        probe = json.loads(Path(argv[2]).read_text(encoding="utf-8")) if len(argv) == 3 else None
-        _check(Path(argv[1]), probe)
+        if len(argv) == 3 and argv[2] == IMPORT_ONLY:
+            _check(Path(argv[1]), run=False)
+        else:
+            probe = json.loads(Path(argv[2]).read_text(encoding="utf-8")) if len(argv) == 3 else None
+            _check(Path(argv[1]), probe)
     except Exception as exc:  # surfaced to the parent through stderr
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

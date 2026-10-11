@@ -86,5 +86,13 @@ class CachedModel:
     def __call__(self, prompt: str, **kwargs: Any) -> str:
         return self.call(prompt, **kwargs)[0]
 
+    @property
+    def chat(self) -> Callable[..., Any]:
+        """Native tool-calling turns pass through uncached; absent when the wrapped model has none."""
+        upstream = getattr(self.model, "chat", None)
+        if not callable(upstream):
+            raise AttributeError("chat")
+        return upstream
+
 
 __all__ = ["CachedModel", "DiskCache", "cache_key"]

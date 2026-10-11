@@ -156,8 +156,10 @@ class Budget:
         for key in ("cache_read", "cache_write", "reasoning"):
             self.proposer_usage[key] += int(delta.get(key, 0) or 0)
 
-    def price(self, model: str | None, proposer_model: str | None) -> float | None:
-        """Billed USD for both models, or None when any model that was used has no known price."""
+    def price(self, model: str | None, proposer_model: str | None,
+              prices: Mapping[str, Any] | None = None) -> float | None:
+        """Billed USD for both models, or None when any model that was used has no known price.
+        `prices` are explicit overrides (`--price`), keyed by model id."""
         from .chat_types import Usage
         from .providers import cost_usd, price_for
 
@@ -166,7 +168,7 @@ class Budget:
                                   (proposer_model, self.proposer_usage, self.proposer_calls)):
             if not used:
                 continue
-            cost = cost_usd(Usage(**usage), price_for(name)) if name else None
+            cost = cost_usd(Usage(**usage), price_for(name, prices)) if name else None
             if cost is None:
                 return None
             total += cost
@@ -295,6 +297,44 @@ class MeteredModel:
 
     def __call__(self, prompt: str, **kwargs: Any) -> str:
         return self.call(prompt, **kwargs)[0]
+
+    @property
+    def chat(self) -> Callable[..., Any]:
+        """Native tool calling: forwards to the provider's `chat()`, meters its Usage (cache and
+        reasoning included) and records the turn in the trace. Absent when the model has none."""
+        upstream = getattr(self.model, "chat", None)
+        if not callable(upstream):
+            raise AttributeError("chat")
+
+        def chat(system: str, messages: list, tools: Sequence[Any] = (), *args: Any, **kwargs: Any) -> Any:
+            if self.closed:
+                raise EvaluationClosed("model call after the evaluation ended")
+            turn = upstream(system, messages, tools, *args, **kwargs)
+            usage = getattr(turn, "usage", None)
+            record = {key: int(getattr(usage, key, 0) or 0) for key in USAGE_KEYS}
+            tokens = record["input"] or estimate_tokens(json.dumps([system, messages], default=str))
+            with self._lock:
+                if self.closed:
+                    raise EvaluationClosed("model call after the evaluation ended")
+                self.calls += 1
+                self.prompt_tokens += tokens
+                self.completion_tokens += record["output"]
+                self.usage["input"] += tokens
+                self.usage["output"] += record["output"]
+                for key in ("cache_read", "cache_write", "reasoning"):
+                    self.usage[key] += record[key]
+                self.trace.context_cost = float(self.prompt_tokens)
+            calls = [{"id": getattr(c, "id", None), "name": getattr(c, "name", None),
+                      "arguments": getattr(c, "arguments", None)}
+                     for c in getattr(turn, "tool_calls", None) or []]
+            self.trace.event("model_call", {"chat": True, "system": system, "messages": messages,
+                                            "tools": [getattr(t, "name", str(t)) for t in tools or []],
+                                            "response": getattr(turn, "text", ""), "tool_calls": calls,
+                                            "stop_reason": getattr(turn, "stop_reason", None),
+                                            "tokens": tokens, "usage": {**record, "input": tokens}})
+            return turn
+
+        return chat
 
 
 class FilesystemExperience:
@@ -431,7 +471,15 @@ class CandidateEvaluator:
 
     def __init__(self, model: Callable[..., Any], metric: _protocol.Metric | None = None,
                  task_timeout: float = 600.0, protocol: str = "plain",
-                 train_tasks: Sequence[Mapping[str, Any]] = (), evaluation_timeout: float | None = None):
+                 train_tasks: Sequence[Mapping[str, Any]] = (), evaluation_timeout: float | None = None,
+                 harness_wrapper: Callable[[Any], Any] | None = None,
+                 source_validator: Callable[[Path, Sequence[Mapping[str, Any]]], None] | None = None,
+                 import_only_validation: bool = False):
+        """`harness_wrapper` wraps each loaded harness (a domain's HARNESS_WRAPPER);
+        `source_validator(source, tasks)` raises to reject a candidate's source before it runs
+        (a domain's VALIDATE, e.g. the terminal leakage audit); `import_only_validation` makes
+        the subprocess validation import the candidate without smoke-running it (a domain whose
+        harnesses need a task container, VALIDATE_IMPORT_ONLY)."""
         if protocol not in ("plain", "online"):
             raise ValueError("protocol must be 'plain' or 'online'")
         self.model = model
@@ -440,6 +488,9 @@ class CandidateEvaluator:
         self.protocol = protocol
         self.train_tasks = [dict(t) for t in train_tasks]
         self.evaluation_timeout = evaluation_timeout
+        self.harness_wrapper = harness_wrapper
+        self.source_validator = source_validator
+        self.import_only_validation = import_only_validation
 
     def validate(self, source: Path | str, probe: Mapping[str, Any] | None = None) -> None:
         harness = _load_harness(Path(source))
@@ -476,6 +527,8 @@ class CandidateEvaluator:
         started = time.perf_counter()
         try:
             harness = _load_harness(Path(source))
+            if self.harness_wrapper is not None:
+                harness = self.harness_wrapper(harness)
         except Exception as exc:
             return EvaluationResult(candidate_id, float("-inf"), {}, float("inf"), len(tasks),
                                     time.perf_counter() - started, False, repr(exc))
@@ -485,6 +538,7 @@ class CandidateEvaluator:
         watchdog = Watchdog(idle=self.task_timeout, deadline=deadline)
         rewards: list[float] = []
         stops: Counter[str] = Counter()
+        phases: Counter[str] = Counter()
         failures = 0
         abort: str | None = None
         train_tokens = 0
@@ -515,6 +569,10 @@ class CandidateEvaluator:
                     if error is None and value is not None:
                         reward, result = value
                         stop = normalise_stop_reason(result.get("stop_reason") if isinstance(result, Mapping) else None)
+                        if isinstance(result, Mapping) and "ended_without_writing_code" in result:
+                            phases["labelled"] += 1
+                            phases["ended_without_writing_code"] += bool(result.get("ended_without_writing_code"))
+                            phases["ended_in_understand"] += bool(result.get("ended_in_understand"))
                         trace.event("task_end", {"index": index, "output": result.get("output"),
                                                  "reward": reward, "stop_reason": stop})
                     else:
@@ -528,9 +586,12 @@ class CandidateEvaluator:
                 metered.closed = True
         n = len(tasks) or 1
         eval_tokens = metered.prompt_tokens - train_tokens
+        phase_rates = ({f"{name}_rate": phases[name] / phases["labelled"]
+                        for name in ("ended_without_writing_code", "ended_in_understand")}
+                       if phases["labelled"] else {})
         return EvaluationResult(
             candidate_id, sum(rewards) / n,
-            {"model_calls": float(metered.calls), "prompt_tokens": metered.prompt_tokens,
+            {**phase_rates, "model_calls": float(metered.calls), "prompt_tokens": metered.prompt_tokens,
              "completion_tokens": metered.completion_tokens, "train_prompt_tokens": train_tokens,
              "cache_read_tokens": metered.usage["cache_read"],
              "cache_write_tokens": metered.usage["cache_write"],
@@ -590,8 +651,10 @@ class SearchRunner:
                 ".outcomes.json": "outcomes.json", ".parent.json": "parent.json"}
 
     def __init__(self, config: SearchConfig, evaluator: CandidateEvaluator,
-                 proposer: Callable[[FilesystemExperience, int, int], Sequence[Path]]):
+                 proposer: Callable[[FilesystemExperience, int, int], Sequence[Path]],
+                 prices: Mapping[str, Any] | None = None):
         self.config, self.evaluator, self.proposer = config, evaluator, proposer
+        self.prices = dict(prices or {})   # `--price` overrides, keyed by model id
         self.experience = FilesystemExperience(config.root)
         self.probe: dict[str, Any] | None = None
         self.budget = Budget()
@@ -767,9 +830,18 @@ class SearchRunner:
         verdict, detail = self._gate(text, outcomes, proposal, fingerprint_now, over_budget)
         if verdict:
             return self._reject(candidate_id, directory, receipt, verdict, detail or "", split)
+        audit = getattr(self.evaluator, "source_validator", None)
+        if audit is not None:
+            try:
+                audit(directory / "harness.py", tasks)
+            except Exception as exc:
+                receipt["validation"] = {"ok": False, "error": bounded(str(exc))}
+                return self._reject(candidate_id, directory, receipt, "rejected_invalid_source",
+                                    f"source audit failed: {exc}", split)
         try:
             validate_in_subprocess(directory / "harness.py", self.config.validation_timeout, self.probe,
-                                   self.experience.root)
+                                   self.experience.root,
+                                   import_only=bool(getattr(self.evaluator, "import_only_validation", False)))
         except Exception as exc:
             receipt["validation"] = {"ok": False, "error": bounded(str(exc))}
             return self._reject(candidate_id, directory, receipt, "rejected_invalid_source",
@@ -875,7 +947,8 @@ class SearchRunner:
         """Atomically rewrite run.json with the cursor, frontier ids and budget."""
         with self._lock:
             meta = redact_obj(dict(self.config.run_meta))
-            self.budget.cost_usd = self.budget.price(meta.get("model"), meta.get("proposer_model"))
+            self.budget.cost_usd = self.budget.price(meta.get("model"), meta.get("proposer_model"),
+                                                 self.prices)
             payload = {**self._manifest, "run_meta": meta,
                        "cursor": {"iteration": self.cursor},
                        "frontier": [r.candidate_id for r in self.frontier()],
@@ -957,8 +1030,13 @@ class SearchRunner:
     def _is_finished(self, label: str) -> bool:
         directory = self.experience.candidate_dir(label)
         receipt = self.read_receipt(directory) or {}
-        return (self._resuming and (directory / "scores.json").is_file()
-                and receipt.get("verdict") not in (None, "incomplete"))
+        if not (self._resuming and receipt.get("verdict") not in (None, "incomplete")):
+            return False
+        try:
+            json.loads((directory / "scores.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False   # missing or torn scores.json: the candidate is evaluated again
+        return True
 
     def _budget_flags(self, work: Sequence[tuple[Path, str]]) -> list[bool]:
         """over_budget per item; only unfinished items consume the remaining evaluation slots."""
