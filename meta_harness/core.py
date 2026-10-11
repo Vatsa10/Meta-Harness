@@ -4,10 +4,14 @@ The implementation keeps the proposer deliberately unopinionated: it receives
 an experience directory and may inspect any prior candidate, score, or trace.
 That is the important design choice in the paper; parent selection and edit
 operators are not hard-coded here.
+
+Every step's result is a file (proposals, `candidates/<id>/scores.json`, `receipt.json`, test
+results) and `run.json` is checkpointed atomically, so a killed search resumes where it stopped.
 """
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -19,12 +23,52 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from . import protocol as _protocol
 from .metrics import estimate_tokens
+from .redact import bounded, redact_obj
+from .timeouts import Aborted, Watchdog
+
+# Addendum A idea 4: every task ends with one of these; scores.json carries the histogram.
+STOP_REASONS = ("done", "step_limit", "overflow", "stuck", "timeout", "error")
+_STOP_ALIASES = {"end": "done", "stop": "done", "finished": "done", "length": "overflow",
+                 "max_tokens": "overflow", "context_overflow": "overflow", "max_steps": "step_limit",
+                 "budget": "step_limit", "aborted": "timeout", "idle": "timeout", "deadline": "timeout"}
+VERDICTS = ("accepted", "rejected_invalid_source", "rejected_split_violation", "stale_parent",
+            "budget_expired", "failed_eval", "incomplete")
+USAGE_KEYS = ("input", "output", "cache_read", "cache_write", "reasoning")
+MAX_AUTOMATIC_RESUMES = 3
+
+
+def normalise_stop_reason(value: Any) -> str:
+    """Map a harness-reported stop reason onto STOP_REASONS; no report means `done`."""
+    if value is None:
+        return "done"
+    text = str(value).strip().lower()
+    if text in STOP_REASONS:
+        return text
+    return _STOP_ALIASES.get(text, "error")
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Write via a temp file in the same directory and `replace`, so readers never see a torn file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    temp.write_text(text, encoding="utf-8")
+    for attempt in range(5):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:  # Windows: a reader holds the target open
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 class HarnessValidationError(Exception):
@@ -44,10 +88,89 @@ class EvaluationResult:
     repeats: int = 1
     score_std: float = 0.0
     split: str = "search"
+    stop_reasons: dict[str, int] = field(default_factory=dict)
+    abort_reason: str | None = None
 
     def objective_vector(self) -> tuple[float, float]:
         # Higher score and lower context cost are both preferred.
         return (self.score, -self.context_cost)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "EvaluationResult":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+def _usage_record() -> dict[str, int]:
+    return {key: 0 for key in USAGE_KEYS}
+
+
+@dataclass
+class Budget:
+    harness_evaluations: int = 0      # one per (candidate, repeat) on the search split
+    test_evaluations: int = 0
+    model_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    train_prompt_tokens: int = 0      # online protocol: tokens spent streaming the train split
+    proposer_calls: int = 0
+    proposer_input_tokens: int = 0
+    proposer_output_tokens: int = 0
+    proposals: int = 0
+    invalid_proposals: int = 0
+    # Usage totals {input, output, cache_read, cache_write, reasoning}, base model vs proposer.
+    model_usage: dict[str, int] = field(default_factory=_usage_record)
+    proposer_usage: dict[str, int] = field(default_factory=_usage_record)
+    cost_usd: float | None = None     # billed cost; None when a price is unknown
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any] | None) -> "Budget":
+        known = {f.name for f in fields(cls)}
+        budget = cls(**{k: v for k, v in dict(data or {}).items() if k in known})
+        budget.model_usage = {**_usage_record(), **dict(budget.model_usage or {})}
+        budget.proposer_usage = {**_usage_record(), **dict(budget.proposer_usage or {})}
+        return budget
+
+    def add_run(self, metrics: Mapping[str, float], split: str) -> None:
+        if split == "search":
+            self.harness_evaluations += 1
+        else:
+            self.test_evaluations += 1
+        prompt = int(metrics.get("prompt_tokens", 0) or 0)
+        completion = int(metrics.get("completion_tokens", 0) or 0)
+        self.model_calls += int(metrics.get("model_calls", 0) or 0)
+        self.prompt_tokens += prompt
+        self.completion_tokens += completion
+        self.train_prompt_tokens += int(metrics.get("train_prompt_tokens", 0) or 0)
+        self.model_usage["input"] += prompt
+        self.model_usage["output"] += completion
+        for key in ("cache_read", "cache_write", "reasoning"):
+            self.model_usage[key] += int(metrics.get(f"{key}_tokens", 0) or 0)
+
+    def add_proposer(self, delta: Mapping[str, int]) -> None:
+        self.proposer_calls += int(delta.get("calls", 0) or 0)
+        self.proposer_input_tokens += int(delta.get("input_tokens", 0) or 0)
+        self.proposer_output_tokens += int(delta.get("output_tokens", 0) or 0)
+        self.proposer_usage["input"] += int(delta.get("input_tokens", 0) or 0)
+        self.proposer_usage["output"] += int(delta.get("output_tokens", 0) or 0)
+        for key in ("cache_read", "cache_write", "reasoning"):
+            self.proposer_usage[key] += int(delta.get(key, 0) or 0)
+
+    def price(self, model: str | None, proposer_model: str | None) -> float | None:
+        """Billed USD for both models, or None when any model that was used has no known price."""
+        from .chat_types import Usage
+        from .providers import cost_usd, price_for
+
+        total = 0.0
+        for name, usage, used in ((model, self.model_usage, self.model_calls),
+                                  (proposer_model, self.proposer_usage, self.proposer_calls)):
+            if not used:
+                continue
+            cost = cost_usd(Usage(**usage), price_for(name)) if name else None
+            if cost is None:
+                return None
+            total += cost
+        return total
 
 
 @dataclass
@@ -62,6 +185,9 @@ class SearchConfig:
     max_workers: int = 1
     task_timeout: float = 600.0
     test_root: Path | str | None = None
+    max_evaluations: int | None = None   # equal-budget cap over harness_evaluations (search split)
+    run_meta: dict = field(default_factory=dict)   # provider/model names, optimizer, view (never keys)
+    evaluation_timeout: float | None = None       # per evaluation; default task_timeout * len(tasks)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -69,15 +195,25 @@ class SearchConfig:
             raise ValueError("iterations must be non-negative and candidates_per_iteration positive")
         if self.repeats < 1 or self.max_workers < 1:
             raise ValueError("repeats and max_workers must be positive")
+        if self.max_evaluations is not None and self.max_evaluations < 0:
+            raise ValueError("max_evaluations must be non-negative")
         self.test_root = Path(self.test_root) if self.test_root else self.root.with_name(self.root.name + "-test")
+        root, test = Path(os.path.abspath(self.root)), Path(os.path.abspath(self.test_root))
+        if test == root or root in test.parents:
+            raise ValueError(f"test_root must be outside root: {self.test_root} is inside {self.root}")
 
 
 class TraceRecorder:
+    """JSONL trace. Payloads are redacted and string fields bounded: no key reaches a trace."""
+
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = path.open("w", encoding="utf-8")
+        self._lock = threading.Lock()
+        self.closed = False
         self.count = 0
+        # Metered prompt tokens so far (kept up to date by MeteredModel), for cost-aware harnesses.
         self.context_cost = 0.0
 
     def add_context_cost(self, amount: float) -> None:
@@ -85,19 +221,34 @@ class TraceRecorder:
         self.event("harness_reported_cost", {"amount": amount})
 
     def event(self, name: str, payload: Any = None, **fields: Any) -> None:
-        record = {"time": time.time(), "event": name, "payload": payload, **fields}
-        self._file.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-        self._file.flush()
-        self.count += 1
+        clean = redact_obj(json.loads(json.dumps(payload, ensure_ascii=False, default=str)))
+        extra = {key: bounded(value) if isinstance(value, str)
+                 else redact_obj(json.loads(json.dumps(value, ensure_ascii=False, default=str)))
+                 for key, value in fields.items()}
+        record = {"time": time.time(), "event": name, "payload": clean, **extra}
+        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        with self._lock:
+            if self.closed:  # a timed-out harness thread may still be running
+                return
+            self._file.write(line)
+            self._file.flush()
+            self.count += 1
 
     def close(self) -> None:
-        self._file.close()
+        with self._lock:
+            if not self.closed:
+                self.closed = True
+                self._file.close()
 
     def __enter__(self) -> "TraceRecorder":
         return self
 
     def __exit__(self, *_: Any) -> None:
         self.close()
+
+
+class EvaluationClosed(RuntimeError):
+    """A model call arrived after its evaluation ended (a timed-out harness thread)."""
 
 
 class MeteredModel:
@@ -110,8 +261,13 @@ class MeteredModel:
         self.calls = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.usage = _usage_record()
+        self.closed = False
+        self._lock = threading.Lock()
 
     def call(self, prompt: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+        if self.closed:
+            raise EvaluationClosed("model call after the evaluation ended")
         upstream = getattr(self.model, "call", None)
         if callable(upstream):
             if getattr(self.model, "supports_sample_index", False):
@@ -120,10 +276,19 @@ class MeteredModel:
             text, usage = str(text), dict(usage or {})
         else:
             text, usage = str(self.model(prompt, **kwargs)), {}
-        tokens = int(usage.get("prompt_tokens") or 0) or estimate_tokens(prompt)
-        self.calls += 1
-        self.prompt_tokens += tokens
-        self.completion_tokens += int(usage.get("completion_tokens") or 0)
+        tokens = int(usage.get("prompt_tokens") or usage.get("input") or 0) or estimate_tokens(prompt)
+        completion = int(usage.get("completion_tokens") or usage.get("output") or 0)
+        with self._lock:
+            if self.closed:
+                raise EvaluationClosed("model call after the evaluation ended")
+            self.calls += 1
+            self.prompt_tokens += tokens
+            self.completion_tokens += completion
+            self.usage["input"] += tokens
+            self.usage["output"] += completion
+            for key in ("cache_read", "cache_write", "reasoning"):
+                self.usage[key] += int(usage.get(key) or 0)
+            self.trace.context_cost = float(self.prompt_tokens)
         self.trace.event("model_call", {"prompt": prompt, "response": text, "tokens": tokens,
                                         "usage": usage, "kwargs": dict(kwargs)})
         return text, usage
@@ -176,7 +341,7 @@ class FilesystemExperience:
         out: list[EvaluationResult] = []
         for path in sorted(self.candidates.glob("*/scores.json")):
             try:
-                out.append(EvaluationResult(**json.loads(path.read_text(encoding="utf-8"))))
+                out.append(EvaluationResult.from_dict(json.loads(path.read_text(encoding="utf-8"))))
             except (OSError, TypeError, ValueError):
                 continue
         return out
@@ -208,51 +373,170 @@ def _load_harness(path: Path) -> Any:
     return harness
 
 
-class CandidateEvaluator:
-    def __init__(self, model: Callable[..., Any], metric: Callable[[Any, Any], float] | None = None,
-                 task_timeout: float = 600.0):
-        self.model = model
-        self.metric = metric or (lambda prediction, task: float(prediction == task.get("label")))
-        self.task_timeout = task_timeout
+MAX_ABANDONED_THREADS = 8
+_abandoned: list[threading.Thread] = []
+_abandoned_lock = threading.Lock()
 
-    def validate(self, source: Path | str) -> None:
+
+def _bounded_call(watchdog: Watchdog, fn: Callable[[], Any]) -> tuple[Any, str | None, str | None]:
+    """Run fn in a daemon thread under the watchdog: (value, error, abort reason).
+
+    Abandoned threads: Python cannot kill a thread, so a task that times out keeps running in
+    its daemon thread until it returns on its own (or the process exits). Its MeteredModel and
+    TraceRecorder are closed when the evaluation ends, so it can neither spend model calls nor
+    write the trace. At most MAX_ABANDONED_THREADS may be alive at once; beyond that new tasks
+    are failed without being started instead of piling up more stuck threads.
+    """
+    with _abandoned_lock:
+        _abandoned[:] = [t for t in _abandoned if t.is_alive()]
+        if len(_abandoned) >= MAX_ABANDONED_THREADS:
+            return None, f"error: {len(_abandoned)} timed-out harness threads still running", None
+    watchdog.kick()
+    try:
+        watchdog.check()
+    except Aborted as exc:
+        return None, f"timeout: {exc.reason}", exc.reason
+    box: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - a harness failure is a task score
+            box["error"] = f"{type(exc).__name__}: {exc}"
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(watchdog.remaining())
+    if thread.is_alive():
+        with _abandoned_lock:
+            _abandoned.append(thread)
+        reason = "idle"
+        try:
+            watchdog.check()
+        except Aborted as exc:
+            reason = exc.reason
+        return None, f"timeout: no result before the {reason} limit", reason
+    return box.get("value"), box.get("error"), None
+
+
+class CandidateEvaluator:
+    """Scores one harness on a task list.
+
+    plain : per task  result = call_run(...); score = metric(task, result); call_learn(...)
+    online: fresh harness -> stream the train tasks (run + learn) -> each task scored on a frozen
+            copy with its target hidden.
+    A harness exception or timeout on one task scores that task 0 and is never retried; only an
+    import failure makes the evaluation invalid.
+    """
+
+    def __init__(self, model: Callable[..., Any], metric: _protocol.Metric | None = None,
+                 task_timeout: float = 600.0, protocol: str = "plain",
+                 train_tasks: Sequence[Mapping[str, Any]] = (), evaluation_timeout: float | None = None):
+        if protocol not in ("plain", "online"):
+            raise ValueError("protocol must be 'plain' or 'online'")
+        self.model = model
+        self.metric = metric or _protocol.exact
+        self.task_timeout = task_timeout
+        self.protocol = protocol
+        self.train_tasks = [dict(t) for t in train_tasks]
+        self.evaluation_timeout = evaluation_timeout
+
+    def validate(self, source: Path | str, probe: Mapping[str, Any] | None = None) -> None:
         harness = _load_harness(Path(source))
+        row = dict(probe) if probe is not None else {"input": "validation"}
         with tempfile.TemporaryDirectory() as td:
             with TraceRecorder(Path(td) / "validation.jsonl") as trace:
                 try:
-                    harness.run({"input": "validation", "label": "ok"}, MeteredModel(self.model, trace), trace)
+                    _protocol.call_run(harness, row, MeteredModel(self.model, trace), trace)
                 except Exception as exc:
                     raise HarnessValidationError(f"validation run failed: {exc}") from exc
+
+    def _plain(self, harness: Any, task: Mapping[str, Any], model: MeteredModel,
+               trace: TraceRecorder) -> tuple[float, dict]:
+        result = _protocol.call_run(harness, task, model, trace)
+        reward = float(self.metric(task, result))
+        try:
+            _protocol.call_learn(harness, task, result, model)
+        except Exception as exc:  # the score stands; the learning failure is visible in the trace
+            trace.event("learn_error", None, error=f"{type(exc).__name__}: {exc}")
+        return reward, result
+
+    def _frozen(self, harness: Any, task: Mapping[str, Any], model: MeteredModel,
+                trace: TraceRecorder) -> tuple[float, dict]:
+        frozen = copy.deepcopy(harness)
+        result = _protocol.call_run(frozen, _protocol.hide_target(task), model, trace)
+        return float(self.metric(task, result)), result
+
+    def _train(self, harness: Any, task: Mapping[str, Any], model: MeteredModel, trace: TraceRecorder) -> None:
+        result = _protocol.call_run(harness, task, model, trace)
+        _protocol.call_learn(harness, task, result, model)
 
     def evaluate(self, source: Path | str, tasks: Sequence[Mapping[str, Any]], candidate_id: str,
                  trace_path: Path, sample_index: int = 0) -> EvaluationResult:
         started = time.perf_counter()
         try:
             harness = _load_harness(Path(source))
-            score_sum = 0.0
-            with TraceRecorder(trace_path) as trace:
-                metered = MeteredModel(self.model, trace, sample_index)
-                for index, task in enumerate(tasks):
-                    trace.event("task_start", {"index": index, "task": dict(task)})
-                    task_started = time.perf_counter()
-                    prediction = harness.run(task, metered, trace)
-                    elapsed = time.perf_counter() - task_started
-                    # ponytail: post-hoc deadline check, not preemption; subprocess validation
-                    # (sandbox.validate_in_subprocess) catches hard hangs before we get here.
-                    if elapsed > self.task_timeout:
-                        raise TimeoutError(f"task {index} exceeded task_timeout ({elapsed:.1f}s)")
-                    value = float(self.metric(prediction, task))
-                    score_sum += value
-                    trace.event("task_end", {"index": index, "prediction": prediction, "reward": value})
-            n = len(tasks) or 1
-            return EvaluationResult(candidate_id, score_sum / n,
-                                    {"model_calls": float(metered.calls),
-                                     "prompt_tokens": metered.prompt_tokens,
-                                     "completion_tokens": metered.completion_tokens},
-                                    metered.prompt_tokens / n, len(tasks), time.perf_counter() - started)
         except Exception as exc:
             return EvaluationResult(candidate_id, float("-inf"), {}, float("inf"), len(tasks),
                                     time.perf_counter() - started, False, repr(exc))
+        online = self.protocol == "online"
+        steps = len(tasks) + (len(self.train_tasks) if online else 0)
+        deadline = self.evaluation_timeout or self.task_timeout * max(1, steps)
+        watchdog = Watchdog(idle=self.task_timeout, deadline=deadline)
+        rewards: list[float] = []
+        stops: Counter[str] = Counter()
+        failures = 0
+        abort: str | None = None
+        train_tokens = 0
+        with TraceRecorder(trace_path) as trace:
+            metered = MeteredModel(self.model, trace, sample_index)
+            try:
+                if online:
+                    for index, task in enumerate(self.train_tasks):
+                        trace.event("train_task", {"index": index, "input": task.get("input")})
+                        _, error, reason = _bounded_call(
+                            watchdog, lambda task=task: self._train(harness, task, metered, trace))
+                        if error:
+                            trace.event("train_error", {"index": index}, error=error)
+                        if reason == "deadline":
+                            abort = abort or reason
+                            break
+                    train_tokens = metered.prompt_tokens
+                run_one = self._frozen if online else self._plain
+                for index, task in enumerate(tasks):
+                    trace.event("task_start", {"index": index, "task": dict(task)})
+                    if abort == "deadline":
+                        value, error, reason = None, "timeout: evaluation deadline already passed", "deadline"
+                    else:
+                        value, error, reason = _bounded_call(
+                            watchdog, lambda task=task: run_one(harness, task, metered, trace))
+                    if reason:
+                        abort = abort if abort == "deadline" else reason
+                    if error is None and value is not None:
+                        reward, result = value
+                        stop = normalise_stop_reason(result.get("stop_reason") if isinstance(result, Mapping) else None)
+                        trace.event("task_end", {"index": index, "output": result.get("output"),
+                                                 "reward": reward, "stop_reason": stop})
+                    else:
+                        reward, stop = 0.0, "timeout" if reason else "error"
+                        failures += 1
+                        trace.event("task_end", {"index": index, "output": None, "reward": 0.0,
+                                                 "stop_reason": stop}, error=error or "no result")
+                    rewards.append(reward)
+                    stops[stop] += 1
+            finally:
+                metered.closed = True
+        n = len(tasks) or 1
+        eval_tokens = metered.prompt_tokens - train_tokens
+        return EvaluationResult(
+            candidate_id, sum(rewards) / n,
+            {"model_calls": float(metered.calls), "prompt_tokens": metered.prompt_tokens,
+             "completion_tokens": metered.completion_tokens, "train_prompt_tokens": train_tokens,
+             "cache_read_tokens": metered.usage["cache_read"],
+             "cache_write_tokens": metered.usage["cache_write"],
+             "reasoning_tokens": metered.usage["reasoning"], "task_failures": failures},
+            eval_tokens / n, len(tasks), time.perf_counter() - started,
+            stop_reasons=dict(stops), abort_reason=abort)
 
 
 class ParetoFrontier:
@@ -301,25 +585,102 @@ class CommandProposer:
 
 
 class SearchRunner:
+    # proposal sidecars written next to <stem>.py, copied into the candidate directory
+    SIDECARS = {".reasoning.md": "proposer_reasoning.md", ".proposer_log.jsonl": "proposer_log.jsonl",
+                ".outcomes.json": "outcomes.json", ".parent.json": "parent.json"}
+
     def __init__(self, config: SearchConfig, evaluator: CandidateEvaluator,
                  proposer: Callable[[FilesystemExperience, int, int], Sequence[Path]]):
         self.config, self.evaluator, self.proposer = config, evaluator, proposer
         self.experience = FilesystemExperience(config.root)
+        self.probe: dict[str, Any] | None = None
+        self.budget = Budget()
+        self.cursor = 0
+        self._lock = threading.RLock()
+        self._results: dict[str, EvaluationResult] = {}   # candidate id -> merged search result
+        self._verdicts: dict[str, str] = {}
+        self._resuming = False
+        self._proposer_seen: dict[str, int] = {}
+        self._manifest: dict[str, Any] = {}
+
+    # -- proposal files ------------------------------------------------------------------------
+
+    @classmethod
+    def _sidecar_notes(cls, source: Path) -> dict[str, str]:
+        notes = {}
+        for suffix, name in cls.SIDECARS.items():
+            sidecar = source.with_name(source.stem + suffix)
+            if sidecar.is_file():
+                notes[name] = sidecar.read_text(encoding="utf-8", errors="replace")
+        return notes
 
     @staticmethod
-    def _sidecar_notes(source: Path) -> dict[str, str]:
-        sidecar = source.with_name(source.stem + ".reasoning.md")
-        if sidecar.is_file():
-            return {"proposer_reasoning.md": sidecar.read_text(encoding="utf-8", errors="replace")}
-        return {}
+    def _json_sidecar(source: Path, suffix: str) -> dict[str, Any]:
+        path = source.with_name(source.stem + suffix)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    # -- receipts and the acceptance gate ------------------------------------------------------
+
+    @staticmethod
+    def _write_receipt(directory: Path, receipt: Mapping[str, Any]) -> None:
+        atomic_write(directory / "receipt.json", json.dumps(redact_obj(dict(receipt)), indent=2, default=str))
+
+    @staticmethod
+    def read_receipt(directory: Path) -> dict[str, Any] | None:
+        try:
+            return json.loads((Path(directory) / "receipt.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+
+    def _test_root_spellings(self) -> list[str]:
+        test_root = Path(self.config.test_root)
+        spellings = set()
+        for form in (str(test_root), os.path.abspath(test_root), str(test_root.resolve())):
+            spellings.update({form, form.replace("\\", "/"), form.replace("\\", "\\\\")})
+        return [s for s in spellings if s]
+
+    def _references_test_root(self, text: str) -> bool:
+        haystack = text.lower() if os.name == "nt" else text
+        return any((s.lower() if os.name == "nt" else s) in haystack for s in self._test_root_spellings())
+
+    def _references_test_data(self, text: str) -> bool:
+        return Path(self.config.test_root).name in text or "test_results" in text
+
+    def _gate(self, text: str, outcomes: Mapping[str, Any], proposal: Mapping[str, Any],
+              fingerprint_now: str | None, over_budget: bool) -> tuple[str | None, str | None]:
+        """Host re-validation before a proposal becomes a candidate: (verdict, detail) or (None, None)."""
+        try:
+            compile(text, "harness.py", "exec")
+        except (SyntaxError, ValueError) as exc:
+            return "rejected_invalid_source", f"source does not compile: {exc}"
+        if self._references_test_root(text):
+            return "rejected_split_violation", "source contains the test-split path"
+        if int(outcomes.get("denied_split", 0) or 0) > 0 and self._references_test_data(text):
+            return "rejected_split_violation", "proposer was denied the test split and the source references test data"
+        claimed = proposal.get("fingerprint")
+        if claimed and fingerprint_now and claimed != fingerprint_now:
+            return "stale_parent", f"experience changed since the proposal read it ({claimed} != {fingerprint_now})"
+        if over_budget:
+            return "budget_expired", "equal-budget cap reached before this proposal was evaluated"
+        return None, None
+
+    # -- evaluation ----------------------------------------------------------------------------
 
     @staticmethod
     def _merge_repeats(candidate_id: str, runs: Sequence[EvaluationResult], split: str) -> EvaluationResult:
+        stops: Counter[str] = Counter()
+        for run in runs:
+            stops.update(run.stop_reasons)
+        abort = next((run.abort_reason for run in runs if run.abort_reason), None)
         failed = next((run for run in runs if not run.valid), None)
         if failed is not None:
             return EvaluationResult(candidate_id, float("-inf"), {}, float("inf"), failed.examples,
                                     sum(run.elapsed_seconds for run in runs), False, failed.error,
-                                    len(runs), 0.0, split)
+                                    len(runs), 0.0, split, dict(stops), abort)
         scores = [run.score for run in runs]
         merged_metrics: dict[str, float] = {}
         for key in {key for run in runs for key in run.metrics}:
@@ -337,90 +698,347 @@ class SearchRunner:
             len(runs),
             statistics.pstdev(scores) if len(scores) > 1 else 0.0,
             split,
+            dict(stops),
+            abort,
         )
 
+    def _finished(self, label: str) -> EvaluationResult | None:
+        """On resume: the stored result of a finished candidate, or None (an incomplete one is wiped)."""
+        if not self._resuming:
+            return None
+        directory = self.experience.candidate_dir(label)
+        if not directory.exists():
+            return None
+        receipt = self.read_receipt(directory) or {}
+        scores = directory / "scores.json"
+        if receipt.get("verdict") not in (None, "incomplete") and scores.is_file():
+            try:
+                result = EvaluationResult.from_dict(json.loads(scores.read_text(encoding="utf-8")))
+            except (OSError, TypeError, ValueError):
+                result = None
+            if result is not None:
+                with self._lock:
+                    self._results[label] = result
+                    self._verdicts[label] = receipt["verdict"]
+                return result
+        shutil.rmtree(directory, ignore_errors=True)  # torn step: evaluate again
+        return None
+
+    def _reject(self, candidate_id: str, directory: Path, receipt: dict[str, Any], verdict: str,
+                detail: str, split: str) -> EvaluationResult | None:
+        result = EvaluationResult(candidate_id, float("-inf"), valid=False, error=f"{verdict}: {detail}",
+                                  split=split)
+        self.experience.write_result(result)
+        receipt["verdict"] = verdict
+        receipt["fallback"] = detail
+        self._write_receipt(directory, receipt)
+        with self._lock:
+            self._verdicts[candidate_id] = verdict
+            if verdict in ("rejected_invalid_source", "rejected_split_violation"):
+                self.budget.invalid_proposals += 1
+            self._results[candidate_id] = result
+            self._checkpoint()
+        return result if self.config.keep_invalid else None
+
     def _evaluate_source(self, source: Path, tasks: Sequence[Mapping[str, Any]], label: str,
-                         split: str = "search") -> EvaluationResult | None:
+                         split: str = "search", fingerprint_now: str | None = None,
+                         over_budget: bool = False) -> EvaluationResult | None:
         from .sandbox import validate_in_subprocess
 
+        done = self._finished(label)
+        if done is not None:
+            return done if done.valid or self.config.keep_invalid else None
+        source = Path(source)
         notes = self._sidecar_notes(source)
-        try:
-            validate_in_subprocess(source, self.config.validation_timeout)
-        except Exception as exc:
-            candidate_id = self.experience.add_source(source, label, notes)
-            result = EvaluationResult(candidate_id, float("-inf"), valid=False, error=str(exc), split=split)
-            self.experience.write_result(result)
-            return result if self.config.keep_invalid else None
+        proposal = self._json_sidecar(source, ".proposal.json")
+        outcomes = self._json_sidecar(source, ".outcomes.json")
         candidate_id = self.experience.add_source(source, label, notes)
         directory = self.experience.candidate_dir(candidate_id)
+        if proposal:
+            atomic_write(directory / "proposal.json",
+                         json.dumps(redact_obj({"candidate_id": candidate_id, **proposal}), indent=2, default=str))
+        receipt: dict[str, Any] = {
+            "candidate_id": candidate_id, "proposal_id": proposal.get("candidate") or source.stem,
+            "split": split, "parents_read": list(proposal.get("parents_read") or []),
+            "tool_outcomes": outcomes, "fingerprint": proposal.get("fingerprint"),
+            "validation": None, "evaluation": None, "fallback": None, "verdict": "incomplete"}
+        self._write_receipt(directory, receipt)
+        text = (directory / "harness.py").read_text(encoding="utf-8", errors="replace")
+        verdict, detail = self._gate(text, outcomes, proposal, fingerprint_now, over_budget)
+        if verdict:
+            return self._reject(candidate_id, directory, receipt, verdict, detail or "", split)
+        try:
+            validate_in_subprocess(directory / "harness.py", self.config.validation_timeout, self.probe,
+                                   self.experience.root)
+        except Exception as exc:
+            receipt["validation"] = {"ok": False, "error": bounded(str(exc))}
+            return self._reject(candidate_id, directory, receipt, "rejected_invalid_source",
+                                f"validation failed: {exc}", split)
+        receipt["validation"] = {"ok": True}
+        self._write_receipt(directory, receipt)
         harness_path = directory / "harness.py"
-        runs = [self.evaluator.evaluate(harness_path, tasks, candidate_id,
-                                        directory / ("traces.jsonl" if repeat == 0 else f"traces-{repeat}.jsonl"),
-                                        sample_index=repeat)
-                for repeat in range(self.config.repeats)]
+        runs = []
+        for repeat in range(self.config.repeats):
+            run = self.evaluator.evaluate(harness_path, tasks, candidate_id,
+                                          directory / ("traces.jsonl" if repeat == 0 else f"traces-{repeat}.jsonl"),
+                                          sample_index=repeat)
+            runs.append(run)
+            with self._lock:
+                self.budget.add_run(run.metrics, split)
         result = self._merge_repeats(candidate_id, runs, split)
         self.experience.write_result(result)
-        return result
+        receipt["evaluation"] = {"repeats": len(runs), "score": result.score, "context_cost": result.context_cost,
+                                 "task_failures": result.metrics.get("task_failures", 0.0),
+                                 "stop_reasons": result.stop_reasons, "abort_reason": result.abort_reason,
+                                 "error": result.error}
+        receipt["verdict"] = "accepted" if result.valid else "failed_eval"
+        self._write_receipt(directory, receipt)
+        with self._lock:
+            self._verdicts[candidate_id] = receipt["verdict"]
+            self._results[candidate_id] = result
+            self._checkpoint()
+        return result if result.valid or self.config.keep_invalid else None
 
     def _evaluate_many(self, work: Sequence[tuple[Path, str]], tasks: Sequence[Mapping[str, Any]],
-                       split: str = "search") -> list[EvaluationResult]:
-        if self.config.max_workers == 1 or len(work) <= 1:
-            return [r for r in (self._evaluate_source(s, tasks, label, split) for s, label in work) if r]
-        with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(work))) as pool:
-            futures = [pool.submit(self._evaluate_source, source, tasks, label, split) for source, label in work]
+                       split: str = "search", fingerprint_now: str | None = None,
+                       over_budget: Sequence[bool] = ()) -> list[EvaluationResult]:
+        flags = list(over_budget) + [False] * (len(work) - len(over_budget))
+        jobs = [(s, label, flag) for (s, label), flag in zip(work, flags)]
+        if self.config.max_workers == 1 or len(jobs) <= 1:
+            return [r for r in (self._evaluate_source(s, tasks, label, split, fingerprint_now, flag)
+                                for s, label, flag in jobs) if r]
+        with ThreadPoolExecutor(max_workers=min(self.config.max_workers, len(jobs))) as pool:
+            futures = [pool.submit(self._evaluate_source, s, tasks, label, split, fingerprint_now, flag)
+                       for s, label, flag in jobs]
             return [r for r in (future.result() for future in futures) if r]
 
     def evaluate_on_test(self, frontier: Sequence[EvaluationResult],
                          test_tasks: Sequence[Mapping[str, Any]]) -> list[EvaluationResult]:
-        """Score the frontier once on held-out tasks. Paper section 3: the proposer never sees this."""
+        """Score the frontier once on held-out tasks. Paper section 3: the proposer never sees this.
+
+        The held-out split is read once per frontier: when test_results.json already scores exactly
+        this frontier (a resumed, finished run) it is returned as is. When the frontier changed, the
+        previous attempt is kept as test_results.<n>.json, never overwritten, and one new attempt runs.
+        """
         test_root = Path(self.config.test_root)
-        (test_root / "traces").mkdir(parents=True, exist_ok=True)
+        current = test_root / "test_results.json"
+        archived = sorted(test_root.glob("test_results.*.json"))
+        if current.is_file():
+            try:
+                previous = json.loads(current.read_text(encoding="utf-8"))
+                stored = [EvaluationResult.from_dict(r) for r in previous.get("results", [])]
+            except (OSError, TypeError, ValueError):
+                stored = None
+            if stored is not None and [r.candidate_id for r in stored] == [r.candidate_id for r in frontier]:
+                return stored
+            os.replace(current, test_root / f"test_results.{len(archived) + 1}.json")
+            archived = sorted(test_root.glob("test_results.*.json"))
+        traces = test_root / ("traces" if not archived else f"traces-attempt-{len(archived) + 1}")
+        traces.mkdir(parents=True, exist_ok=True)
         results: list[EvaluationResult] = []
         for item in frontier:
             harness_path = self.experience.candidate_dir(item.candidate_id) / "harness.py"
             runs = []
             for repeat in range(self.config.repeats):
                 name = f"{item.candidate_id}.jsonl" if repeat == 0 else f"{item.candidate_id}-{repeat}.jsonl"
-                runs.append(self.evaluator.evaluate(harness_path, test_tasks, item.candidate_id,
-                                                    test_root / "traces" / name, sample_index=repeat))
+                run = self.evaluator.evaluate(harness_path, test_tasks, item.candidate_id,
+                                              traces / name, sample_index=repeat)
+                runs.append(run)
+                with self._lock:
+                    self.budget.add_run(run.metrics, "test")
             results.append(self._merge_repeats(item.candidate_id, runs, "test"))
         payload = {"search_root": str(self.experience.root), "results": [asdict(r) for r in results]}
-        (test_root / "test_results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write(current, json.dumps(payload, indent=2))
         return results
 
-    def run(self, initial: Sequence[Path | str], search_tasks: Sequence[Mapping[str, Any]],
-            test_tasks: Sequence[Mapping[str, Any]] | None = None) -> list[EvaluationResult]:
-        self._write_run_manifest(search_tasks, test_tasks)
-        results = self._evaluate_many([(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)], search_tasks)
-        for iteration in range(1, self.config.iterations + 1):
+    # -- budget, checkpoint, resume ------------------------------------------------------------
+
+    def _remaining(self) -> int | None:
+        cap = self.config.max_evaluations
+        return None if cap is None else max(0, cap - self.budget.harness_evaluations)
+
+    def _absorb_proposer_usage(self) -> None:
+        usage = dict(getattr(self.proposer, "usage", None) or {})
+        delta = {key: int(value or 0) - self._proposer_seen.get(key, 0)
+                 for key, value in usage.items() if isinstance(value, (int, float))}
+        self._proposer_seen = {key: int(value or 0) for key, value in usage.items()
+                               if isinstance(value, (int, float))}
+        with self._lock:
+            self.budget.add_proposer(delta)
+
+    def frontier(self) -> list[EvaluationResult]:
+        with self._lock:
+            accepted = [r for cid, r in self._results.items() if self._verdicts.get(cid) == "accepted"]
+        return ParetoFrontier.select(accepted)
+
+    def _checkpoint(self) -> None:
+        """Atomically rewrite run.json with the cursor, frontier ids and budget."""
+        with self._lock:
+            meta = redact_obj(dict(self.config.run_meta))
+            self.budget.cost_usd = self.budget.price(meta.get("model"), meta.get("proposer_model"))
+            payload = {**self._manifest, "run_meta": meta,
+                       "cursor": {"iteration": self.cursor},
+                       "frontier": [r.candidate_id for r in self.frontier()],
+                       "budget": asdict(self.budget)}
+            atomic_write(self.experience.root / "run.json", json.dumps(payload, indent=2, default=str))
+
+    def _begin_resume(self, force: bool) -> None:
+        root = self.experience.root
+        counter = root / ".resume_attempts"
+        try:
+            attempts = int(counter.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            attempts = 0
+        attempts += 1
+        if attempts > MAX_AUTOMATIC_RESUMES and not force:
+            raise RuntimeError(f"{root} was already resumed {attempts - 1} times automatically "
+                               f"(limit {MAX_AUTOMATIC_RESUMES}); inspect it and use --force-resume")
+        atomic_write(counter, str(attempts))
+        try:
+            previous = json.loads((root / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = {}
+        self.budget = Budget.from_dict(previous.get("budget"))
+        self.cursor = int((previous.get("cursor") or {}).get("iteration", 0) or 0)
+        shutil.rmtree(root / "views", ignore_errors=True)   # derived; rebuilt on demand
+        self._repair_logs()
+        self._resuming = True
+        for directory in sorted(self.experience.candidates.iterdir()):
+            if directory.is_dir():
+                self._finished(directory.name)
+
+    def _repair_logs(self) -> None:
+        """Drop a torn trailing line from traces and proposer logs left by a killed process."""
+        from .httpdata import read_jsonl, write_jsonl
+
+        root = self.experience.root
+        test_root = Path(self.config.test_root)
+        paths = [*root.glob("candidates/*/traces*.jsonl"), *test_root.glob("traces*/*.jsonl"), *root.glob("candidates/*/proposer_log.jsonl"),
+                 *root.glob("proposals/*/*.proposer_log.jsonl")]
+        for path in paths:
             try:
-                proposals = self.proposer(self.experience, iteration, self.config.candidates_per_iteration)
-            except Exception as exc:
-                proposal_dir = self.experience.root / "proposals" / f"iteration-{iteration:04d}"
-                proposal_dir.mkdir(parents=True, exist_ok=True)
-                (proposal_dir / "proposer.error").write_text(repr(exc), encoding="utf-8")
-                proposals = []
+                lines = [line for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                         if line.strip()]
+                rows = read_jsonl(path, tolerate_torn=True)
+            except (OSError, ValueError):
+                continue
+            if len(rows) != len(lines):
+                write_jsonl(path, rows)
+
+    @classmethod
+    def _persist_proposals(cls, proposals: Sequence[Path | str], proposal_dir: Path,
+                           proposed_at: str | None = None) -> list[Path]:
+        """Every proposal is a file under proposals/iteration-NNNN/ (with its sidecars), so a resume
+        reuses it instead of proposing again. A proposal that recorded no fingerprint (e.g. from
+        CommandProposer) gets the one the runner took just before proposing, so the stale gate applies."""
+        proposal_dir.mkdir(parents=True, exist_ok=True)
+        kept: list[Path] = []
+        for item in proposals:
+            source = Path(item)
+            if source.parent.resolve() == proposal_dir.resolve():
+                kept.append(source)
+                continue
+            target = proposal_dir / source.name
+            shutil.copy2(source, target)
+            for suffix in (*cls.SIDECARS, ".proposal.json"):
+                sidecar = source.with_name(source.stem + suffix)
+                if sidecar.is_file():
+                    shutil.copy2(sidecar, proposal_dir / sidecar.name)
+            kept.append(target)
+        if proposed_at:
+            for path in kept:
+                sidecar = path.with_name(path.stem + ".proposal.json")
+                data = cls._json_sidecar(path, ".proposal.json")
+                if not data.get("fingerprint"):
+                    data = {"candidate": path.stem, "parents_read": [], **data, "fingerprint": proposed_at}
+                    sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return kept
+
+    def _is_finished(self, label: str) -> bool:
+        directory = self.experience.candidate_dir(label)
+        receipt = self.read_receipt(directory) or {}
+        return (self._resuming and (directory / "scores.json").is_file()
+                and receipt.get("verdict") not in (None, "incomplete"))
+
+    def _budget_flags(self, work: Sequence[tuple[Path, str]]) -> list[bool]:
+        """over_budget per item; only unfinished items consume the remaining evaluation slots."""
+        remaining = self._remaining()
+        slots = None if remaining is None else remaining // self.config.repeats
+        flags = []
+        for _, label in work:
+            if slots is None or self._is_finished(label):
+                flags.append(False)
+            else:
+                flags.append(slots <= 0)
+                slots -= 1
+        return flags
+
+    # -- the loop ------------------------------------------------------------------------------
+
+    def run(self, initial: Sequence[Path | str], search_tasks: Sequence[Mapping[str, Any]],
+            test_tasks: Sequence[Mapping[str, Any]] | None = None, resume: bool = False,
+            force_resume: bool = False) -> list[EvaluationResult]:
+        from .proposer_agent import fingerprint
+
+        if self.config.evaluation_timeout is not None:
+            self.evaluator.evaluation_timeout = self.config.evaluation_timeout
+        if resume:
+            self._begin_resume(force_resume)
+        self.probe = _protocol.hide_target(search_tasks[0]) if search_tasks else None
+        self._manifest = self._run_manifest(search_tasks, test_tasks)
+        self._checkpoint()
+        seeds = [(Path(s), f"initial-{i:04d}") for i, s in enumerate(initial)]
+        self._evaluate_many(seeds, search_tasks, over_budget=self._budget_flags(seeds))
+        count = self.config.candidates_per_iteration
+        for iteration in range(1, self.config.iterations + 1):
+            remaining = self._remaining()
+            if remaining is not None and remaining < self.config.repeats:
+                break
+            proposal_dir = self.experience.root / "proposals" / f"iteration-{iteration:04d}"
+            existing = sorted(proposal_dir.glob("*.py"))[:count] if resume and proposal_dir.is_dir() else []
+            if existing:
+                proposals: Sequence[Path] = existing
+            else:
+                try:
+                    proposed_at = fingerprint(self.experience.root)
+                    proposals = self.proposer(self.experience, iteration, count)
+                except Exception as exc:
+                    proposal_dir.mkdir(parents=True, exist_ok=True)
+                    (proposal_dir / "proposer.error").write_text(repr(exc), encoding="utf-8")
+                    proposals = []
+                finally:
+                    self._absorb_proposer_usage()
+                proposals = self._persist_proposals(proposals, proposal_dir, proposed_at)
+                with self._lock:
+                    self.budget.proposals += len(proposals)
             work = [(Path(s), f"iteration-{iteration:04d}-{i:02d}") for i, s in enumerate(proposals)]
-            results.extend(self._evaluate_many(work, search_tasks))
-        frontier = ParetoFrontier.select(results)
-        (self.experience.root / "frontier.json").write_text(
-            json.dumps([asdict(x) for x in frontier], indent=2), encoding="utf-8")
+            over = self._budget_flags(work)
+            self._evaluate_many(work, search_tasks, fingerprint_now=fingerprint(self.experience.root),
+                                over_budget=over)
+            with self._lock:
+                self.cursor = max(self.cursor, iteration)
+                self._checkpoint()
+        frontier = self.frontier()
+        atomic_write(self.experience.root / "frontier.json",
+                     json.dumps([asdict(x) for x in frontier], indent=2))
         if test_tasks:
             self.evaluate_on_test(frontier, test_tasks)
+        self._checkpoint()
         return frontier
 
-    def _write_run_manifest(self, tasks: Sequence[Mapping[str, Any]],
-                            test_tasks: Sequence[Mapping[str, Any]] | None = None) -> None:
-        manifest = {
+    def _run_manifest(self, tasks: Sequence[Mapping[str, Any]],
+                      test_tasks: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
+        return {
             "created_at": time.time(),
             "python": sys.version,
             "config": {"root": str(self.config.root), "iterations": self.config.iterations,
                        "candidates_per_iteration": self.config.candidates_per_iteration,
                        "keep_invalid": self.config.keep_invalid, "repeats": self.config.repeats,
-                       "max_workers": self.config.max_workers},
+                       "max_workers": self.config.max_workers,
+                       "max_evaluations": self.config.max_evaluations,
+                       "protocol": getattr(self.evaluator, "protocol", "plain")},
             "task_count": len(tasks),
             # Only the search split is written here. Test tasks stay out of the proposer's reach.
             "tasks": [dict(task) for task in tasks],
             "test_task_count": len(test_tasks or []),
         }
-        (self.experience.root / "run.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")

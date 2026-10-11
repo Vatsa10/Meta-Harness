@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 import subprocess
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 _BOXED = re.compile(r"\\boxed\s*\{")
 _FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
@@ -97,11 +97,14 @@ def terminal_metric(prediction: Any, task: Mapping[str, Any], timeout: float = 1
     return float(completed.returncode == 0)
 
 
-METRICS: dict[str, Callable[[Any, Mapping[str, Any]], float]] = {
-    "classification": exact_match,
-    "math": math_equivalence,
-    "terminal": terminal_metric,
-}
+def __getattr__(name: str) -> Any:
+    # METRICS is protocol.BUILTIN_METRICS, (task, result) metrics; resolved lazily because
+    # protocol imports this module.
+    if name == "METRICS":
+        from .protocol import BUILTIN_METRICS
+        return BUILTIN_METRICS
+    raise AttributeError(name)
+
 
 __all__ = ["METRICS", "estimate_tokens", "exact_match", "math_equivalence",
            "normalize_answer", "terminal_metric"]

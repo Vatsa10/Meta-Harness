@@ -142,7 +142,8 @@ class AgentProposer:
         self.max_tokens = max_tokens
         self.test_root = Path(test_root) if test_root else None
         self.idle, self.deadline, self.clock = idle, deadline, clock
-        self.usage: dict[str, int] = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+        self.usage: dict[str, int] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
+                                      "cache_read": 0, "cache_write": 0, "reasoning": 0}
 
     # -- helpers -----------------------------------------------------------------------------
 
@@ -152,6 +153,8 @@ class AgentProposer:
                   for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
         self.usage["input_tokens"] += record["input"]
         self.usage["output_tokens"] += record["output"]
+        for key in ("cache_read", "cache_write", "reasoning"):
+            self.usage[key] += record[key]
         return record
 
     def _split_roots(self, root: Path) -> list[Path]:

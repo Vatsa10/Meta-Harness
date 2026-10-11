@@ -19,7 +19,7 @@ class Harness:
         self.run_index = previous
 
     def run(self, task, model, trace):
-        return task["label"] if self.run_index % 2 == 0 else "wrong"
+        return task.get("label", "") if self.run_index % 2 == 0 else "wrong"
 '''
 
 SLEEPER = '''

@@ -5,7 +5,7 @@ import pytest
 
 from meta_harness.core import TraceRecorder
 from meta_harness.datasets import terminal_tasks
-from meta_harness.metrics import METRICS
+from meta_harness.metrics import terminal_metric
 from meta_harness.terminal_harness import DockerPolicy, TerminalHarness
 
 
@@ -56,10 +56,10 @@ def test_terminal_harness_runs_locally_when_opted_in(tmp_path: Path):
 
 
 def test_terminal_metric_runs_the_test_command(tmp_path: Path):
-    metric = METRICS["terminal"]
+    metric = terminal_metric
     assert metric("done", {"test_command": "exit 0", "workdir": str(tmp_path)}) == 1.0
     assert metric("done", {"test_command": "exit 1", "workdir": str(tmp_path)}) == 0.0
 
 
 def test_terminal_metric_without_command_is_zero():
-    assert METRICS["terminal"]("done", {"instruction": "x"}) == 0.0
+    assert terminal_metric("done", {"instruction": "x"}) == 0.0

@@ -38,4 +38,4 @@ def test_math_equivalence_without_answer_is_zero():
 
 
 def test_metrics_registry_exposes_task_types():
-    assert set(metrics.METRICS) == {"classification", "math", "terminal"}
+    assert set(metrics.METRICS) == {"exact", "contains", "numeric"}
