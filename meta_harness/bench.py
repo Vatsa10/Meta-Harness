@@ -12,7 +12,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .judge import http_status, retryable
 from .protocol import Metric, hide_target
+from .redact import bounded
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -27,10 +29,6 @@ class Arm:
 
 def task_id(task: Mapping, index: int) -> str:
     return str(task["id"]) if task.get("id") is not None else f"t{index}"
-
-
-def _retryable(status: Any) -> bool:
-    return isinstance(status, int) and (status == 429 or status >= 500)
 
 
 # -- worker side (runs inside the sandbox subprocess) ---------------------------------
@@ -80,22 +78,32 @@ def _worker(cell_file: Path, result_file: Path) -> None:
         json.dumps(result)
         out["result"] = result
     except Exception as exc:
-        out["error"] = f"{type(exc).__name__}: {exc}"
-        status = getattr(exc, "status", None)
-        out["status"] = status if isinstance(status, int) else None
+        out["error"] = bounded(f"{type(exc).__name__}: {exc}")
+        out["status"] = http_status(exc)
     if model is not None:
         out["usage"] = model.usage
     result_file.write_text(json.dumps(out), encoding="utf-8")
 
 
-def _cell_env() -> dict[str, str]:
+def provider_env_names(provider: str) -> tuple[str, ...]:
+    """The only environment variables a cell for `provider` may see (key and base URL)."""
+    from . import providers
+    table = {"unikey": providers.UnikeyModel, "getunikey": providers.UnikeyModel,
+             "groq": providers.GroqModel, "compatible": providers.OpenAICompatibleModel,
+             "openai": providers.OpenAICompatibleModel, "azure": providers.OpenAICompatibleModel,
+             "anthropic": providers.AnthropicModel, "claude": providers.AnthropicModel}
+    cls = table.get(provider.lower())
+    return () if cls is None else (cls.API_KEY_ENV, cls.BASE_URL_ENV)
+
+
+def _cell_env(provider: str = "") -> dict[str, str]:
     from .sandboxes import _minimal_env
     env = _minimal_env()
     env["PYTHONPATH"] = str(REPO_ROOT)
     env["PYTHONIOENCODING"] = "utf-8"
-    for key, value in os.environ.items():
-        if "API_KEY" in key or "BASE_URL" in key or key.startswith("META_HARNESS_"):
-            env[key] = value
+    for key in provider_env_names(provider):
+        if key in os.environ:
+            env[key] = os.environ[key]
     return env
 
 
@@ -105,7 +113,7 @@ def subprocess_cell(arm: Arm, task: Mapping, trial: int, timeout: float) -> dict
 
     cell = {"provider": arm.provider, "model": arm.model, "harness": "harness.py",
             "task": dict(task), "trial": trial}
-    with TempDirSandbox(env=_cell_env()) as box:
+    with TempDirSandbox(env=_cell_env(arm.provider)) as box:
         (box.root / "cell.json").write_text(json.dumps(cell), encoding="utf-8")
         box.put(Path(arm.harness), "harness.py")
         command = subprocess.list2cmdline([sys.executable, "-m", "meta_harness.bench",
@@ -116,7 +124,7 @@ def subprocess_cell(arm: Arm, task: Mapping, trial: int, timeout: float) -> dict
         rfile = box.root / "result.json"
         if not rfile.is_file():
             tail = (done.stderr or done.stdout or "").strip()[-500:]
-            return {"result": None, "error": f"worker exited {done.code}: {tail}",
+            return {"result": None, "error": bounded(f"worker exited {done.code}: {tail}"),
                     "status": None, "usage": {}}
         return json.loads(rfile.read_text(encoding="utf-8"))
 
@@ -136,6 +144,11 @@ def _read_done(path: Path) -> dict[tuple, dict]:
 
 
 def _append(path: Path, row: Mapping) -> None:
+    if path.is_file() and path.stat().st_size:  # a torn last line must not swallow the next row
+        with path.open("rb+") as raw:
+            raw.seek(-1, 2)
+            if raw.read(1) != b"\n":
+                raw.write(b"\n")
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
         handle.flush()
@@ -195,16 +208,18 @@ def run_matrix(arms: Sequence[Arm], tasks: Sequence[Mapping], trials: int, metri
                         outcome = runner(arm, task, trial, cell_timeout)
                     except Exception as exc:  # runner failure: kept, scored 0, not retried
                         outcome = {"result": None, "error": f"{type(exc).__name__}: {exc}",
-                                   "status": None, "usage": {}}
-                    if outcome.get("error") and _retryable(outcome.get("status")) and attempt < retries:
+                                   "status": http_status(exc), "usage": {}}
+                    if outcome.get("error") and retryable(outcome.get("status")) and attempt < retries:
                         continue
                     break
                 error, score = outcome.get("error"), 0.0
+                if error:
+                    error = bounded(str(error))
                 if not error:
                     try:
                         score = float(metric(task, outcome.get("result") or {}))
                     except Exception as exc:
-                        error, score = f"metric {type(exc).__name__}: {exc}", 0.0
+                        error, score = bounded(f"metric {type(exc).__name__}: {exc}"), 0.0
                 row = {"arm": arm.name, "task_id": tid, "trial": trial, "score": score,
                        "error": error, "usage": dict(outcome.get("usage") or {}),
                        "seconds": round(time.monotonic() - started, 3)}

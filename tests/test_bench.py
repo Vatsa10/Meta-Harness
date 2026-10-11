@@ -150,3 +150,72 @@ def test_cli_parse_arm_and_registry():
         bench_cmd.parse_arm("nonsense")
     from meta_harness.commands import all_commands
     assert "bench" in all_commands()
+
+
+def test_errors_and_output_are_redacted_in_matrix_and_summary(tmp_path):
+    key = "sk-abcdefghijklmnop1234"
+    h = harness_file(tmp_path, f"print({key!r}); raise RuntimeError('bad key {key}')")
+    out = tmp_path / "out"
+    run_matrix([idle_arm(tmp_path, h)], TASKS[:1], 1, exact, out, cell_timeout=60)
+    for name in ("matrix.jsonl", "summary.json"):
+        assert key not in (out / name).read_text(encoding="utf-8")
+    (row,) = rows(out / "matrix.jsonl")
+    assert "[redacted]" in row["error"]
+
+
+def test_cell_env_is_scoped_to_the_arm_provider(monkeypatch):
+    from meta_harness.bench import _cell_env
+    for name in ("OPENAI_API_KEY", "GROQ_API_KEY", "UNIKEY_API_KEY", "ANTHROPIC_API_KEY",
+                 "META_HARNESS_JUDGE_PROVIDER", "META_HARNESS_JUDGE_MODEL"):
+        monkeypatch.setenv(name, "value-" + name)
+    env = _cell_env("anthropic")
+    assert env["ANTHROPIC_API_KEY"] == "value-ANTHROPIC_API_KEY"
+    assert not {"OPENAI_API_KEY", "GROQ_API_KEY", "UNIKEY_API_KEY",
+                "META_HARNESS_JUDGE_PROVIDER", "META_HARNESS_JUDGE_MODEL"} & set(env)
+    assert "ANTHROPIC_API_KEY" not in _cell_env("scripted")
+
+
+def test_torn_last_line_is_repaired_and_cell_reruns_once(tmp_path):
+    a = [Arm("a", Path("x"), "p", "m")]
+    out = tmp_path / "out"
+    run_matrix(a, TASKS, 1, exact, out, cell_runner=ok_runner())
+    path = out / "matrix.jsonl"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text[:-20], encoding="utf-8")  # tear the last row, no newline
+    again = []
+    run_matrix(a, TASKS, 1, exact, out, cell_runner=ok_runner(again))
+    assert len(again) == 1
+    good = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines() if x.endswith("}")]
+    assert len({r["task_id"] for r in good}) == 3
+    summary = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+    assert summary["a"]["cells"] == 3
+
+
+def test_real_provider_error_429_is_retried(tmp_path):
+    from meta_harness.providers import ProviderError
+    calls = []
+
+    def runner(arm, task, trial, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProviderError("HTTP 429: slow down")
+        return ok_runner()(arm, task, trial, timeout)
+
+    (row,) = rows(run_matrix([Arm("a", Path("x"), "p", "m")], TASKS[:1], 1, exact, tmp_path / "o",
+                             cell_runner=runner))
+    assert len(calls) == 2 and row["score"] == 1.0
+
+
+def test_judge_retries_transient_provider_errors(monkeypatch):
+    from meta_harness.providers import ProviderError
+    calls = []
+
+    def model(prompt):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProviderError("HTTP 503: down")
+        return "ok\nVERDICT: PASS"
+
+    monkeypatch.setattr(judge, "judge_model", lambda: model)
+    monkeypatch.setattr(judge, "RETRY_DELAY", 0)
+    assert judge.verdict({"criteria": "c"}, {"output": "o"}) == 1.0 and len(calls) == 2
