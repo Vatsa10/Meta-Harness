@@ -11,7 +11,7 @@ from ..cache import CachedModel
 from ..core import CandidateEvaluator, atomic_write
 from ..datasets import read_records, split_tasks
 from ..protocol import BUILTIN_METRICS
-from ..providers import model_from_environment
+from ..providers import PROVIDERS, model_from_environment
 from ..domains import adapter_for, metric_for
 
 NAME = "sweep"
@@ -26,7 +26,7 @@ def add_arguments(parser) -> None:
     parser.add_argument("--test-tasks", help="held-out dataset; omit to split --tasks")
     parser.add_argument("--search-fraction", type=float, default=0.7)
     parser.add_argument("--split-seed", type=int, default=0)
-    parser.add_argument("--provider", choices=["unikey", "openai", "anthropic", "compatible"],
+    parser.add_argument("--provider", choices=PROVIDERS,
                         default="unikey")
     parser.add_argument("--model", required=True)
     parser.add_argument("--task-type", choices=["classification", "math", "terminal"],
