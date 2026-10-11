@@ -1,0 +1,50 @@
+{
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "class": 5,
+    "id": "US20070213315A1",
+    "prod_smiles": "CC(C)(C)OC(=O)N1CCC2(CCCc3ccccc32)CC1"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "class": 1,
+    "id": "US20150057265A1",
+    "prod_smiles": "C[C@@H]1C[C@H](NC(=O)OC(C)(C)C)CN(c2ccncc2[N+](=O)[O-])C1"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "class": 6,
+    "id": "US20150246912A1",
+    "prod_smiles": "O=C(O)Cn1ccc(C2CC2)n1"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 3,
+   "row": {
+    "class": 6,
+    "id": "US20150148332A1",
+    "prod_smiles": "Clc1ccc2ncc(CCc3n[nH]c(N4CCCC4)n3)nc2c1"
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 4,
+   "row": {
+    "class": 6,
+    "id": "US06310075B1",
+    "prod_smiles": "CCOC(=O)N1c2cc3c(cc2[C@H](N)C[C@@H]1C)CCC3"
+   },
+   "truncated_cells": []
+  }
+ ],
+ "num_rows_total": 5
+}

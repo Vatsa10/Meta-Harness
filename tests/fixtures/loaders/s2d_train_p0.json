@@ -1,0 +1,45 @@
+{
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "output_text": "cervical spondylosis",
+    "input_text": "I've been having a lot of pain in my neck and back. I've also been having trouble with my balance and coordination. I've been coughing a lot and my limbs feel weak."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "output_text": "impetigo",
+    "input_text": "I have a rash on my face that is getting worse. It is red, inflamed, and has blisters that are bleeding clear pus. It is really painful."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "output_text": "urinary tract infection",
+    "input_text": "I have been urinating blood. I sometimes feel sick to my stomach when I urinate. I often feel like I have a fever."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 3,
+   "row": {
+    "output_text": "arthritis",
+    "input_text": "I have been having trouble with my muscles and joints. My neck is really tight and my muscles feel weak. I have swollen joints and it is hard to move around without becoming stiff. It is also really uncomfortable to walk."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 4,
+   "row": {
+    "output_text": "dengue",
+    "input_text": "I have been feeling really sick. My body hurts a lot and I have no appetite. I have also developed rashes on my arms and face. The back of my eyes hurt a lot."
+   },
+   "truncated_cells": []
+  }
+ ],
+ "num_rows_total": 10
+}
