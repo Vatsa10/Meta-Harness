@@ -1,0 +1,4 @@
+{
+ "answerbench.csv": "Problem ID,Problem,Short Answer,Category,Source\r\nab1,\"Answer problem 1, with a comma\nand a newline\",1,Algebra,x\r\nab2,\"Answer problem 2, with a comma\nand a newline\",2,Number Theory,x\r\nab3,\"Answer problem 3, with a comma\nand a newline\",3,Algebra,x\r\nab4,\"Answer problem 4, with a comma\nand a newline\",4,Number Theory,x\r\nab5,\"Answer problem 5, with a comma\nand a newline\",5,Algebra,x\r\nab6,\"Answer problem 6, with a comma\nand a newline\",6,Number Theory,x\r\nab7,\"Answer problem 7, with a comma\nand a newline\",7,Algebra,x\r\nab8,\"Answer problem 8, with a comma\nand a newline\",8,Number Theory,x\r\n",
+ "proofbench.csv": "Problem ID,Problem,Level\r\npb1,Prove that there are infinitely many primes of the form 4k+3 and nothing else.,Hard\r\npb2,Prove the triangle inequality for complex numbers carefully.,Hard\r\n"
+}
