@@ -7,7 +7,7 @@ name = "meta-harness"
 version = "0.2.0"
 description = "Meta-Harness: end-to-end optimization of LLM harnesses over an experience filesystem"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["tomli>=2; python_version < '3.11'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
