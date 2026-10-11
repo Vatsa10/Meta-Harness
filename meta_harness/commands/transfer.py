@@ -7,7 +7,7 @@ from pathlib import Path
 from ..datasets import read_records
 from ..domains import get_domain
 from ..protocol import resolve_metric
-from ..transfer import format_table, parse_models, transfer
+from ..transfer import format_comparisons, format_table, parse_models, transfer
 
 NAME = "transfer"
 HELP = "evaluate fixed harnesses across several models (harness x model table)"
@@ -34,6 +34,8 @@ def run(args) -> int:
     report = transfer([Path(h) for h in args.harness], tasks, parse_models(args.models), metric,
                       Path(args.root), repeats=args.repeats, protocol=protocol, train_tasks=train)
     print(format_table(report["rows"]))
+    if report["comparisons"]:
+        print(format_comparisons(report["comparisons"]))
     for row in report["rows"]:
         if row.get("error"):
             print(f"error: {row['harness']} x {row['provider']}:{row['model']}: {row['error']}")
