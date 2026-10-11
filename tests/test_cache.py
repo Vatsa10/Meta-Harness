@@ -20,6 +20,7 @@ class _CountingModel:
 def test_cache_key_is_stable_and_order_independent():
     assert cache_key("m", "p", {"a": 1, "b": 2}) == cache_key("m", "p", {"b": 2, "a": 1})
     assert cache_key("m", "p", {}) != cache_key("m", "q", {})
+    assert cache_key("m", "p", {}, sample_index=0) != cache_key("m", "p", {}, sample_index=1)
 
 
 def test_disk_cache_round_trips(tmp_path: Path):

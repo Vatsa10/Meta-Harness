@@ -81,8 +81,8 @@ class TraceRecorder:
         self.context_cost = 0.0
 
     def add_context_cost(self, amount: float) -> None:
-        """Record model-input cost in tokens."""
-        self.context_cost += max(0.0, float(amount))
+        """Legacy hook: cost is metered once, in provider tokens, by MeteredModel."""
+        self.event("harness_reported_cost", {"amount": amount})
 
     def event(self, name: str, payload: Any = None, **fields: Any) -> None:
         record = {"time": time.time(), "event": name, "payload": payload, **fields}
@@ -103,21 +103,27 @@ class TraceRecorder:
 class MeteredModel:
     """Wraps the base model so every call is priced in tokens and written into the trace."""
 
-    def __init__(self, model: Callable[..., Any], trace: TraceRecorder):
+    def __init__(self, model: Callable[..., Any], trace: TraceRecorder, sample_index: int = 0):
         self.model = model
         self.trace = trace
+        self.sample_index = sample_index
         self.calls = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
 
     def call(self, prompt: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
         upstream = getattr(self.model, "call", None)
         if callable(upstream):
+            if getattr(self.model, "supports_sample_index", False):
+                kwargs = {**kwargs, "sample_index": self.sample_index}
             text, usage = upstream(prompt, **kwargs)
             text, usage = str(text), dict(usage or {})
         else:
             text, usage = str(self.model(prompt, **kwargs)), {}
         tokens = int(usage.get("prompt_tokens") or 0) or estimate_tokens(prompt)
         self.calls += 1
-        self.trace.add_context_cost(tokens)
+        self.prompt_tokens += tokens
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
         self.trace.event("model_call", {"prompt": prompt, "response": text, "tokens": tokens,
                                         "usage": usage, "kwargs": dict(kwargs)})
         return text, usage
@@ -219,19 +225,16 @@ class CandidateEvaluator:
                     raise HarnessValidationError(f"validation run failed: {exc}") from exc
 
     def evaluate(self, source: Path | str, tasks: Sequence[Mapping[str, Any]], candidate_id: str,
-                 trace_path: Path) -> EvaluationResult:
+                 trace_path: Path, sample_index: int = 0) -> EvaluationResult:
         started = time.perf_counter()
         try:
             harness = _load_harness(Path(source))
             score_sum = 0.0
-            tokens = 0.0
-            calls = 0
             with TraceRecorder(trace_path) as trace:
-                metered = MeteredModel(self.model, trace)
+                metered = MeteredModel(self.model, trace, sample_index)
                 for index, task in enumerate(tasks):
                     trace.event("task_start", {"index": index, "task": dict(task)})
                     task_started = time.perf_counter()
-                    before = trace.context_cost
                     prediction = harness.run(task, metered, trace)
                     elapsed = time.perf_counter() - task_started
                     # ponytail: post-hoc deadline check, not preemption; subprocess validation
@@ -240,13 +243,13 @@ class CandidateEvaluator:
                         raise TimeoutError(f"task {index} exceeded task_timeout ({elapsed:.1f}s)")
                     value = float(self.metric(prediction, task))
                     score_sum += value
-                    tokens += trace.context_cost - before
                     trace.event("task_end", {"index": index, "prediction": prediction, "reward": value})
-                calls = metered.calls
             n = len(tasks) or 1
             return EvaluationResult(candidate_id, score_sum / n,
-                                    {"model_calls": float(calls), "prompt_tokens": tokens},
-                                    tokens / n, len(tasks), time.perf_counter() - started)
+                                    {"model_calls": float(metered.calls),
+                                     "prompt_tokens": metered.prompt_tokens,
+                                     "completion_tokens": metered.completion_tokens},
+                                    metered.prompt_tokens / n, len(tasks), time.perf_counter() - started)
         except Exception as exc:
             return EvaluationResult(candidate_id, float("-inf"), {}, float("inf"), len(tasks),
                                     time.perf_counter() - started, False, repr(exc))
@@ -352,7 +355,8 @@ class SearchRunner:
         directory = self.experience.candidate_dir(candidate_id)
         harness_path = directory / "harness.py"
         runs = [self.evaluator.evaluate(harness_path, tasks, candidate_id,
-                                        directory / ("traces.jsonl" if repeat == 0 else f"traces-{repeat}.jsonl"))
+                                        directory / ("traces.jsonl" if repeat == 0 else f"traces-{repeat}.jsonl"),
+                                        sample_index=repeat)
                 for repeat in range(self.config.repeats)]
         result = self._merge_repeats(candidate_id, runs, split)
         self.experience.write_result(result)
@@ -378,7 +382,7 @@ class SearchRunner:
             for repeat in range(self.config.repeats):
                 name = f"{item.candidate_id}.jsonl" if repeat == 0 else f"{item.candidate_id}-{repeat}.jsonl"
                 runs.append(self.evaluator.evaluate(harness_path, test_tasks, item.candidate_id,
-                                                    test_root / "traces" / name))
+                                                    test_root / "traces" / name, sample_index=repeat))
             results.append(self._merge_repeats(item.candidate_id, runs, "test"))
         payload = {"search_root": str(self.experience.root), "results": [asdict(r) for r in results]}
         (test_root / "test_results.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")

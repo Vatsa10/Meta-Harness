@@ -23,7 +23,7 @@ class _NullTrace:
         self.context_cost = 0.0
 
     def add_context_cost(self, amount: float) -> None:
-        self.context_cost += max(0.0, float(amount))
+        return None
 
     def event(self, name: str, payload: object = None, **fields: object) -> None:
         self.count += 1
