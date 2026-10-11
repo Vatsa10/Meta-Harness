@@ -45,7 +45,7 @@ Differences from the paper's own setup:
   OpenAI-compatible chat completions), not a coding-agent product. Its tools are `list`, `read`,
   `grep` and `write_candidate`, confined to the run directory.
 - Context cost is **provider-reported tokens** metered by the engine (harnesses never count it).
-- Stdlib only: `dependencies = []`.
+- Stdlib only: `dependencies = []`. Requires Python 3.11+ (`tomllib`).
 
 ## Quick start
 
