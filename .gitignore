@@ -19,3 +19,6 @@ fast-jev-compaction/
 # Downloaded datasets and local planning notes
 data/cache/
 .superpowers/
+
+# Untracked local reference checkout
+/keel/
