@@ -8,13 +8,14 @@ from meta_harness.core import TraceRecorder
 from meta_harness.sandbox import validate_in_subprocess
 
 ROOT = Path(__file__).resolve().parent.parent / "baselines"
-BASELINES = ["zero_shot", "few_shot", "ace", "mce", "math_zero_shot", "math_bm25", "terminal_basic"]
-CLASSIFICATION = ["zero_shot", "few_shot", "ace", "mce"]
+CLASSIFICATION = ["classification/zero_shot", "classification/few_shot", "classification/ace",
+                  "classification/mce"]
+BASELINES = CLASSIFICATION + ["math/zero_shot", "math/bm25", "terminal/basic"]
 
 
 def _load(name: str):
     path = ROOT / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(f"baseline_{name}", path)
+    spec = importlib.util.spec_from_file_location("baseline_" + name.replace("/", "_"), path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.build_harness() if hasattr(module, "build_harness") else module.Harness()
@@ -43,7 +44,7 @@ def test_classification_baseline_predicts_a_declared_label(tmp_path: Path, name)
 
 def test_few_shot_respects_n(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("META_HARNESS_FEW_SHOT_N", "2")
-    harness = _load("few_shot")
+    harness = _load("classification/few_shot")
     prompts = []
 
     def model(prompt, **_):
@@ -63,7 +64,7 @@ def test_math_bm25_retrieves_from_corpus(tmp_path: Path, monkeypatch):
         {"problem": "Show that 7 is prime", "solution": "Check divisors"},
     ]), encoding="utf-8")
     monkeypatch.setenv("META_HARNESS_CORPUS", str(corpus))
-    harness = _load("math_bm25")
+    harness = _load("math/bm25")
     prompts = []
 
     def model(prompt, **_):

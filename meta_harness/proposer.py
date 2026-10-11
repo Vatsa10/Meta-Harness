@@ -9,15 +9,9 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .core import CommandProposer, FilesystemExperience
+from .optimizers import extract_python
 
-
-def _extract_python(text: str) -> str:
-    matches = re.findall(r"```(?:python|py)?\s*\n(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
-    if matches:
-        return max(matches, key=len).strip() + "\n"
-    if "class Harness" in text or "def build_harness" in text:
-        return text.strip() + "\n"
-    raise ValueError("proposer response did not contain a Python harness")
+_extract_python = extract_python  # backwards-compatible alias
 
 
 class PromptedProposer:
@@ -56,4 +50,4 @@ Return each candidate as a separate fenced Python code block."""
         return paths
 
 
-__all__ = ["CommandProposer", "PromptedProposer"]
+__all__ = ["CommandProposer", "PromptedProposer", "extract_python"]

@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from meta_harness import __main__ as cli
+from meta_harness.commands import run as run_cmd
 
 AGENT = '''
 import json
@@ -44,7 +45,7 @@ def test_full_loop_produces_frontier_traces_reasoning_and_test_results(tmp_path:
     agent.write_text(AGENT, encoding="utf-8")
 
     fruit_words = ("apple", "pear", "plum", "banana")
-    monkeypatch.setattr(cli, "model_from_environment", lambda *a, **k: (
+    monkeypatch.setattr(run_cmd, "model_from_environment", lambda *a, **k: (
         lambda prompt, **_: "fruit" if any(w in prompt for w in fruit_words) else "vehicle"))
 
     root = tmp_path / "store"

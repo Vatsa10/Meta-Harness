@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 from meta_harness import __main__ as cli
+from meta_harness.commands import models as models_cmd
+from meta_harness.commands import run as run_cmd
 
 
 def test_run_end_to_end_with_a_stub_proposer(tmp_path: Path, monkeypatch, capsys):
@@ -25,7 +27,7 @@ out.mkdir(parents=True, exist_ok=True)
 ''', encoding="utf-8")
 
     fruit = ("apple", "pear", "banana")
-    monkeypatch.setattr(cli, "model_from_environment", lambda *a, **k: (
+    monkeypatch.setattr(run_cmd, "model_from_environment", lambda *a, **k: (
         lambda prompt, **_: "fruit" if any(w in prompt for w in fruit) else "vehicle"))
 
     code = cli.main([
@@ -45,15 +47,15 @@ def test_run_defaults_to_bundled_baselines():
         "run", "--tasks", "t.jsonl", "--provider", "unikey", "--model", "m",
         "--proposer-command", "p"])
     assert parsed.baseline is None
-    assert [p.name for p in cli.default_baselines("classification")] == [
+    assert [p.name for p in run_cmd.default_baselines("classification")] == [
         "zero_shot.py", "few_shot.py", "ace.py", "mce.py"]
-    assert [p.name for p in cli.default_baselines("math")] == [
-        "math_zero_shot.py", "math_bm25.py"]
-    assert [p.name for p in cli.default_baselines("terminal")] == ["terminal_basic.py"]
+    assert [p.name for p in run_cmd.default_baselines("math")] == [
+        "zero_shot.py", "bm25.py"]
+    assert [p.name for p in run_cmd.default_baselines("terminal")] == ["basic.py"]
 
 
 def test_models_subcommand_lists_ids(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "list_unikey_models", lambda **kw: ["claude-sonnet-4-6", "gpt-5.2"])
+    monkeypatch.setattr(models_cmd, "list_unikey_models", lambda **kw: ["claude-sonnet-4-6", "gpt-5.2"])
     assert cli.main(["models", "--provider", "unikey"]) == 0
     assert "gpt-5.2" in capsys.readouterr().out
 
@@ -63,12 +65,12 @@ def test_explicit_test_tasks_file_is_used(tmp_path: Path, monkeypatch):
     search.write_text(json.dumps({"input": "a", "label": "a"}), encoding="utf-8")
     held = tmp_path / "t.jsonl"
     held.write_text(json.dumps({"input": "b", "label": "b"}), encoding="utf-8")
-    monkeypatch.setattr(cli, "model_from_environment", lambda *a, **k: (lambda prompt, **_: "a"))
+    monkeypatch.setattr(run_cmd, "model_from_environment", lambda *a, **k: (lambda prompt, **_: "a"))
     code = cli.main([
         "run", "--tasks", str(search), "--test-tasks", str(held),
         "--provider", "unikey", "--model", "m", "--root", str(tmp_path / "store"),
         "--proposer-command", "p", "--iterations", "0",
-        "--baseline", str(cli.BASELINE_ROOT / "zero_shot.py")])
+        "--baseline", str(run_cmd.BASELINE_ROOT / "classification" / "zero_shot.py")])
     assert code == 0
     assert (Path(str(tmp_path / "store") + "-test") / "test_results.json").is_file()
 

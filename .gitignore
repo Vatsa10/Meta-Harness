@@ -16,3 +16,7 @@ fast-jev-compaction/
 /tsconfig.json
 .claude-plugin/types/
 /refs/
+
+# Downloaded datasets and local planning notes
+data/cache/
+.superpowers/

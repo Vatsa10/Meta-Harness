@@ -117,4 +117,30 @@ class TerminalHarness:
                 stop_container(container)
 
 
-__all__ = ["DockerPolicy", "TerminalHarness", "start_container", "stop_container"]
+__all__ = ["DockerPolicy", "TerminalHarness", "start_container", "stop_container",
+           "TerminalBootstrap", "environment_snapshot"]
+
+
+def environment_snapshot(timeout: float = 15.0) -> str:
+    """Collect the environment information injected by the TerminalBench harness."""
+    commands = ["pwd", "ls -la", "python --version", "node --version", "gcc --version", "java -version", "rustc --version", "go version", "pip --version", "free -h"]
+    lines = ["[Environment Snapshot]"]
+    for command in commands:
+        try:
+            completed = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                       timeout=timeout / len(commands),
+                                       encoding="utf-8", errors="replace")
+            output = (completed.stdout + completed.stderr).strip().splitlines()
+            lines.append(f"$ {command}\n{output[0] if output else '[unavailable]'}")
+        except (OSError, subprocess.SubprocessError):
+            lines.append(f"$ {command}\n[unavailable]")
+    return "\n".join(lines)
+
+
+class TerminalBootstrap:
+    def __init__(self, base_prompt: str, snapshot: str | None = None):
+        self.base_prompt = base_prompt
+        self.snapshot = snapshot if snapshot is not None else environment_snapshot()
+
+    def initial_prompt(self) -> str:
+        return f"{self.base_prompt}\n\n{self.snapshot}"

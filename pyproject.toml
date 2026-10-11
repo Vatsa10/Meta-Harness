@@ -19,4 +19,8 @@ meta-harness = "meta_harness.__main__:main"
 include = ["meta_harness*"]
 
 [tool.setuptools.package-data]
-meta_harness = ["*.md"]
+meta_harness = ["*.md", "demo_data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["refs", "keel", ".claude", ".superpowers", "data", ".git", "*.egg-info", "venv"]

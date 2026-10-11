@@ -14,13 +14,17 @@ from .core import (
 )
 from .agent_proposer import build_view
 from .cache import CachedModel, DiskCache
+from .chat_types import AssistantTurn, ToolCall, ToolSpec, Usage
+from .envfile import load_env, parse_env
 from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
 from .metrics import METRICS, estimate_tokens, exact_match, math_equivalence, normalize_answer, terminal_metric
 from .retrieval import BM25Index, TfidfIndex, reciprocal_rank_fusion
-from .harnesses import (
+from .cls_harnesses import (
     DraftVerificationHarness,
     LabelPrimedQueryHarness,
-    MathRetrievalHarness,
+)
+from .math_harnesses import MathRetrievalHarness
+from .terminal_harness import (
     TerminalBootstrap,
     environment_snapshot,
 )
@@ -44,6 +48,7 @@ __all__ = [
     "FilesystemExperience", "HarnessValidationError", "MeteredModel", "ParetoFrontier",
     "SearchConfig", "SearchRunner", "TraceRecorder",
     "build_view", "CachedModel", "DiskCache",
+    "AssistantTurn", "ToolCall", "ToolSpec", "Usage", "load_env", "parse_env",
     "classification_tasks", "math_tasks", "read_records", "split_tasks", "terminal_tasks",
     "METRICS", "estimate_tokens", "exact_match", "math_equivalence", "normalize_answer",
     "terminal_metric",
