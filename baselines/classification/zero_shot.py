@@ -30,7 +30,10 @@ class Harness:
                   f"\n\nInput: {query}\nReturn exactly one valid label.\nLabel:")
         trace.event("zero_shot_prompt", {"prompt": prompt, "labels": len(labels)})
         prediction = _pick(model(prompt), labels)
-        if "label" in task:
-            self.memory.append((query, str(task["label"])))
         trace.event("zero_shot_result", {"prediction": prediction})
         return prediction
+
+    def learn(self, task, result):
+        """Remember the label vocabulary; `run` itself never mutates state."""
+        if "label" in task:
+            self.memory.append((str(task.get("input", "")), str(task["label"])))

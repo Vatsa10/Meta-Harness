@@ -8,8 +8,8 @@ from meta_harness.core import TraceRecorder
 from meta_harness.sandbox import validate_in_subprocess
 
 ROOT = Path(__file__).resolve().parent.parent / "baselines"
-CLASSIFICATION = ["classification/zero_shot", "classification/few_shot", "classification/ace",
-                  "classification/mce"]
+CLASSIFICATION = ["classification/zero_shot", "classification/few_shot",
+                  "classification/random_few_shot", "classification/ace", "classification/mce"]
 BASELINES = CLASSIFICATION + ["math/zero_shot", "math/bm25", "terminal/basic"]
 
 
@@ -43,7 +43,7 @@ def test_classification_baseline_predicts_a_declared_label(tmp_path: Path, name)
 
 
 def test_few_shot_respects_n(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("META_HARNESS_FEW_SHOT_N", "2")
+    monkeypatch.setenv("META_HARNESS_FEW_SHOT_N", "4")
     harness = _load("classification/few_shot")
     prompts = []
 
@@ -52,9 +52,10 @@ def test_few_shot_respects_n(tmp_path: Path, monkeypatch):
         return "a"
 
     with TraceRecorder(tmp_path / "fs.jsonl") as trace:
-        for index in range(5):
-            harness.run({"input": f"text {index}", "label": "a", "labels": ["a", "b"]}, model, trace)
-    assert prompts[-1].count("Example:") <= 2
+        for index in range(7):
+            task = {"input": f"text {index}", "label": "a", "labels": ["a", "b"]}
+            harness.learn(task, {"output": harness.run(task, model, trace)})
+    assert prompts[-1].count("Example:") == 4
 
 
 def test_math_bm25_retrieves_from_corpus(tmp_path: Path, monkeypatch):
