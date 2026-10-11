@@ -184,3 +184,96 @@ def test_read_window_reports_exact_total(run):
     assert len(body) <= 2000
     assert "11\t" + "z" * 2000 + "...[line truncated]" in text
     assert len(text.encode("utf-8")) <= 50_000 + 400
+
+
+# --- review fix round 1 ---
+
+SECRETS = ["sk-abcdefghijklmnop1234", "api_key=hunter2hunter2", "Bearer tok.abc.def123"]
+
+
+@pytest.fixture
+def leaky(run, monkeypatch):
+    sandbox, root, test = run
+    monkeypatch.setenv("ZZ_TEST_API_KEY", "envsecretvalue42")
+    lines = ["trace start"] + [f"call {s} done" for s in SECRETS] + ["using envsecretvalue42 now"]
+    (root / "trace.log").write_text("\n".join(lines), encoding="utf-8")
+    (root / "big_trace.log").write_text("\n".join(lines * 1000), encoding="utf-8")
+    return sandbox, root
+
+
+def _assert_clean(text):
+    for leak in ["abcdefghijklmnop1234", "hunter2hunter2", "tok.abc.def123", "envsecretvalue42"]:
+        assert leak not in text
+
+
+def test_read_redacts_secrets(leaky):
+    sandbox, _ = leaky
+    text = sandbox.read("trace.log")
+    _assert_clean(text)
+    assert "[redacted]" in text and "trace start" in text
+
+
+def test_grep_redacts_secrets(leaky):
+    sandbox, _ = leaky
+    text = sandbox.grep("call|using", "trace.log")
+    _assert_clean(text)
+    assert "trace.log:2:" in text
+
+
+def test_list_redacts_secret_file_names(run):
+    sandbox, root, _ = run
+    (root / "sk-abcdefghijklmnop1234.txt").write_text("x", encoding="utf-8")
+    _assert_clean(sandbox.list("."))
+
+
+def test_spill_files_are_redacted(leaky):
+    sandbox, root = leaky
+    text = sandbox.read("big_trace.log", limit=5000)
+    spill = _spill_ref(text)
+    _assert_clean((root / spill).read_text(encoding="utf-8"))
+    grep_text = sandbox.grep("call", ".")
+    _assert_clean((root / _spill_ref(grep_text)).read_text(encoding="utf-8"))
+
+
+def test_read_refuses_oversized_files(run, monkeypatch):
+    import meta_harness.proposer_tools as pt
+    sandbox, root, _ = run
+    monkeypatch.setattr(pt, "READ_MAX_FILE_BYTES", 1000)
+    (root / "huge.txt").write_text("y" * 2000, encoding="utf-8")
+    with pytest.raises(ToolRefused, match="read limit"):
+        sandbox.read("huge.txt")
+
+
+def test_spill_once_per_source_and_never_from_a_spill(run):
+    sandbox, root, _ = run
+    (root / "big.txt").write_text("\n".join(f"row {i}" for i in range(1, 5001)), encoding="utf-8")
+    first = _spill_ref(sandbox.read("big.txt", limit=10_000))
+    second = _spill_ref(sandbox.read("big.txt", limit=10_000))
+    assert first == second
+    again = sandbox.read(first, limit=10_000)
+    assert _spill_ref(again) == first
+    assert len(list((root / "_spill").iterdir())) == 1
+
+
+def test_grep_pointer_counts_items(run):
+    sandbox, root, _ = run
+    (root / "many.txt").write_text("\n".join("hit" for _ in range(500)), encoding="utf-8")
+    text = sandbox.grep("hit")
+    assert "[truncated: showing items 1-200 of 500." in text
+
+
+def test_grep_refuses_long_patterns(run):
+    sandbox, _, _ = run
+    with pytest.raises(ToolRefused, match="longer"):
+        sandbox.grep("a" * 501)
+
+
+def test_catastrophic_grep_stops_within_budget(run):
+    import time
+    sandbox, root, _ = run
+    sandbox.grep_budget = 1.0
+    (root / "evil.txt").write_text("a" * 60 + "b", encoding="utf-8")
+    began = time.monotonic()
+    text = sandbox.grep(r"(a+)+$", "evil.txt")
+    assert time.monotonic() - began < 8
+    assert "[stopped:" in text
