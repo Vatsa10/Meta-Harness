@@ -47,7 +47,8 @@ def run(tmp_path: Path) -> Path:
         _read("candidates/seed/scores.json"), _read("candidates/seed/traces.jsonl"),
         _read("../secret/test.json", ok=False),
         {"role": "tool", "tool": "grep", "ok": True}, {"role": "tool", "tool": "list", "ok": True},
-        {"role": "tool", "tool": "list", "ok": True}], torn=True)
+        {"role": "tool", "tool": "list", "ok": True},
+        {"role": "tool", "tool": "grep", "ok": False}, {"role": "tool", "tool": "list", "ok": False}], torn=True)
     _log(root / "candidates" / "iteration-0002-00" / "proposer_log.jsonl", [
         _read("candidates/seed/proposer_reasoning.md"), _read("run.json"), _read("notes.txt")])
     return root
@@ -72,7 +73,7 @@ def test_read_stats_counts_only_ok_reads(run):
     stats = q.read_stats(run)
     first, second = stats["iterations"]
     assert (first["iteration"], first["files_read"], first["distinct_files"]) == (1, 4, 3)
-    assert first["grep_calls"] == 1 and first["list_calls"] == 2 and first["refused_calls"] == 1
+    assert first["grep_calls"] == 1 and first["list_calls"] == 2 and first["refused_calls"] == 3
     assert first["categories"]["source"] == 2 and first["categories"]["scores"] == 1
     assert first["categories"]["traces"] == 1
     assert (second["files_read"], second["categories"]["reasoning"], second["categories"]["run_meta"],
@@ -80,6 +81,30 @@ def test_read_stats_counts_only_ok_reads(run):
     for entry in stats["iterations"]:
         assert sum(entry["categories"].values()) == entry["files_read"]
     assert stats["medians"]["files_read"] == 3.5 and stats["medians"]["grep_calls"] == 0.5
+
+
+def test_table8_shape_with_hand_computed_shares(run, capsys):
+    t8 = q.read_stats(run)["table8"]
+    # 7 ok reads: source 2, traces 1, scores 1 -> score_summary 1, reasoning+run_meta+other -> other 3
+    assert (t8["median_files_read"], t8["min_files_read"], t8["max_files_read"], t8["total_reads"]) == (3.5, 3, 4, 7)
+    assert t8["shares_pct"] == pytest.approx({"source": 200 / 7, "traces": 100 / 7,
+                                              "score_summary": 100 / 7, "other": 300 / 7})
+    assert sum(t8["shares_pct"].values()) == pytest.approx(100.0)
+    assert cli.main(["experience", "reads", str(run)]) == 0
+    assert "shares_pct" in capsys.readouterr().out
+
+
+def test_proposals_path_dedup_by_mapping_and_prefix(tmp_path):
+    root = tmp_path / "r"
+    cand = _cand(root, "iteration-0001-00", 0.5, 1, "x\n", receipt={"proposal_id": "candidate-07"})
+    _log(cand / "proposer_log.jsonl", [_read("a.py")])
+    prop = root / "proposals" / "iteration-0001"
+    prop.mkdir(parents=True)
+    _log(prop / "candidate-07.proposer_log.jsonl", [_read("a.py")])   # copied: mapped by receipt proposal_id
+    _log(prop / "candidate-00.proposer_log.jsonl", [_read("a.py")])   # copied: prefix label
+    _log(prop / "candidate-05.proposer_log.jsonl", [_read("b.py"), _read("c.py")])  # never became a candidate
+    entry = q.read_stats(root)["iterations"][0]
+    assert entry["proposals"] == 2 and entry["files_read"] == 3
 
 
 def test_categorise():
@@ -155,3 +180,45 @@ def test_cli(run, tmp_path, capsys):
     assert "--harness" in capsys.readouterr().out
     assert cli.main(["experience", "reads", str(run)]) == 0
     assert cli.main(["experience", "diff", str(run), "seed", "nope"]) == 2
+
+
+def _tree_hash(root: Path) -> dict:
+    import hashlib
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_import_refuses_destination_inside_run_root(run):
+    with pytest.raises(ValueError):
+        q.import_candidates(run, run / "candidates" / "seeds", 1)
+
+
+def test_every_command_leaves_run_root_unchanged(run, tmp_path, capsys):
+    (run / "frontier.json").write_text("[]", encoding="utf-8")
+    before = _tree_hash(run)
+    other = tmp_path / "o"
+    _cand(other, "c", 0.7, 5, "z\n")
+    for argv in (["top", str(run)], ["diff", str(run), "seed", "iteration-0001-00"],
+                 ["diff-runs", str(run), str(other)], ["import", str(run), str(tmp_path / "seeds")],
+                 ["reads", str(run)], ["report", "--root", str(run)],
+                 ["export", "--root", str(run), "--out", str(tmp_path / "c.jsonl")]):
+        assert cli.main(["experience", *argv]) == 0
+    assert cli.main(["experience", "import", str(run), str(run / "x")]) == 2
+    assert _tree_hash(run) == before
+
+
+def test_secrets_never_reach_output(tmp_path):
+    root = tmp_path / "s"
+    d = _cand(root, f"cand-{SECRET}", 0.5, 1, "x\n", receipt={
+        "verdict": f"v-{SECRET}", "parents_read": [SECRET], "fingerprint": f"v1:{SECRET}",
+        "tool_outcomes": {"dispatched": 1}}, reasoning=f"why {SECRET}")
+    (d / "scores.json").write_text(json.dumps({"candidate_id": f"cand-{SECRET}", "score": 0.5,
+                                                "context_cost": 1, "split": SECRET}), encoding="utf-8")
+    (root / "frontier.json").write_text(json.dumps([{"candidate_id": SECRET, "score": 1}]), encoding="utf-8")
+    _log(d / "proposer_log.jsonl", [_read(f"candidates/{SECRET}/harness.py")])
+    out = tmp_path / "c.jsonl"
+    q.export_cases(root, out)
+    blobs = [out.read_text(encoding="utf-8"), json.dumps(q.top_k(root)), json.dumps(q.diff_runs(root, root)),
+             json.dumps(q.read_stats(root)), json.dumps(q.report(root))]
+    for blob in blobs:
+        assert "sk-" not in blob

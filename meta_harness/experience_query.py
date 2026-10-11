@@ -157,8 +157,16 @@ def diff_runs(root_a: Path, root_b: Path) -> dict:
     return redact_obj({"a": a, "b": b, "best_score_delta": best, "budget": budget})
 
 
+def _inside(root: Path, path: Path) -> bool:
+    root_r, path_r = Path(root).resolve(), Path(path).resolve()
+    return path_r == root_r or root_r in path_r.parents
+
+
 def import_candidates(source_root: Path, dest_seeds: Path, k: int = 3) -> list[Path]:
-    """Copy the top-k harness.py files of a run into dest_seeds as seed files (warm start)."""
+    """Copy the top-k harness.py files of a run into dest_seeds as seed files (warm start).
+    The destination may not be inside the run root (run directories are read-only)."""
+    if _inside(source_root, dest_seeds):
+        raise ValueError("destination must be outside the run root (run directories are read-only)")
     dest = Path(dest_seeds)
     dest.mkdir(parents=True, exist_ok=True)
     out = []
@@ -204,7 +212,14 @@ def _proposer_logs(root: Path) -> list[tuple[int, Path]]:
     root = Path(root)
     found: list[tuple[int, Path]] = []
     labels = []
+    mapped: set[tuple[int, str]] = set()  # (iteration, proposal stem) already owned by a candidate
     for directory in _candidate_dirs(root):
+        for name in ("receipt.json", "proposal.json"):
+            data = _json(directory / name)
+            if isinstance(data, dict):
+                for key in ("proposal_id", "candidate"):
+                    if isinstance(data.get(key), str):
+                        mapped.add((_iteration_of(directory.name), data[key]))
         log = directory / "proposer_log.jsonl"
         if log.is_file():
             found.append((_iteration_of(directory.name), log))
@@ -212,6 +227,9 @@ def _proposer_logs(root: Path) -> list[tuple[int, Path]]:
     for log in sorted(root.glob("proposals/iteration-*/*.proposer_log.jsonl")):
         match = _STEM.search(log.name)
         label = f"{log.parent.name}-{int(match.group(1)):02d}" if match else None
+        stem = log.name[:-len(".proposer_log.jsonl")]
+        if (_iteration_of(log.parent.name), stem) in mapped:
+            continue
         if label and any(c == label or c.startswith(label + "-") for c in labels):
             continue
         found.append((_iteration_of(log.parent.name), log))
@@ -257,7 +275,16 @@ def read_stats(root: Path) -> dict:
     medians: dict[str, Any] = {name: _median([e[name] for e in iterations])
                                for name in ("files_read", "distinct_files", "grep_calls", "list_calls")}
     medians["categories"] = {c: _median([e["categories"][c] for e in iterations]) for c in CATEGORIES}
-    return redact_obj({"iterations": iterations, "medians": medians})
+    totals = {c: sum(e["categories"][c] for e in iterations) for c in CATEGORIES}
+    total = sum(totals.values())
+    buckets = {"source": totals["source"], "traces": totals["traces"],
+               "score_summary": totals["scores"] + totals["summary"],
+               "other": totals["reasoning"] + totals["run_meta"] + totals["other"]}
+    reads = [e["files_read"] for e in iterations]
+    table8 = {"median_files_read": _median(reads), "min_files_read": min(reads, default=0),
+              "max_files_read": max(reads, default=0), "total_reads": total,
+              "shares_pct": {b: (100.0 * n / total if total else 0.0) for b, n in buckets.items()}}
+    return redact_obj({"iterations": iterations, "medians": medians, "table8": table8})
 
 
 # -- receipts (spec section 11) --------------------------------------------------------------------
@@ -289,7 +316,7 @@ def report(root: Path) -> dict:
     by_iteration: dict[str, dict[str, int]] = {}
     joined: dict[str, dict[str, Any]] = {}
     for directory, receipt in _receipts(root):
-        verdict = str(receipt.get("verdict") or "incomplete")
+        verdict = bounded(str(receipt.get("verdict") or "incomplete"), 80)
         verdicts[verdict] = verdicts.get(verdict, 0) + 1
         stage = _stage(receipt)
         stages[stage] = stages.get(stage, 0) + 1
@@ -315,8 +342,8 @@ def report(root: Path) -> dict:
 
 def export_cases(root: Path, out: Path) -> int:
     """One read-only case per receipt, as JSONL. Refuses to write inside the run root."""
-    root_r, out_r = Path(root).resolve(), Path(out).resolve()
-    if out_r == root_r or root_r in out_r.parents:
+    out_r = Path(out).resolve()
+    if _inside(root, out):
         raise ValueError("--out must be outside the run root (run directories are read-only)")
     lines = []
     for directory, receipt in _receipts(root):
