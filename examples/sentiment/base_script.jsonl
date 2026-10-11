@@ -1,0 +1,3 @@
+{"match": "(?i)\\b(love|great|excellent|wonderful|fantastic|perfect|delightful|superb)\\b", "text": "Sounds Positive to me."}
+{"match": "(?i)\\b(terrible|awful|broke|worst|hate|refund|disappointing|useless)\\b", "text": "That reads as Negative."}
+{"default": "I would call it Neutral."}
