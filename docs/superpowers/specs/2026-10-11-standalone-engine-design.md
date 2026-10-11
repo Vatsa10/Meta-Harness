@@ -168,3 +168,20 @@ in `.superpowers/pivot/refs-*.md`.
   and scored 0; optional blind LLM-judge metric ending in `VERDICT: PASS|FAIL`.
 - **Terminus-style seeds** (loop, trueforge): exact-then-fuzzy edit, compaction at a reserve
   threshold with a "don't redo work" continuation.
+- **Candidate receipts and acceptance gate** (keel, MIT; notes `refs-keel.md`): every proposal
+  writes `receipt.json` even if the step dies (default verdict `incomplete`) with the parents it
+  read, tool outcome counts (dispatched / denied / failed / aborted), a sha256 `v1:` fingerprint of
+  the experience state it read, and a verdict in {`accepted`, `rejected_invalid_source`,
+  `rejected_split_violation`, `stale_parent`, `budget_expired`, `failed_eval`, `incomplete`}. A
+  proposal becomes a candidate only after host re-validation (source, split access, fingerprint).
+  `experience report` aggregates verdicts; `experience export` writes one case per receipt.
+- **Crash repair** (keel): torn trailing JSONL lines tolerated; dangling tool calls closed with
+  synthetic results; a persisted resume-attempt counter caps automatic revival.
+- **Retries and timeouts** (keel): honour `Retry-After`; 500 ms–10 s backoff with 10% jitter;
+  empty responses, rate limits, server errors, timeouts and transport errors retryable for
+  provider calls only; idle watchdog fused with an overall deadline, the abort reason naming which
+  fired.
+- **Redaction** (keel): ids ASCII ≤ 64 chars; logged text single-line and capped; anything
+  matching `api_key`, `bearer ` or `sk-` becomes `[redacted]` in every log, trace and receipt.
+- **Read window** (keel): `read` returns numbered lines, ≤ 2000 lines, ≤ 2000 chars per line,
+  ≤ 50 KB, with the exact total line count.
