@@ -196,3 +196,13 @@ def test_bh_rejects_invalid_p_values():
     for bad in ([float("nan")], [1.5], [-0.1]):
         with pytest.raises(ValueError):
             bh(bad)
+
+
+def test_majority_collapse_across_disagreeing_runs():
+    from meta_harness.ablate import _collapse, _compare
+    runs = [{"A": 1.0, "B": 0.0, "C": 1.0}, {"A": 1.0, "B": 1.0, "C": 0.0}, {"A": 0.0, "B": 0.0}]
+    got = _collapse(runs)
+    assert got == {"A": True, "B": False, "C": None}   # v[0] would give A, C pass and B fail
+    base = {"A": False, "B": True, "C": False}
+    c = _compare(base, {"x": got})["x"]
+    assert (c["wins"], c["losses"], c["ties"]) == (1, 1, 1)
