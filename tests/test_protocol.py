@@ -68,3 +68,18 @@ def test_extra_metrics_after_builtins():
 def test_bad_metric_specs(bad):
     with pytest.raises((ValueError, ModuleNotFoundError)):
         protocol.resolve_metric(bad)
+
+
+def test_no_target_scores_zero():
+    assert protocol.exact({}, {"output": ""}) == 0.0
+    assert protocol.exact({"label": ""}, {"output": ""}) == 0.0
+    assert protocol.contains({"answer": ""}, {"output": "anything"}) == 0.0
+    assert protocol.contains({}, {"output": "x"}) == 0.0
+    assert protocol.numeric({}, {"output": "None"}) == 0.0
+
+
+def test_unresolvable_metric_raises_value_error_naming_spec(tmp_path):
+    (tmp_path / "m2.py").write_text("x = 1\n", encoding="utf-8")
+    for spec in ("no_such_mod_xyz:fn", "m2:missing"):
+        with pytest.raises(ValueError, match="(?s)" + spec.split(":")[0]):
+            protocol.resolve_metric(spec, base=tmp_path)

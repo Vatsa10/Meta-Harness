@@ -67,17 +67,24 @@ def _text(value: Any) -> str:
     return str(value).strip().lower()
 
 
+def _target(task: Mapping) -> str | None:
+    want = expected_value(task)
+    return None if want is None or not str(want).strip() else str(want)
+
+
 def exact(task: Mapping, result: Mapping) -> float:
-    return float(_text(result.get("output", "")) == _text(expected_value(task) if expected_value(task) is not None else ""))
+    want = _target(task)
+    return float(want is not None and _text(result.get("output", "")) == _text(want))
 
 
 def contains(task: Mapping, result: Mapping) -> float:
-    want = expected_value(task)
+    want = _target(task)
     return float(want is not None and _text(want) in str(result.get("output", "")).lower())
 
 
 def numeric(task: Mapping, result: Mapping) -> float:
-    return math_equivalence(result.get("output", ""), {"answer": expected_value(task)})
+    want = _target(task)
+    return 0.0 if want is None else math_equivalence(result.get("output", ""), {"answer": want})
 
 
 BUILTIN_METRICS = {"exact": exact, "contains": contains, "numeric": numeric}
@@ -106,7 +113,10 @@ def resolve_metric(spec: str, base: Path | None = None, extra: Mapping[str, Metr
     else:
         if str(base) not in sys.path:
             sys.path.insert(0, str(base))
-        module = importlib.import_module(target)
+        try:
+            module = importlib.import_module(target)
+        except ImportError as exc:
+            raise ValueError(f"cannot import metric module for {spec!r}: {exc}") from exc
     fn = getattr(module, name, None)
     if not callable(fn):
         raise ValueError(f"{spec!r} is not a callable")
