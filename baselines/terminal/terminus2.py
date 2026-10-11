@@ -11,7 +11,7 @@ B1 / B2 (elide / summarise thresholds), CONTEXT_WINDOW, MAX_STEPS, SYSTEM.
 from meta_harness.terminal_harness import TERMINUS2_SYSTEM, Terminus2Harness
 
 SYSTEM = TERMINUS2_SYSTEM
-MAX_STEPS = 60
+MAX_STEPS = 300  # paper default; pass a lower max_steps for small runs
 CONTEXT_WINDOW = 128_000
 B1 = 0.6    # elide bulky middle tool outputs at this fraction of the window
 B2 = 0.85   # summarise the middle into a running summary at this fraction

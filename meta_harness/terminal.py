@@ -42,6 +42,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -49,7 +50,8 @@ from typing import Any, Callable, Mapping, Sequence
 from .metrics import estimate_tokens
 from .sandboxes import DockerSandbox, ExecResult, preflight
 
-OBSERVATION_CAP_BYTES = 30 * 1024
+OBSERVATION_CAP_CHARS = 24_000  # tool-output cap from the coding-agent harness paper (refs section 2)
+OBSERVATION_CAP_BYTES = OBSERVATION_CAP_CHARS  # legacy name; the cap counts characters
 STOP_REASONS = ("done", "step_limit", "overflow", "stuck", "timeout", "error")
 
 
@@ -92,14 +94,49 @@ class TerminalResult:
 
 
 # --------------------------------------------------------------------------- container
-_NO_SHELL = re.compile(r"executable file not found|no such file or directory", re.IGNORECASE)
+class TaskSandbox(DockerSandbox):
+    """DockerSandbox for TerminalBench task containers.
+
+    Deliberate difference from the default sandbox: no `--cap-drop ALL`, because task images and
+    agents run apt / pip, which need Docker's default capabilities. `--security-opt
+    no-new-privileges` and the pids / memory / cpu limits stay. Network follows the task.
+    """
+
+    def run_args(self, name: str) -> list[str]:
+        args = ["run", "-d", "--name", name, "--security-opt", "no-new-privileges"]
+        if self.pids_limit is not None:
+            args += ["--pids-limit", str(self.pids_limit)]
+        if not self.network:
+            args += ["--network", "none"]
+        if self.memory_mb is not None:
+            args += ["--memory", f"{self.memory_mb}m"]
+        if self.cpus is not None:
+            args += ["--cpus", str(self.cpus)]
+        return args + ["-w", self.workdir, self.image, "sleep", "infinity"]
+
+    def start(self) -> None:
+        if self._started:
+            return
+        name = f"meta-harness-{uuid.uuid4().hex[:12]}"
+        self.name = name
+        try:
+            done = self._docker(self.run_args(name), 300)
+            if done.returncode != 0:
+                raise RuntimeError(f"docker run failed: {(done.stderr or '').strip()}")
+        except BaseException:
+            self._remove(name)
+            self.name = None
+            raise
+        self._started = True
 
 
 class Container:
     """A task container: `docker run -d` (network only when the task asks), exec, copy, rm.
 
-    A thin wrapper over `sandboxes.DockerSandbox`; every docker CLI call passes
-    encoding="utf-8", errors="replace" and a timeout.
+    A thin wrapper over `TaskSandbox` (a `DockerSandbox`): every docker CLI call passes
+    encoding="utf-8", errors="replace" and a timeout, and every exec (including scoring) runs
+    under the sandbox's in-container `timeout -s KILL`. The shell is decided once by probing
+    `command -v bash`: bash when present, else sh.
     """
 
     def __init__(self, image: str, workdir: str = "/app", network: bool = False,
@@ -108,8 +145,8 @@ class Container:
         self.workdir = workdir
         self.network = network
         self._run = runner
-        self.sandbox = sandbox or DockerSandbox(image, workdir=workdir, network=network, runner=runner,
-                                                shell="sh")
+        self.sandbox = sandbox or TaskSandbox(image, workdir=workdir, network=network, runner=runner,
+                                              shell="sh")
         self._shell_checked = False
 
     @staticmethod
@@ -124,7 +161,7 @@ class Container:
     def attach(cls, container_id: str, workdir: str = "/app",
                runner: Callable[..., Any] = subprocess.run) -> "Container":
         """Wrap an already running container (created by the terminal domain)."""
-        sandbox = DockerSandbox("", workdir=workdir, runner=runner, shell="sh")
+        sandbox = TaskSandbox("", workdir=workdir, runner=runner, shell="sh")
         sandbox.name = str(container_id)
         sandbox._started = True
         return cls("", workdir=workdir, runner=runner, sandbox=sandbox)
@@ -142,9 +179,11 @@ class Container:
         if self._shell_checked:
             return
         self._shell_checked = True
+        self.sandbox.shell = "sh"
         probe = self.sandbox.exec("command -v bash", 20)
         if probe.code == 0 and probe.stdout.strip():
             self.sandbox.shell = "bash"
+        self.shell = self.sandbox.shell
 
     def exec(self, command: str, timeout: float) -> tuple[int, str]:
         self._pick_shell()
@@ -155,21 +194,10 @@ class Container:
         self.sandbox.put(Path(local), remote)
 
     def exec_test(self, command: str, timeout: float) -> tuple[int, str]:
-        """`docker exec -w <workdir> <id> bash -lc <command>`; falls back to `sh -c` for images
-        without bash. Never runs anything on the host."""
-        policy = DockerPolicy(container=str(self.id), workdir=self.workdir)
-        output = ""
-        for shell in ("bash", "sh"):
-            try:
-                done = self._run(policy.wrap(command, shell), capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=timeout)
-            except subprocess.TimeoutExpired:
-                return 124, "[test command timed out]"
-            output = (done.stdout or "") + (done.stderr or "")
-            if done.returncode in (126, 127) and _NO_SHELL.search(output) and shell == "bash":
-                continue
-            return done.returncode, output
-        return 127, output
+        """Run the task's test command in this container through `DockerSandbox.exec`
+        (`docker exec -w <workdir> <id> timeout -s KILL <n> <bash|sh> -c <command>`; the container
+        is killed if the CLI itself hangs). Never runs anything on the host."""
+        return self.exec(command, timeout)
 
     def remove(self) -> None:
         self.sandbox.close()
@@ -189,17 +217,14 @@ def run_in_sandbox(sandbox: Any, command: str, timeout: float, cwd: str | None =
 
 
 # --------------------------------------------------------------------------- output cap
-def cap_output(text: str, limit: int = OBSERVATION_CAP_BYTES) -> str:
-    """Keep the head and tail of an observation so it is at most `limit` UTF-8 bytes."""
-    data = text.encode("utf-8", "replace")
-    if len(data) <= limit:
+def cap_output(text: str, limit: int = OBSERVATION_CAP_CHARS) -> str:
+    """Keep the head and tail of an observation so it is at most `limit` characters."""
+    if len(text) <= limit:
         return text
-    note = "\n[... output truncated: {} bytes omitted ...]\n"
-    room = limit - len(note.format(len(data)).encode("utf-8")) - 8
+    note = "\n[... output truncated: {} chars omitted ...]\n"
+    room = limit - len(note.format(len(text))) - 2
     head, tail = room // 2, room - room // 2
-    omitted = len(data) - head - tail
-    return (data[:head].decode("utf-8", "ignore") + note.format(omitted)
-            + data[len(data) - tail:].decode("utf-8", "ignore"))
+    return text[:head] + note.format(len(text) - head - tail) + text[len(text) - tail:]
 
 
 # --------------------------------------------------------------------------- fuzzy edit
@@ -668,6 +693,6 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = ["B1", "B2", "CONTINUE_LINE", "Container", "DockerPolicy", "EditError", "FileTools",
-           "OBSERVATION_CAP_BYTES", "Plan", "ShellPolicy", "StagedCompactor", "StuckDetector",
+           "OBSERVATION_CAP_BYTES", "OBSERVATION_CAP_CHARS", "Plan", "TaskSandbox", "ShellPolicy", "StagedCompactor", "StuckDetector",
            "TerminalAgent", "TerminalResult", "apply_edit", "cap_output", "label_action",
            "label_command", "phase_summary", "run_in_sandbox"]

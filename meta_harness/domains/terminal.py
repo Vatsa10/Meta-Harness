@@ -41,7 +41,29 @@ better with shell alone on shell-centric tasks); the compaction thresholds B1 / 
 CONTEXT_WINDOW. Search = test on this domain: never write task ids, test file names or expected
 outputs into a harness; the leakage audit rejects such candidates."""
 
+WIPE_COMMAND = "rm -rf /tests /logs/verifier"
+
 _scores: dict[str, float] = {}
+
+
+class LeakageError(ValueError):
+    pass
+
+
+def validate_candidate(source: str | Path, tasks: list[Mapping[str, Any]]) -> None:
+    """Reject a candidate whose source names task ids, test file names or expected outputs
+    (the paper's regex audit; search = test on this domain makes leakage a real risk)."""
+    from ..loaders.terminalbench import audit_leakage
+
+    text = Path(source).read_text(encoding="utf-8") if isinstance(source, Path) or (
+        isinstance(source, str) and "\n" not in source and Path(source).is_file()) else str(source)
+    findings = audit_leakage(text, tasks)
+    if findings:
+        shown = ", ".join(f"{f['kind']} {f['value']!r} (task {f['task']})" for f in findings[:5])
+        raise LeakageError(f"candidate rejected by the leakage audit: it names {shown}")
+
+
+VALIDATE = validate_candidate
 
 
 def adapt(records: list[dict]) -> list[dict]:
@@ -75,6 +97,11 @@ def evaluate_task(harness: Any, task: Mapping[str, Any], model: Any, trace: Any 
         container_id = container.start()
         live = dict(task, container=container_id, workdir=workdir)
         result = call_run(harness, harness_view(live), model, trace)
+        # The agent had a shell in this container: anything it left where the verifier looks
+        # (a planted /tests, a pre-written reward file) is wiped before the real tests go in.
+        code, out = container.exec(WIPE_COMMAND, 60)
+        if code != 0:
+            raise RuntimeError(f"could not reset test state before scoring: {out[-500:]}")
         for local, remote in task.get("test_files") or []:
             container.put(Path(local), str(remote))
         score = terminal_metric(live, result)
@@ -89,9 +116,13 @@ def evaluate_task(harness: Any, task: Mapping[str, Any], model: Any, trace: Any 
 class InContainer:
     """Wraps a candidate harness so the core evaluator's plain protocol gets the domain flow:
     its `run` does the whole `evaluate_task`, and `METRICS["terminal"]` reads the score back by a
-    one-time token (a harness cannot hand itself a score)."""
+    one-time token (a harness cannot hand itself a score). Given `source` and `tasks`, the
+    candidate is first checked by the leakage audit and refused with `LeakageError`."""
 
-    def __init__(self, harness: Any, container_factory: Callable[..., Any] = Container):
+    def __init__(self, harness: Any, container_factory: Callable[..., Any] = Container,
+                 source: str | Path | None = None, tasks: list[Mapping[str, Any]] | None = None):
+        if source is not None and tasks:
+            validate_candidate(source, tasks)
         self.harness = harness
         self.container_factory = container_factory
 

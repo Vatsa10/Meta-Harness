@@ -10,7 +10,7 @@ from meta_harness.terminal_harness import KIRA_CHECKLIST, KIRA_SYSTEM, KiraHarne
 
 SYSTEM = KIRA_SYSTEM
 CHECKLIST = KIRA_CHECKLIST
-MAX_STEPS = 60
+MAX_STEPS = 300  # paper default; pass a lower max_steps for small runs
 CONTEXT_WINDOW = 128_000
 B1 = 0.6
 B2 = 0.85

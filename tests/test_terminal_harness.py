@@ -88,15 +88,16 @@ def test_terminus2_runs_keystrokes_and_needs_a_confirmation_turn(tmp_path: Path)
     assert "terminal_step" in events and "terminal_end" in events
 
 
-def test_terminus2_caps_an_observation_at_30kb(tmp_path: Path):
+def test_terminus2_caps_an_observation_at_24k_chars(tmp_path: Path):
     box = FakeSandbox(respond=lambda c: (0, "x" * 100_000))
     model = Recorder(script(tmp_path, [turn([{"keystrokes": "cat big\n"}]), turn(complete=True),
                                        turn(complete=True)]))
     Terminus2Harness().run({"instruction": "t", "sandbox": box}, model, None)
     observation = model.prompts[1].split("## user\n")[-1]
-    assert len(observation.encode("utf-8")) <= 30 * 1024 + 400  # cap + the confirm text
+    assert len(observation) <= 24_000 + 400  # cap + the confirm text
     assert "output truncated" in observation
-    assert len(cap_output("y" * 100_000).encode("utf-8")) <= 30 * 1024
+    assert len(cap_output("y" * 100_000)) <= 24_000
+    assert Terminus2Harness().max_steps == 300
 
 
 def test_overflow_without_compaction_is_a_counted_stop_reason(tmp_path: Path):
@@ -301,3 +302,31 @@ def test_kira_tool_calling_snapshot_and_checklist(tmp_path: Path):
     assert "echo hi" in box.commands
     assert any("completion checklist" in str(m.get("content")) for m in seen[2][1])
     assert {"bash", "edit", "read_file", "task_complete"} <= set(seen[0][2])
+
+
+def test_terminal_agent_refuses_without_a_container(monkeypatch):
+    from meta_harness.terminal_harness import TerminalAgent
+    monkeypatch.delenv("META_HARNESS_ALLOW_LOCAL_SHELL", raising=False)
+    with pytest.raises(PermissionError, match="allow_local_shell"):
+        TerminalAgent(lambda p: '{"command": "echo hi"}').run({"instruction": "x"})
+    agent = TerminalAgent(lambda p: '{"done": true, "answer": "ok"}', allow_local_shell=True)
+    assert agent.run({"instruction": "x"}).completed
+
+
+def test_kira_bash_only_completion_is_not_reported_disabled(tmp_path: Path):
+    box = FakeSandbox()
+    model = script(tmp_path, [
+        {"tool_calls": [{"name": "task_complete", "arguments": {"summary": "s"}}]},
+        {"tool_calls": [{"name": "task_complete", "arguments": {"summary": "s"}}]},
+    ])
+    seen = []
+    original = model.chat
+
+    def chat(system, messages, tools, max_tokens=4096):
+        seen.append([dict(m) for m in messages])
+        return original(system, messages, tools, max_tokens)
+
+    model.chat = chat
+    result = KiraHarness(bash_only=True).run({"instruction": "t", "sandbox": box}, model, None)
+    assert result["stop_reason"] == "done"
+    assert not any("disabled" in str(m.get("content")) for m in seen[1])

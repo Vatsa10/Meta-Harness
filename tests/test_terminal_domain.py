@@ -33,12 +33,31 @@ class FakeContainer:
         c.id = container_id
         return c
 
+    # A tiny shared filesystem: the agent, the wipe, the copy-in and the tests all act on it.
+    fs: dict = {}
+    solved = True
+
+    def exec(self, command, timeout):
+        FakeContainer.log.append(("exec", self.id, command))
+        if command == "rm -rf /tests /logs/verifier":
+            for key in [k for k in FakeContainer.fs if k.startswith(("/tests", "/logs/verifier"))]:
+                del FakeContainer.fs[key]
+        return 0, ""
+
     def exec_test(self, command, timeout):
+        """Like TB2: run whatever is at /tests; the real test writes reward 1 only when solved;
+        the verdict is the reward file."""
         FakeContainer.log.append(("test", self.id, self.workdir, command))
-        return 0, "passed"
+        if FakeContainer.fs.get("/tests") == "REAL" and FakeContainer.solved:
+            FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
+        elif FakeContainer.fs.get("/tests") == "PLANTED":
+            FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
+        return (0, "passed") if FakeContainer.fs.get("/logs/verifier/reward.txt") == "1" else (1, "failed")
 
     def put(self, local, remote):
         FakeContainer.log.append(("put", str(local), remote))
+        if remote not in FakeContainer.fs:  # docker cp into an existing dir nests instead
+            FakeContainer.fs[remote] = "REAL"
 
     def remove(self):
         FakeContainer.log.append(("remove", self.id))
@@ -55,9 +74,20 @@ class SeenHarness:
         return {"output": "done", "stop_reason": "done"}
 
 
+class PlantingHarness:
+    """A cheating agent: plants a passing reward file and its own /tests, solves nothing."""
+
+    def run(self, task, model, trace):
+        FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
+        FakeContainer.fs["/tests"] = "PLANTED"
+        return {"output": "done"}
+
+
 @pytest.fixture(autouse=True)
 def fake_container(monkeypatch):
     FakeContainer.log = []
+    FakeContainer.fs = {}
+    FakeContainer.solved = True
     monkeypatch.setattr(terminal_mod, "Container", FakeContainer)
 
 
@@ -192,3 +222,67 @@ def test_real_container_scores_inside_itself(monkeypatch):
         assert terminal_metric({**task, "test_command": "test -f /app/missing"}, {"output": ""}) == 0.0
     finally:
         box.remove()
+
+
+# --------------------------------------------------------------------------- review fixes
+def test_agent_planted_test_state_is_wiped_before_scoring():
+    FakeContainer.solved = False
+    score, _ = domain.evaluate_task(PlantingHarness(), TASK, None, None, container_factory=FakeContainer)
+    assert score == 0.0
+    kinds = [e[0] for e in FakeContainer.log]
+    assert kinds.index("exec") < kinds.index("put") < kinds.index("test")
+
+
+def test_leakage_audit_rejects_a_leaked_candidate(tmp_path: Path):
+    tasks = terminalbench.load(_tb_checkout(tmp_path / "tb"))
+    leaked = tmp_path / "leaked.py"
+    leaked.write_text("SPECIAL = {'hello-world': 'echo Hello'}\n", encoding="utf-8")
+    with pytest.raises(domain.LeakageError, match="leakage audit.*hello-world"):
+        domain.validate_candidate(leaked, tasks)
+    with pytest.raises(domain.LeakageError):
+        domain.HARNESS_WRAPPER(SeenHarness(), FakeContainer, source=leaked, tasks=tasks)
+    domain.validate_candidate(domain.SEED_DIR / "terminus2.py", tasks)
+
+
+class Runner:
+    def __init__(self, has_bash=True):
+        self.calls, self.has_bash = [], has_bash
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(argv)
+        assert kwargs.get("encoding") == "utf-8" and kwargs.get("timeout")
+        out = "/bin/bash\n" if ("command -v bash" in argv and self.has_bash) else ""
+        code = 1 if ("command -v bash" in argv and not self.has_bash) else 0
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+
+@pytest.mark.parametrize("has_bash,shell", [(True, "bash"), (False, "sh")])
+def test_scoring_goes_through_the_sandbox_with_a_kill_deadline(has_bash, shell):
+    runner = Runner(has_bash)
+    box = Container.attach("cid-9", "/app", runner=runner)
+    box.exec_test("pytest", 30)
+    box.exec_test("pytest -x", 30)
+    probes = [c for c in runner.calls if "command -v bash" in c]
+    assert len(probes) == 1
+    test = runner.calls[-1]
+    assert test[:5] == ["docker", "exec", "-w", "/app", "cid-9"]
+    assert test[5:8] == ["timeout", "-s", "KILL"] and test[-3:] == [shell, "-c", "pytest -x"]
+
+
+@pytest.mark.parametrize("network", [False, True])
+def test_task_container_argv(network):
+    from meta_harness.terminal import TaskSandbox
+    args = TaskSandbox("img", network=network).run_args("n1")
+    assert "--cap-drop" not in args and "no-new-privileges" in args
+    assert "--pids-limit" in args and "--memory" in args and "--cpus" in args
+    assert ("--network" in args) is (not network)
+
+
+def test_toml_task_network_defaults_to_allowed(tmp_path: Path):
+    task = tmp_path / "t1"
+    (task / "tests").mkdir(parents=True)
+    (task / "task.toml").write_text("[agent]\ntimeout_sec = 60\n", encoding="utf-8")
+    (task / "instruction.md").write_text("do it\n", encoding="utf-8")
+    assert terminalbench.read_task(task)["network"] is True
+    (task / "task.toml").write_text("[environment]\nallow_internet = false\n", encoding="utf-8")
+    assert terminalbench.read_task(task)["network"] is False

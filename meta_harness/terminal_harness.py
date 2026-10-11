@@ -179,7 +179,7 @@ class Terminus2Harness:
     """Terminus-2 port. Class constants are the knobs the proposer is expected to tune."""
 
     SYSTEM = TERMINUS2_SYSTEM
-    MAX_STEPS = 60
+    MAX_STEPS = 300  # paper default; small runs pass max_steps explicitly
     STEP_TIMEOUT = 120.0
     CONTEXT_WINDOW = 128_000
     B1 = B1
@@ -325,7 +325,7 @@ class Terminus2Harness:
             results: list[tuple[str, dict, str, str]] = []
             reminders: list[str] = []
             for tool, args, call_id in actions:
-                if self.bash_only and tool not in ("bash", "keystrokes"):
+                if self.bash_only and tool not in ("bash", "keystrokes", "task_complete"):
                     obs = Observation(False, f"error: {tool} is disabled (bash_only); use shell commands")
                 elif tool == "update_plan":
                     try:
@@ -466,8 +466,10 @@ class TerminalAgent:
     kept for callers of `TerminalAgent(model, policy).run(task, trace)`. Commands go through a
     sandbox: the task's container when present, otherwise a fresh `TempDirSandbox`."""
 
-    def __init__(self, model: Callable[..., Any], policy: ShellPolicy | None = None, bootstrap: str = ""):
+    def __init__(self, model: Callable[..., Any], policy: ShellPolicy | None = None, bootstrap: str = "",
+                 allow_local_shell: bool = False):
         self.model, self.policy, self.bootstrap = model, policy or ShellPolicy(), bootstrap
+        self.allow_local_shell = allow_local_shell or os.environ.get("META_HARNESS_ALLOW_LOCAL_SHELL") == "1"
 
     @staticmethod
     def parse_action(output: str) -> dict[str, Any]:
@@ -477,6 +479,9 @@ class TerminalAgent:
         instruction = str(task.get("instruction", task.get("input", "")))
         if task.get("container"):
             sandbox, owned = Container.attach(str(task["container"]), str(task.get("workdir") or "/app")), False
+        elif not self.allow_local_shell:
+            raise PermissionError("no container on the task and allow_local_shell is False; refusing "
+                                  "to run model-authored commands outside a sandbox container")
         else:
             sandbox, owned = TempDirSandbox(), True
             sandbox.start()

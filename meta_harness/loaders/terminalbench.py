@@ -1,5 +1,8 @@
 """TerminalBench-2 loader: reads a local checkout (`--tb-dir`); no network.
 
+Container network follows each task: task.toml `[environment] allow_internet` (harbor
+default when unspecified: allowed); task.yaml tasks get no network unless `allow_internet: true`.
+
 Task directory formats (both read; see `meta_harness.terminal` for the full notes):
   * `task.yaml` + `Dockerfile` + `run-tests.sh` + `tests/` (+ `solution.sh`)
   * `task.toml` + `instruction.md` + `environment/Dockerfile` + `tests/test.sh` (+ `solution/`)
@@ -100,7 +103,8 @@ def read_task(task_dir: Path, version: str = DEFAULT_VERSION) -> dict[str, Any] 
         row = {"instruction": instruction, "image": env.get("docker_image") or _image_name(task_id, version),
                "test_command": TB2_TEST, "timeout": float(agent.get("timeout_sec", 900.0)),
                "test_timeout": float(verifier.get("timeout_sec", 600.0)),
-               "network": bool(env.get("allow_internet", False)),
+               # harbor's default: internet allowed unless the task sets allow_internet = false
+               "network": bool(env.get("allow_internet", True)),
                "dockerfile_dir": str(task_dir / "environment"),
                "test_files": [[str(tests_dir), "/tests"]]}
     elif (task_dir / "task.yaml").is_file():
