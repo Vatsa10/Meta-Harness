@@ -243,8 +243,17 @@ meta-harness run ... --proposer-view full      # everything (default)
 
 TerminalBench-2 style tasks run inside Docker. The terminal domain starts one container per
 task, hands its id to the harness as `task["container"]`, then runs the task's tests inside that
-same container (`docker exec ... bash -lc <test_command>`) and removes it. With no container the
-score is 0 and nothing ever runs on your machine.
+same container and removes it. With no container the score is 0 and nothing ever runs on your
+machine.
+
+Scoring runs in the agent's own container, so before the tests go in the container is restarted
+(`docker restart`, killing every process the agent left, such as a loop rewriting the reward
+file), `docker diff` is checked for tampering (scorer binaries such as `bash`, `sh`, `cat`, `tr`,
+`env` in the PATH directories, anything under `/tests` or `/logs/verifier`, `/logs` replaced)
+and `/logs`, `/logs/verifier` and `/tests` must not be symlinks; any hit scores 0 with reason
+`tampered` in the trace. The tests are then run by absolute shell path
+(`docker exec ... /bin/bash -c <test_command>`). Residual risk: modifications outside the
+checked set (for example a shared library the shell loads) are not detected.
 
 Seeds: `baselines/terminal/terminus2.py` (Terminus-2: JSON keystroke batches, 30KB observation
 cap, confirmation turn) and `baselines/terminal/terminus_kira.py` (native tool calling,
@@ -254,9 +263,11 @@ read-before-write checks, stuck detection, staged compaction (`B1`/`B2`) and the
 
 Tasks come from a local TerminalBench checkout (`meta_harness.loaders.terminalbench`, `--tb-dir`,
 dataset version as a loader parameter). **Search = test on this domain, as in the paper:** pass
-the same task file to `--tasks` and `--test-tasks`, so the numbers are search scores, not
-held-out ones. `audit_leakage(source, tasks)` flags harness source that names task ids, test
-file names or expected outputs. Keep live runs small (at most 5 TerminalBench tasks).
+the same task file to `--search` and `--test` (`meta-harness search --domain terminal
+--dataset-version <v> ...`; the version is recorded in `run.json`), so the numbers are search
+scores, not held-out ones. `audit_leakage(source, tasks)` flags harness source that names task
+ids, test file names or expected outputs; during a search such a candidate is rejected with
+receipt verdict `rejected_invalid_source`. Keep live runs small (at most 5 TerminalBench tasks).
 
 ## Writing your own harness
 

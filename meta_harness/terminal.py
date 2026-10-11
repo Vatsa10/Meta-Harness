@@ -195,9 +195,38 @@ class Container:
 
     def exec_test(self, command: str, timeout: float) -> tuple[int, str]:
         """Run the task's test command in this container through `DockerSandbox.exec`
-        (`docker exec -w <workdir> <id> timeout -s KILL <n> <bash|sh> -c <command>`; the container
-        is killed if the CLI itself hangs). Never runs anything on the host."""
-        return self.exec(command, timeout)
+        (`docker exec -w <workdir> <id> timeout -s KILL <n> /bin/<bash|sh> -c <command>`; the
+        container is killed if the CLI itself hangs). The shell is invoked by absolute path, so a
+        binary the agent planted earlier on PATH is never the one that runs the tests. Never runs
+        anything on the host."""
+        self._pick_shell()
+        shell = self.sandbox.shell
+        self.sandbox.shell = "/bin/bash" if shell == "bash" else "/bin/sh"
+        try:
+            return _code_and_text(self.sandbox.exec(command, timeout))
+        finally:
+            self.sandbox.shell = shell
+
+    def restart(self, timeout: float = 120.0) -> None:
+        """`docker restart -t 0`: kills every process the agent left behind (a background loop
+        rewriting the reward file or the tests) before scoring."""
+        done = self._run(["docker", "restart", "-t", "0", str(self.id)], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", timeout=timeout)
+        if done.returncode != 0:
+            raise RuntimeError(f"docker restart failed: {(done.stderr or '').strip()[-500:]}")
+
+    def diff(self, timeout: float = 120.0) -> list[tuple[str, str]]:
+        """`docker diff`: (kind, path) for every change against the image; kind is A, C or D."""
+        done = self._run(["docker", "diff", str(self.id)], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace", timeout=timeout)
+        if done.returncode != 0:
+            raise RuntimeError(f"docker diff failed: {(done.stderr or '').strip()[-500:]}")
+        changes = []
+        for line in (done.stdout or "").splitlines():
+            kind, _, path = line.strip().partition(" ")
+            if kind and path:
+                changes.append((kind, path.strip()))
+        return changes
 
     def remove(self) -> None:
         self.sandbox.close()

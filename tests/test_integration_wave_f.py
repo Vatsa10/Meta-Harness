@@ -70,9 +70,15 @@ class FakeBox:
         FakeBox.log.append(("start", self.image))
         return self.id
 
+    def restart(self, timeout=120):
+        FakeBox.log.append(("restart", self.id))
+
+    def diff(self, timeout=120):
+        return []
+
     def exec(self, command, timeout):
         FakeBox.log.append(("exec", command))
-        return 0, ""
+        return (1, "") if command.startswith("test -L") else (0, "")
 
     def exec_test(self, command, timeout):
         FakeBox.log.append(("test", command))

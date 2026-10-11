@@ -45,6 +45,31 @@ CONTEXT_WINDOW. Search = test on this domain: never write task ids, test file na
 outputs into a harness; the leakage audit rejects such candidates."""
 
 WIPE_COMMAND = "rm -rf /tests /logs/verifier"
+# Binaries the scoring path runs: a change to (or a new file named like) any of them is tampering.
+SCORER_BINARIES = frozenset({"bash", "sh", "dash", "cat", "tr", "env", "timeout", "rm", "test"})
+# Verifier paths: anything under them, or the parents themselves replaced, is tampering.
+VERIFIER_ROOTS = ("/tests", "/logs/verifier")
+VERIFIER_PARENTS = ("/logs",)
+# Directories on the image's PATH (docker exec uses the image ENV, not anything the agent set).
+BIN_DIRS = ("/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin")
+SYMLINK_CHECK = "test -L /logs || test -L /logs/verifier || test -L /tests"
+
+
+def tampered_paths(changes: list[tuple[str, str]]) -> list[str]:
+    """The `docker diff` entries that touch what scoring depends on: scorer binaries in the PATH
+    directories (changed, replaced, or added earlier on PATH), a PATH directory itself added or
+    replaced (e.g. /bin turned into a symlink), anything under the
+    verifier paths, and the verifier's parent directories added or deleted (replaced)."""
+    found = []
+    for kind, path in changes:
+        parent, _, name = path.rstrip("/").rpartition("/")
+        if path in BIN_DIRS or (parent in BIN_DIRS and name in SCORER_BINARIES):
+            found.append(f"{kind} {path}")
+        elif any(path == root or path.startswith(root + "/") for root in VERIFIER_ROOTS):
+            found.append(f"{kind} {path}")
+        elif path in VERIFIER_PARENTS and kind in ("A", "D"):
+            found.append(f"{kind} {path}")
+    return found
 
 _scores: dict[str, float] = {}
 
@@ -100,19 +125,33 @@ def evaluate_task(harness: Any, task: Mapping[str, Any], model: Any, trace: Any 
         container_id = container.start()
         live = dict(task, container=container_id, workdir=workdir)
         result = call_run(harness, harness_view(live), model, trace)
-        # The agent had a shell in this container: anything it left where the verifier looks
-        # (a planted /tests, a pre-written reward file) is wiped before the real tests go in.
-        code, out = container.exec(WIPE_COMMAND, 60)
-        if code != 0:
-            raise RuntimeError(f"could not reset test state before scoring: {out[-500:]}")
-        for local, remote in task.get("test_files") or []:
-            container.put(Path(local), str(remote))
-        score = terminal_metric(live, result)
+        # The agent had a shell in this container. First every process it left is killed (a
+        # background loop could rewrite the reward file or the tests after the wipe), then the
+        # filesystem is checked for tampering with what scoring runs, then anything it left where
+        # the verifier looks (a planted /tests, a pre-written reward file) is wiped.
+        container.restart()
+        tampered = tampered_paths(container.diff())
+        if not tampered:
+            code, _ = container.exec(SYMLINK_CHECK, 60)
+            if code == 0:
+                tampered = ["symlink at /logs, /logs/verifier or /tests"]
+        if tampered:
+            score, reason = 0.0, "tampered"
+        else:
+            code, out = container.exec(WIPE_COMMAND, 60)
+            if code != 0:
+                raise RuntimeError(f"could not reset test state before scoring: {out[-500:]}")
+            for local, remote in task.get("test_files") or []:
+                container.put(Path(local), str(remote))
+            score, reason = terminal_metric(live, result), None
     finally:
         container.remove()
     if trace is not None and hasattr(trace, "event"):
         trace.event("terminal_score", {"id": task.get("id"), "score": score,
-                                       "stop_reason": result.get("stop_reason")})
+                                       "stop_reason": result.get("stop_reason"), "reason": reason,
+                                       "tampered": tampered[:20]})
+    if reason:
+        result = {**result, "score_reason": reason}
     return score, result
 
 

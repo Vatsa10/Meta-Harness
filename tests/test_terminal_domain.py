@@ -36,18 +36,37 @@ class FakeContainer:
     # A tiny shared filesystem: the agent, the wipe, the copy-in and the tests all act on it.
     fs: dict = {}
     solved = True
+    rewriter = False      # an agent background loop that rewrites the reward file until killed
+    changes: list = []    # what `docker diff` reports
+    symlink = False       # /logs or /logs/verifier is a symlink
+
+    def restart(self, timeout=120):
+        FakeContainer.log.append(("restart", self.id))
+        FakeContainer.rewriter = False
+
+    def diff(self, timeout=120):
+        FakeContainer.log.append(("diff", self.id))
+        return list(FakeContainer.changes)
 
     def exec(self, command, timeout):
         FakeContainer.log.append(("exec", self.id, command))
+        if FakeContainer.rewriter:
+            FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
+        if command == domain.SYMLINK_CHECK:
+            return (0, "") if FakeContainer.symlink else (1, "")
         if command == "rm -rf /tests /logs/verifier":
             for key in [k for k in FakeContainer.fs if k.startswith(("/tests", "/logs/verifier"))]:
                 del FakeContainer.fs[key]
+            if FakeContainer.rewriter:
+                FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
         return 0, ""
 
     def exec_test(self, command, timeout):
         """Like TB2: run whatever is at /tests; the real test writes reward 1 only when solved;
         the verdict is the reward file."""
         FakeContainer.log.append(("test", self.id, self.workdir, command))
+        if FakeContainer.rewriter:
+            FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
         if FakeContainer.fs.get("/tests") == "REAL" and FakeContainer.solved:
             FakeContainer.fs["/logs/verifier/reward.txt"] = "1"
         elif FakeContainer.fs.get("/tests") == "PLANTED":
@@ -88,6 +107,9 @@ def fake_container(monkeypatch):
     FakeContainer.log = []
     FakeContainer.fs = {}
     FakeContainer.solved = True
+    FakeContainer.rewriter = False
+    FakeContainer.changes = []
+    FakeContainer.symlink = False
     monkeypatch.setattr(terminal_mod, "Container", FakeContainer)
 
 
@@ -266,7 +288,7 @@ def test_scoring_goes_through_the_sandbox_with_a_kill_deadline(has_bash, shell):
     assert len(probes) == 1
     test = runner.calls[-1]
     assert test[:5] == ["docker", "exec", "-w", "/app", "cid-9"]
-    assert test[5:8] == ["timeout", "-s", "KILL"] and test[-3:] == [shell, "-c", "pytest -x"]
+    assert test[5:8] == ["timeout", "-s", "KILL"] and test[-3:] == [f"/bin/{shell}", "-c", "pytest -x"]
 
 
 @pytest.mark.parametrize("network", [False, True])
@@ -286,3 +308,71 @@ def test_toml_task_network_defaults_to_allowed(tmp_path: Path):
     assert terminalbench.read_task(task)["network"] is True
     (task / "task.toml").write_text("[environment]\nallow_internet = false\n", encoding="utf-8")
     assert terminalbench.read_task(task)["network"] is False
+
+
+# --------------------------------------------------------------------------- tamper checks
+class Events:
+    def __init__(self):
+        self.events = []
+
+    def event(self, name, payload=None, **fields):
+        self.events.append((name, payload))
+
+
+class BackgroundRewriter:
+    """Starts a loop that keeps writing a passing reward file (until the container restarts)."""
+
+    def run(self, task, model, trace):
+        FakeContainer.rewriter = True
+        return {"output": "done"}
+
+
+def test_background_rewriter_is_killed_before_the_wipe():
+    FakeContainer.solved = False
+    score, _ = domain.evaluate_task(BackgroundRewriter(), TASK, None, None, container_factory=FakeContainer)
+    assert score == 0.0
+    kinds = [e[0] for e in FakeContainer.log]
+    wipe = FakeContainer.log.index(("exec", "cid-1", domain.WIPE_COMMAND))
+    assert kinds.index("restart") < wipe
+
+
+@pytest.mark.parametrize("changes", [[("C", "/bin/bash")], [("C", "/usr/bin")], [("A", "/usr/local/bin/bash")],
+                                     [("A", "/tests/test.sh")], [("D", "/logs")]])
+def test_replaced_scorer_binary_or_verifier_path_scores_zero_tampered(changes):
+    FakeContainer.changes = changes
+    trace = Events()
+    score, result = domain.evaluate_task(SeenHarness(), TASK, None, trace, container_factory=FakeContainer)
+    assert score == 0.0 and result["score_reason"] == "tampered"
+    assert not any(e[0] == "test" for e in FakeContainer.log)
+    payload = dict(trace.events)["terminal_score"]
+    assert payload["reason"] == "tampered" and payload["tampered"]
+
+
+def test_unrelated_changes_still_score():
+    FakeContainer.changes = [("A", "/app/env"), ("C", "/app"), ("C", "/logs"), ("A", "/logs/agent.log")]
+    score, result = domain.evaluate_task(SeenHarness(), TASK, None, None, container_factory=FakeContainer)
+    assert score == 1.0 and "score_reason" not in result
+
+
+def test_logs_symlink_scores_zero_tampered():
+    FakeContainer.symlink = True
+    trace = Events()
+    score, result = domain.evaluate_task(SeenHarness(), TASK, None, trace, container_factory=FakeContainer)
+    assert score == 0.0 and result["score_reason"] == "tampered"
+    assert dict(trace.events)["terminal_score"]["reason"] == "tampered"
+
+
+def test_container_restart_and_diff_use_the_docker_cli():
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        assert kwargs.get("encoding") == "utf-8" and kwargs.get("timeout")
+        out = "C /bin\nC /bin/bash\nA /app/x\n" if argv[1] == "diff" else ""
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    box = Container.attach("cid-7", "/app", runner=runner)
+    box.restart()
+    assert box.diff() == [("C", "/bin"), ("C", "/bin/bash"), ("A", "/app/x")]
+    assert calls == [["docker", "restart", "-t", "0", "cid-7"], ["docker", "diff", "cid-7"]]
+    assert domain.tampered_paths(box.diff()) == ["C /bin", "C /bin/bash"]
