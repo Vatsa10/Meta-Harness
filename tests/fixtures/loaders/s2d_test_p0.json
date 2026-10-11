@@ -1,0 +1,45 @@
+{
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "output_text": "peptic ulcer disease",
+    "input_text": "I have a burning sensation in my stomach that comes and goes. It's worse when I eat and when I lie down. I also have heartburn and indigestion."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "output_text": "peptic ulcer disease",
+    "input_text": "I have a hard time swallowing and I feel like food is getting stuck in my throat. I belch a lot and feel bloated. I have a bad taste in my mouth all the time."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "output_text": "drug reaction",
+    "input_text": "I've been having headaches and migraines, and I can't sleep. My whole body shakes and twitches. Sometimes I feel lightheaded."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 3,
+   "row": {
+    "output_text": "pneumonia",
+    "input_text": "I'm sweating a lot and can't catch my breath. My throat is full of phlegm and I feel awful. My heart is racing and my chest hurts. I'm coughing up brown stuff."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 4,
+   "row": {
+    "output_text": "fungal infection",
+    "input_text": "I've been scratching myself a lot lately, and my skin is covered in rashy places. I also have a few pimples that are pretty firm, and there are some spots on my body that are a different shade of brown than the rest of my skin."
+   },
+   "truncated_cells": []
+  }
+ ],
+ "num_rows_total": 5
+}

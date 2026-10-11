@@ -1,0 +1,45 @@
+{
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "output_text": "common cold",
+    "input_text": "I've been feeling really run down and weak. My throat is sore and I've been coughing a lot. I've also been having chills and a fever."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "output_text": "dengue",
+    "input_text": "I have rashes all over my body. I also have a high fever, chills, headache, body aches, and pain behind my eyes."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "output_text": "dengue",
+    "input_text": "I have been feeling nauseous and have a constant urge to vomit, which is accompanied with mild fever and headache. I also feel very weak and tired. "
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 3,
+   "row": {
+    "output_text": "impetigo",
+    "input_text": "I have a rash around my nose that is red and inflamed. The rash has caused my skin to become dry and flaky, and there is a yellow colored fluid coming out of the sores."
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 4,
+   "row": {
+    "output_text": "drug reaction",
+    "input_text": "I have a rash on my chest and back and it itches. I also have dry skin that sometimes flakes and leaves marks on my body."
+   },
+   "truncated_cells": []
+  }
+ ],
+ "num_rows_total": 10
+}
