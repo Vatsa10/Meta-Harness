@@ -470,6 +470,8 @@ class AnthropicModel:
 
 OPENAI_COMPATIBLE = {"openai": OpenAICompatibleModel, "compatible": OpenAICompatibleModel,
                      "unikey": UnikeyModel, "groq": GroqModel}
+# Every provider name model_from_environment accepts (canonical spellings): the CLI choices.
+PROVIDERS = ("anthropic", *OPENAI_COMPATIBLE, "scripted")
 
 
 def list_models(provider: str, api_key: str | None = None, base_url: str | None = None,
@@ -513,7 +515,7 @@ def model_from_environment(provider: str, model: str, **kwargs: Any) -> Any:
 
 
 __all__ = [
-    "AnthropicModel", "AssistantTurn", "GroqModel", "OpenAICompatibleModel", "Price", "ProviderError",
+    "AnthropicModel", "AssistantTurn", "GroqModel", "OpenAICompatibleModel", "PROVIDERS", "Price", "ProviderError",
     "RetryPolicy", "ToolCall", "ToolSpec", "UnikeyModel", "Usage", "anthropic_request", "cost_usd",
     "list_models", "list_unikey_models", "model_from_environment", "openai_request", "parse_anthropic",
     "parse_openai", "price_for",

@@ -29,7 +29,9 @@ process  The child is `python -I -c <bootstrap> <pkgroot> <candidate>` with an A
          Best-effort guards installed by the bootstrap before the candidate loads: socket
          connects raise, and `builtins.open` / `io.open` refuse paths outside the candidate's
          directory, the temp cwd, the meta_harness package and the Python stdlib/site-packages
-         (so the repo-root `.env` is refused). These guards are BYPASSABLE (ctypes, os.open,
+         (so the repo-root `.env` is refused). Any `.env*` file and anything under ~/.ssh is
+         refused even inside an allowed root. Candidates run from their run-dir copy
+         (candidates/<id>/harness.py), so only that directory is allowed, never its parent. These guards are BYPASSABLE (ctypes, os.open,
          _socket, subprocess): the child still runs as the same OS user. `docker` is the real
          security boundary.
 docker   `docker run -i --rm --network none --cap-drop ALL --read-only --tmpfs /tmp
@@ -475,6 +477,14 @@ def docker_argv(name: str, source: Path, memory_mb: int, cpu_seconds: int, image
 
 # -- child side -----------------------------------------------------------------------------------
 
+def _always_refused(target: Path, ssh: Path) -> bool:
+    """Dotenv files (`.env`, `.env.local`, ...; any case) and anything under ~/.ssh are refused
+    whatever the allowed roots are."""
+    if target.name.lower().startswith(".env"):
+        return True
+    return target == ssh or ssh in target.parents
+
+
 def install_guards(candidate: Path) -> None:
     """Best-effort, BYPASSABLE guards (ctypes, os.open, _socket, subprocess all get around them):
     no socket connects, no open() outside the candidate dir, cwd, package and Python install."""
@@ -490,6 +500,8 @@ def install_guards(candidate: Path) -> None:
     socket.socket.connect_ex = refuse  # type: ignore[method-assign]
     socket.create_connection = refuse  # type: ignore[assignment]
 
+    # Only the candidate's OWN directory (core evaluates the run-dir copy candidates/<id>/harness.py),
+    # never its parent: a seed passed from a repo root must not open the repo's files.
     roots = {Path(candidate).resolve().parent, Path.cwd().resolve(), Path(__file__).resolve().parent,
              Path(tempfile.gettempdir()).resolve()}
     for key in ("stdlib", "platstdlib", "purelib", "platlib"):
@@ -500,12 +512,15 @@ def install_guards(candidate: Path) -> None:
     for prefix in {sys.prefix, sys.base_prefix, sys.exec_prefix}:
         roots.add(Path(prefix).resolve() / ("Lib" if os.name == "nt" else "lib"))
     allowed = tuple(roots)
+    ssh = (Path.home() / ".ssh").resolve()
     real_open = builtins.open
 
     def guarded_open(file: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(file, (str, bytes, os.PathLike)):
             raw = os.fsdecode(file)
             target = Path(raw).resolve()
+            if _always_refused(target, ssh):
+                raise PermissionError(f"open() of a secrets file is refused: {raw}")
             if not any(target == root or root in target.parents for root in allowed):
                 raise PermissionError(f"open() outside the sandbox is refused: {raw}")
         return real_open(file, *args, **kwargs)
