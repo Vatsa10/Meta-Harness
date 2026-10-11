@@ -41,24 +41,20 @@ class LabelPrimedQueryHarness:
         self.memory: list[MemoryExample] = []
 
     def _context(self, query: str) -> list[MemoryExample]:
+        """Coverage (best example of every label over ALL memory) then query-anchored contrastive pairs."""
         if not self.memory:
             return []
-        retrieved = TfidfIndex(self.memory, [x.text for x in self.memory]).search(query, max(8, len(self.labels)))
-        selected: list[MemoryExample] = []
-        for label in self.labels:
-            match = next((x.item for x in retrieved if x.item.label == label), None)
-            if match and match not in selected:
-                selected.append(match)
-        for result in retrieved:
-            if result.item not in selected:
-                selected.append(result.item)
+        ranked = TfidfIndex(self.memory, [x.text for x in self.memory]).search(query, len(self.memory))
+        best: dict[str, MemoryExample] = {}
+        for result in ranked:
+            best.setdefault(result.item.label, result.item)
+        labels = list(self.labels) + [x for x in best if x not in self.labels]
+        selected = [best[label] for label in labels if label in best]
         pairs: list[MemoryExample] = []
-        for left in selected:
-            right = next((x for x in selected if x.label != left.label), None)
-            if right:
-                pairs.extend([left, right])
-            if len(pairs) >= self.pair_count * 2:
-                break
+        for result in ranked[: self.pair_count]:
+            other = next((x.item for x in ranked if x.item.label != result.item.label), None)
+            if other is not None:
+                pairs.extend([result.item, other])
         return selected + [x for x in pairs if x not in selected]
 
     def run(self, task: Mapping[str, Any], model: Callable[..., Any], trace: Any) -> str:
@@ -73,10 +69,12 @@ class LabelPrimedQueryHarness:
         prompt += f"\n\nInput: {query}\nReturn exactly one valid label.\nLabel:"
         trace.event("classification_prompt", {"prompt": prompt, "retrieved": len(examples)})
         prediction = _label(_call(model, prompt), self.labels)
-        if "label" in task:
-            self.memory.append(MemoryExample(query, str(task["label"])))
         trace.event("classification_result", {"prediction": prediction})
         return prediction
+
+    def learn(self, task: Mapping[str, Any], result: Any = None) -> None:
+        if "label" in task:
+            self.memory.append(MemoryExample(str(task.get("input", task.get("text", ""))), str(task["label"])))
 
 
 class DraftVerificationHarness:
