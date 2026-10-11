@@ -84,7 +84,7 @@ meta-harness search --harness my_harness.py --data evals.jsonl --metric exact \
 | OpenAI | `openai` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
 | Any OpenAI-compatible endpoint | `compatible` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` or `--base-url` (required) |
 | Unikey gateway | `unikey` | `UNIKEY_API_KEY`, `UNIKEY_BASE_URL` |
-| Groq | `groq` in `models`, `transfer`, `ood` (not yet a `search` choice) | `GROQ_API_KEY`, `GROQ_BASE_URL` |
+| Groq | `groq` | `GROQ_API_KEY`, `GROQ_BASE_URL` |
 | Offline replay | `scripted` | `--model` is the script path |
 
 Keys are read from the environment only: never printed, logged, written to `run.json` or passed
@@ -127,6 +127,9 @@ Key `search` flags:
 | `--provider` `--model` | required | base model the harness calls |
 | `--proposer-provider` `--proposer-model` | same as base | proposer (paper: strong proposer, cheaper base) |
 | `--iterations` / `--candidates` | 10 / 1 | proposer iterations / proposals per iteration |
+| `--optimizer` | `metaharness` | `metaharness`, `best-of-n`, `openevolve`, `ttt_discover`, `gepa` |
+| `--max-evaluations` | none | equal-budget cap on search-split harness evaluations |
+| `--protocol` | domain's | `plain` or `online` (train stream into `learn`, frozen scoring) |
 | `--view` | `full` | `scores`, `summary` or `full` (Table 3 ablation) |
 | `--max-tool-calls` | 40 | proposer tool calls per proposal |
 | `--domain` | `generic` | `classification`, `math`, `terminal`: prompt section, protocol, metric |
@@ -185,9 +188,20 @@ meta-harness ablate --views scores,full --runs 1 --root .meta-harness-ablate -- 
     --proposer-model examples/sentiment/proposer_script.jsonl --iterations 1 --no-cache
 ```
 
-Comparison optimizers (Best-of-N, OpenEvolve-style, TTT-Discover-style, GEPA-style) are
-implemented in `meta_harness/optimizers/` under an equal evaluation budget, but `search` does not
-yet expose an `--optimizer` flag; see Roadmap.
+Compare optimizers under an equal budget: run `search` once per `--optimizer` with the same
+data, seeds, models and `--max-evaluations`, then compare the runs:
+
+```bash
+meta-harness search --optimizer best-of-n --max-evaluations 3 --root .mh-bon --iterations 2 \
+    --harness examples/sentiment/harness.py --data examples/sentiment/data.jsonl \
+    --metric examples/sentiment/metric.py:score --provider scripted \
+    --model examples/sentiment/base_script.jsonl --proposer-provider scripted \
+    --proposer-model examples/sentiment/proposer_script.jsonl --no-cache
+meta-harness experience diff-runs .meta-harness-example .mh-bon
+```
+
+`best-of-n` gives the proposer only the seed (no experience filesystem); `openevolve`,
+`ttt_discover` and `gepa` are style re-implementations of those methods, not their original code.
 
 ## Domains
 
@@ -207,6 +221,8 @@ Seeds per domain are in [baselines/](baselines/README.md).
   and refuse paths outside the run directory and the test directory.
 - **Redaction**: anything matching `api_key=...`, `bearer ...`, `sk-...` or a loaded `*_API_KEY`
   value becomes `[redacted]` in logs, traces and receipts.
+- **Secrets on disk**: seeds and candidates run from their copy inside the run directory, and
+  the process-isolation open guard always refuses `.env*` files and `~/.ssh`.
 - **Isolation** (`--isolation`) of candidate code, which the proposer wrote and you did not:
 
 | Mode | What you get | Honest limit |
@@ -253,8 +269,6 @@ quality. Every number added here will name its command, date, model and recorded
 
 Not implemented:
 
-- `--optimizer` on `search` (the comparison optimizers exist as modules only).
-- `groq` as a `search` provider choice.
 - Proof grading for IMO-ProofBench (needs a judge).
 - The paper's 180-way USPTO and 215-way LawBench label sets (no public copy found).
 - A process-isolation boundary that a hostile candidate cannot bypass (use `docker`).
