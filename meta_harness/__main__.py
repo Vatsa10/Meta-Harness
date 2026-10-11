@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Sequence
 
@@ -10,7 +11,7 @@ from .envfile import load_env
 
 def _pre_parser() -> argparse.ArgumentParser:
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--env-file", default=".env",
+    pre.add_argument("--env-file", default=os.environ.get("META_HARNESS_ENV_FILE", ".env"),
                      help="KEY=value file loaded before dispatch (never overrides the environment)")
     return pre
 
