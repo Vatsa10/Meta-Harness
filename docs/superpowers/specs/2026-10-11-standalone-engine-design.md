@@ -141,3 +141,30 @@ pushes go to `main`.
   runs; the README reports only numbers actually produced.
 - Provider tool-calling formats drift: both are tested against recorded response fixtures.
 - Proposer cost: bounded tool calls and iterations; `run.json` reports tokens spent.
+
+## 11. Designs borrowed from reference harnesses
+
+Read from `refs/` (git-ignored clones of soketlabs/loop, rivet-dev/rivet, truefoundry/trueforge;
+Apache-2.0 / Apache-2.0 / MIT). Designs only, re-written in stdlib Python; notes with source paths
+in `.superpowers/pivot/refs-*.md`.
+
+- **Proposer loop** (loop, trueforge): `write_candidate` terminates the turn; a before-tool hook
+  enforces path confinement and test-split denial; iteration cap; orphaned tool calls closed with
+  an error result; unknown tools and tool errors returned as tool results; `length` stop is an
+  explicit failure.
+- **Tool output bounds** (loop, trueforge): results capped (~6000 tokens / 2000 lines), head for
+  files, tail for commands, UTF-8 safe, with a preview and a pointer to narrow via offset/limit or
+  grep; full output spilled to a file inside the run directory.
+- **Provider layer** (loop, trueforge): one internal message type converted per provider; usage
+  record `{input, output, cache_read, cache_write, reasoning}` with an explicit flag for whether
+  input includes cache; billed cost reported separately from the context-token Pareto axis; a
+  scripted provider that replays text, tool-call and error responses.
+- **Resumable, parallel runs** (rivet, trueforge): every step's result is a file, `--resume`
+  skips finished steps, `run.json` checkpointed each iteration; per-task failures recorded as
+  scores, per-evaluation timeouts; retries only on 429/5xx, never on harness errors or timeouts.
+- **Sandbox** (rivet, loop): `Sandbox` protocol (`exec`, `put`, `get`) with a temp-dir subprocess
+  implementation and a Docker CLI implementation; a preflight check with install hints.
+- **Benchmark runner** (trueforge): resumable `{arm × task × trial}` matrix; failed trials kept
+  and scored 0; optional blind LLM-judge metric ending in `VERDICT: PASS|FAIL`.
+- **Terminus-style seeds** (loop, trueforge): exact-then-fuzzy edit, compaction at a reserve
+  threshold with a "don't redo work" continuation.

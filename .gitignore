@@ -15,3 +15,4 @@ fast-jev-compaction/
 # Written by Claude Code when it loads the hooks module
 /tsconfig.json
 .claude-plugin/types/
+/refs/
