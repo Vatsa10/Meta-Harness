@@ -55,7 +55,6 @@ class MathRetrievalHarness:
         context = "\n\n".join(f"Reference problem:\n{x.item['problem']}\nSolution:\n{str(x.item['solution'])[:3000]}" for x in examples)
         prompt = f"Solve rigorously. Route: {route}\n\n{context}\n\nProblem:\n{problem}\nSolution:"
         trace.event("math_retrieval", {"route": route, "retrieved": [x.index for x in examples]})
-        trace.add_context_cost(len(prompt))
         answer = _call(model, prompt)
         trace.event("math_result", {"answer": answer})
         return answer

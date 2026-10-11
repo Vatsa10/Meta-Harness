@@ -20,7 +20,7 @@ def test_metered_model_records_provider_usage(tmp_path: Path):
     with TraceRecorder(tmp_path / "t.jsonl") as trace:
         metered = MeteredModel(Upstream(), trace)
         assert metered("hello") == "ok"
-        assert trace.context_cost == 123
+        assert metered.prompt_tokens == 123
     events = [json.loads(line) for line in (tmp_path / "t.jsonl").read_text().splitlines()]
     assert events[0]["event"] == "model_call"
     assert events[0]["payload"]["prompt"] == "hello"
@@ -31,7 +31,7 @@ def test_metered_model_estimates_when_usage_absent(tmp_path: Path):
     with TraceRecorder(tmp_path / "t.jsonl") as trace:
         metered = MeteredModel(lambda prompt, **_: "ok", trace)
         metered("a" * 400)
-        assert trace.context_cost == 100
+        assert metered.prompt_tokens == 100
 
 
 def test_evaluator_context_cost_is_tokens_not_events(tmp_path: Path):

@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
-def cache_key(model_id: str, prompt: str, kwargs: Mapping[str, Any]) -> str:
-    payload = json.dumps({"model": model_id, "prompt": prompt, "kwargs": dict(kwargs)},
+def cache_key(model_id: str, prompt: str, kwargs: Mapping[str, Any],
+              sample_index: int = 0) -> str:
+    payload = json.dumps({"model": model_id, "prompt": prompt, "kwargs": dict(kwargs),
+                          "sample": sample_index},
                          sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -48,6 +50,8 @@ class DiskCache:
 class CachedModel:
     """Wraps any model callable, memoizing (model id, prompt, kwargs) -> (text, usage)."""
 
+    supports_sample_index = True
+
     def __init__(self, model: Callable[..., Any], root: Path | str, enabled: bool = True):
         self.model = model
         self.cache = DiskCache(root)
@@ -66,10 +70,10 @@ class CachedModel:
             return str(text), dict(usage or {})
         return str(self.model(prompt, **kwargs)), {}
 
-    def call(self, prompt: str, **kwargs: Any) -> tuple[str, dict[str, Any]]:
+    def call(self, prompt: str, *, sample_index: int = 0, **kwargs: Any) -> tuple[str, dict[str, Any]]:
         if not self.enabled:
             return self._upstream(prompt, **kwargs)
-        key = cache_key(self.model_id, prompt, kwargs)
+        key = cache_key(self.model_id, prompt, kwargs, sample_index)
         stored = self.cache.get(key)
         if stored is not None:
             self.hits += 1

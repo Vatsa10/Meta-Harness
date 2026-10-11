@@ -72,7 +72,6 @@ class LabelPrimedQueryHarness:
         prompt += "\n".join(f"Example: {x.text}\nLabel: {x.label}" for x in examples)
         prompt += f"\n\nInput: {query}\nReturn exactly one valid label.\nLabel:"
         trace.event("classification_prompt", {"prompt": prompt, "retrieved": len(examples)})
-        trace.add_context_cost(len(prompt))
         prediction = _label(_call(model, prompt), self.labels)
         if "label" in task:
             self.memory.append(MemoryExample(query, str(task["label"])))
@@ -98,7 +97,6 @@ class DraftVerificationHarness:
         context = "\n".join(f"{x.item.text} => {x.item.label}" for x in nearest)
         draft_prompt = f"Labels: {', '.join(self.labels)}\nExamples:\n{context}\nInput: {query}\nGive one label."
         trace.event("draft_prompt", {"prompt": draft_prompt})
-        trace.add_context_cost(len(draft_prompt))
         draft = _label(_call(model, draft_prompt), self.labels)
         final = draft
         if len(self.memory) >= self.draft_k:
@@ -110,7 +108,6 @@ class DraftVerificationHarness:
             verification += "\n" + "\n".join(f"Challenge: {x.item.text} => {x.item.label}" for x in challenge)
             verify_prompt = f"Initial label: {draft}\n{verification}\nInput: {query}\nKeep or revise; return one label."
             trace.event("verification_prompt", {"prompt": verify_prompt})
-            trace.add_context_cost(len(verify_prompt))
             final = _label(_call(model, verify_prompt), self.labels)
         if "label" in task:
             self.memory.append(MemoryExample(query, str(task["label"])))
