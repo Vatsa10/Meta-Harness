@@ -46,7 +46,7 @@ def redact_obj(value: Any) -> Any:
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: redact_obj(item) for key, item in value.items()}
+        return {redact_obj(key): redact_obj(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(redact_obj(item) for item in value)
     return value

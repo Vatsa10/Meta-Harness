@@ -9,3 +9,4 @@ def no_network(monkeypatch):
     def refuse(*args, **kwargs):
         raise AssertionError("tests must not open network connections")
     monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)

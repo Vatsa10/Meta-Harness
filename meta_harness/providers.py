@@ -35,7 +35,8 @@ class ProviderError(RuntimeError):
     """Provider failure. The message is always redacted: secret patterns, loaded *_API_KEY values
     and any extra `secrets` (e.g. an explicitly passed key) never appear in str(exc)."""
 
-    def __init__(self, message: str = "", secrets: Sequence[str] = ()):
+    def __init__(self, message: str = "", secrets: Sequence[str] = (), status: int | None = None):
+        self.status = status  # the HTTP status when the failure was an HTTP response, else None
         text = str(message)
         for secret in sorted((s for s in secrets if s), key=len, reverse=True):
             text = text.replace(secret, REDACTED)
@@ -50,10 +51,12 @@ class RetryPolicy:
 class _Retryable(Exception):
     """A provider failure of a retryable class: EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT."""
 
-    def __init__(self, kind: str, message: str, retry_after: float | None = None):
+    def __init__(self, kind: str, message: str, retry_after: float | None = None,
+                 status: int | None = None):
         super().__init__(message)
         self.kind = kind
         self.retry_after = retry_after
+        self.status = status
 
 
 def _retry_after(value: str | None) -> float | None:
@@ -102,11 +105,13 @@ class _HttpClient:
             message = f"HTTP {error.code}: {body_text[:1000]}"
             if error.code == 429:
                 raise _Retryable("RATE_LIMIT", message, _retry_after(error.headers.get("Retry-After")
-                                                                   if error.headers else None)) from error
+                                                                   if error.headers else None),
+                                 error.code) from error
             if error.code >= 500:
                 raise _Retryable("SERVER", message, _retry_after(error.headers.get("Retry-After")
-                                                               if error.headers else None)) from error
-            raise ProviderError(message) from error
+                                                               if error.headers else None),
+                                 error.code) from error
+            raise ProviderError(message, status=error.code) from error
         except (TimeoutError, OSError) as error:
             # URLError is an OSError; so are connection resets and socket timeouts.
             kind = "TIMEOUT" if isinstance(error, TimeoutError) else "TRANSPORT"
@@ -130,7 +135,8 @@ class _HttpClient:
         try:
             return self._post(url, headers, payload)
         except ProviderError as error:
-            raise ProviderError(str(error.args[0] if error.args else error), secrets) from error.__cause__
+            raise ProviderError(str(error.args[0] if error.args else error), secrets,
+                                status=error.status) from error.__cause__
 
     def _post(self, url: str, headers: Mapping[str, str], payload: bytes) -> dict[str, Any]:
         attempts = max(1, self.retry.attempts)
@@ -139,7 +145,7 @@ class _HttpClient:
                 return self._once(url, headers, payload)
             except _Retryable as error:
                 if attempt + 1 >= attempts:
-                    raise ProviderError(f"{error.kind}: {error}") from error
+                    raise ProviderError(f"{error.kind}: {error}", status=error.status) from error
                 if error.retry_after is not None:
                     delay = error.retry_after
                 else:
@@ -155,7 +161,8 @@ def _http_get_json(url: str, headers: Mapping[str, str], timeout: float = 60.0) 
         with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        raise ProviderError(f"HTTP {error.code}: {error.read().decode('utf-8', errors='replace')[:1000]}") from error
+        raise ProviderError(f"HTTP {error.code}: {error.read().decode('utf-8', errors='replace')[:1000]}",
+                            status=error.code) from error
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise ProviderError(str(error)) from error
     if not isinstance(value, dict):
