@@ -42,7 +42,8 @@ out.mkdir(parents=True, exist_ok=True)
 
 def test_run_defaults_to_bundled_baselines():
     parsed = cli.build_parser().parse_args([
-        "run", "--tasks", "t.jsonl", "--provider", "unikey", "--model", "m"])
+        "run", "--tasks", "t.jsonl", "--provider", "unikey", "--model", "m",
+        "--proposer-command", "p"])
     assert parsed.baseline is None
     assert [p.name for p in cli.default_baselines("classification")] == [
         "zero_shot.py", "few_shot.py", "ace.py", "mce.py"]
@@ -66,7 +67,8 @@ def test_explicit_test_tasks_file_is_used(tmp_path: Path, monkeypatch):
     code = cli.main([
         "run", "--tasks", str(search), "--test-tasks", str(held),
         "--provider", "unikey", "--model", "m", "--root", str(tmp_path / "store"),
-        "--iterations", "0", "--baseline", str(cli.BASELINE_ROOT / "zero_shot.py")])
+        "--proposer-command", "p", "--iterations", "0",
+        "--baseline", str(cli.BASELINE_ROOT / "zero_shot.py")])
     assert code == 0
     assert (Path(str(tmp_path / "store") + "-test") / "test_results.json").is_file()
 

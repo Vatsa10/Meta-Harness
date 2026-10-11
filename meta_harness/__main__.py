@@ -8,38 +8,22 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .agent_proposer import ClaudeCodeProposer
 from .cache import CachedModel
 from .core import (CandidateEvaluator, CommandProposer, FilesystemExperience, ParetoFrontier,
                    SearchConfig, SearchRunner)
-from .datasets import (agent_tasks, classification_tasks, math_tasks, read_records,
-                        split_tasks, terminal_tasks)
-from .cc_history import (compare_reports, draft_tasks, harness_report, load_sessions,
-                         project_slug, sessions_between, write_history_view)
+from .datasets import classification_tasks, math_tasks, read_records, split_tasks, terminal_tasks
 from .demo import run as run_demo
-from .harness_store import Artifact, HarnessStore, harness_home
-from .cc_harness import AgentConfig
-from .cc_harness import AgentRunError
-from .learn import (candidate_targets, config_with, decide_retention, merge_failures,
-                    observed_failures, propose_artifact, rank_failures, reproduces, run_replay,
-                    score_task_set, select_target)
 from .metrics import METRICS
 from .providers import list_unikey_models, model_from_environment
-from .replay import build_replay
-from .temporal import retirement_candidates
 
 BASELINE_ROOT = Path(__file__).resolve().parent.parent / "baselines"
 DEFAULT_BASELINES = {
     "classification": ["zero_shot.py", "few_shot.py", "ace.py", "mce.py"],
     "math": ["math_zero_shot.py", "math_bm25.py"],
     "terminal": ["terminal_basic.py"],
-    "agent": ["cc_default.py", "cc_guided.py", "cc_subagent.py"],
 }
 ADAPTERS = {"classification": classification_tasks, "math": math_tasks,
-            "terminal": terminal_tasks, "agent": agent_tasks}
-# Aliases the CLI resolves to the current model of each size. The paper's agentic-coding
-# result (section 4.3) is on Haiku 4.5, so haiku is the default harness model here.
-CLAUDE_CLI_MODELS = ["haiku", "sonnet", "opus"]
+            "terminal": terminal_tasks}
 
 
 def default_baselines(task_type: str) -> list[Path]:
@@ -58,28 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("root", nargs="?", default=".meta-harness")
 
     models = sub.add_parser("models", help="list available harness models")
-    models.add_argument("--provider", choices=["claude-cli", "unikey"], default="claude-cli")
-
-    mine = sub.add_parser(
-        "mine", help="read this machine's Claude Code history into a proposer-readable view")
-    mine.add_argument("--project", help="project slug, or a path (default: every project)")
-    mine.add_argument("--this-project", action="store_true",
-                      help="only the current working directory's history")
-    mine.add_argument("--limit", type=int, default=100, help="most recent sessions to read")
-    mine.add_argument("--min-turns", type=int, default=4)
-    mine.add_argument("--out", default=".meta-harness/history")
-    mine.add_argument("--include-text", action="store_true",
-                      help="keep message text. Transcripts contain whatever you typed; off by default")
-    mine.add_argument("--draft-tasks", help="also write draft eval tasks to this JSONL path")
-
-    compare = sub.add_parser(
-        "compare", help="diff two windows of Claude Code history before and after a harness change")
-    compare.add_argument("--split", required=True,
-                         help="ISO timestamp dividing before from after, e.g. 2026-09-18")
-    compare.add_argument("--project", help="project slug or path (default: every project)")
-    compare.add_argument("--this-project", action="store_true")
-    compare.add_argument("--limit", type=int, default=200)
-    compare.add_argument("--min-turns", type=int, default=4)
+    models.add_argument("--provider", choices=["unikey"], default="unikey")
 
     run = sub.add_parser("run", help="run a provider-backed harness search")
     run.add_argument("--tasks", required=True, help="JSON, JSONL, or CSV dataset")
@@ -87,14 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--search-fraction", type=float, default=0.7)
     run.add_argument("--split-seed", type=int, default=0)
     run.add_argument("--baseline", nargs="+", help="seed harness files (default: bundled baselines)")
-    run.add_argument("--provider", choices=["claude-cli", "unikey", "openai", "anthropic", "compatible"],
-                     default="claude-cli",
-                     help="where the harness model runs. claude-cli (default) uses the local "
-                          "Claude Code CLI and needs no API key")
-    run.add_argument("--model", default="haiku",
-                     help="harness model; a claude-cli alias (haiku, sonnet, opus) or a "
-                          "gateway model id")
-    run.add_argument("--task-type", choices=["classification", "math", "terminal", "agent"],
+    run.add_argument("--provider", choices=["unikey", "openai", "anthropic", "compatible"],
+                     default="unikey", help="where the harness model runs")
+    run.add_argument("--model", required=True, help="harness model id")
+    run.add_argument("--task-type", choices=["classification", "math", "terminal"],
                      default="classification")
     run.add_argument("--root", default=".meta-harness")
     run.add_argument("--test-root")
@@ -102,56 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--candidates", type=int, default=1)
     run.add_argument("--repeats", type=int, default=1)
     run.add_argument("--max-workers", type=int, default=1)
-    run.add_argument("--proposer-command", help="shell command writing .py files to META_HARNESS_OUTPUT")
-    run.add_argument("--proposer-model", help="model id passed to the coding agent")
-    run.add_argument("--proposer-binary", default="claude")
-    run.add_argument("--proposer-view", choices=["scores", "summary", "full"], default="full")
+    run.add_argument("--proposer-command", required=True,
+                     help="shell command writing .py files to META_HARNESS_OUTPUT")
     run.add_argument("--proposer-timeout", type=float, default=1800.0)
     run.add_argument("--cache-dir")
     run.add_argument("--no-cache", action="store_true")
     run.add_argument("--validation-timeout", type=float, default=20.0)
     run.add_argument("--task-timeout", type=float, default=600.0)
-    run.add_argument("--allow-local-shell", action="store_true",
-                     help="terminal tasks only: run model-authored commands on this machine")
-    run.add_argument("--workspace-root",
-                     help="agent tasks only: where throwaway task workspaces are created")
-    run.add_argument("--agent-bash", action="store_true",
-                     help="agent tasks only: let candidate harnesses grant the Bash tool")
-    run.add_argument("--mine-history", action="store_true",
-                     help="mine local Claude Code history into <root>/history so the proposer "
-                          "can diagnose from real sessions")
-    run.add_argument("--history-limit", type=int, default=60)
-    run.add_argument("--history-include-text", action="store_true")
-
-    learn = sub.add_parser("learn", help="turn an observed failure into a scored harness artifact")
-    learn.add_argument("--status", action="store_true", help="show staged and installed artifacts")
-    learn.add_argument("--accept", metavar="ID")
-    learn.add_argument("--reject", metavar="ID")
-    learn.add_argument("--wrong", action="store_true",
-                       help="with --reject: tombstone the signature so it is never re-proposed")
-    learn.add_argument("--limit", type=int, default=60, help="sessions of history to read")
-    learn.add_argument("--dry-run", action="store_true", help="select a target, propose nothing")
-    learn.add_argument("--max-probes", type=int, default=3,
-                       help="live replays to try, without any artifact, to find a failure that "
-                            "actually recurs before proposing against it")
-    learn.add_argument("--tasks", metavar="PATH",
-                       help="JSON task set the artifact must not regress; without it, only the "
-                            "origin replay gates retention")
-    learn.add_argument("--model", default="opus", help="model for the proposer")
-    learn.add_argument("--provider", default="claude-cli")
-
-    waste = sub.add_parser("waste", help="what wrong-direction work and repeat failure cost")
-    waste.add_argument("--this-project", action="store_true",
-                       help="only sessions whose project matches this working directory")
-    waste.add_argument("--since", default="", help="ISO date; ignore sessions older than this")
-    waste.add_argument("--limit", type=int, default=None, help="most recent N sessions")
-    waste.add_argument("--json", action="store_true", help="print the report as JSON")
-    waste.add_argument("--home", default="", help="transcript root (defaults to ~/.claude/projects)")
-
-    receipts = sub.add_parser("receipts", help="what the harness's decisions did, measured against a holdout")
-    receipts.add_argument("action", choices=["report", "export"])
-    receipts.add_argument("--json", action="store_true", help="report: print the table as JSON")
-    receipts.add_argument("--out", default="", help="export: write here instead of stdout")
     return parser
 
 
@@ -184,101 +100,13 @@ def _load_tasks(args) -> tuple[list[dict], list[dict]]:
     return split_tasks(search, args.search_fraction, args.split_seed)
 
 
-def _command_mine(args) -> int:
-    project = args.project
-    if args.this_project:
-        project = project_slug(Path.cwd())
-    elif project and ("/" in project or "\\" in project or Path(project).exists()):
-        project = project_slug(project)
-    sessions = load_sessions(project=project, limit=args.limit,
-                             include_text=args.include_text, min_turns=args.min_turns)
-    if not sessions:
-        print(json.dumps({"sessions": 0,
-                          "hint": "no transcripts found; check --project or ~/.claude/projects"},
-                         indent=2))
-        return 1
-    destination = write_history_view(sessions, Path(args.out), include_text=args.include_text)
-    report = harness_report(sessions)
-    if args.draft_tasks:
-        drafts = draft_tasks(sessions)
-        Path(args.draft_tasks).parent.mkdir(parents=True, exist_ok=True)
-        body = "\n".join(json.dumps(d) for d in drafts)
-        Path(args.draft_tasks).write_text(body + ("\n" if drafts else ""), encoding="utf-8")
-    print(json.dumps({
-        "view": str(destination),
-        "redacted": not args.include_text,
-        "sessions": report["sessions"],
-        "tool_calls": report["tool_calls"],
-        "error_rate": report["error_rate"],
-        "read_to_write_ratio": report["read_to_write_ratio"],
-        "subagent_calls": report["subagent_calls"],
-        "workflow_calls": report["workflow_calls"],
-        "skill_calls": report["skill_calls"],
-        "episode_kinds": report["episode_kinds"],
-        "top_tools": dict(list(report["tool_histogram"].items())[:8]),
-        "top_errors": dict(list(report["tool_errors"].items())[:6]),
-        "draft_tasks": args.draft_tasks,
-    }, indent=2))
-    return 0
-
-
-def _command_compare(args) -> int:
-    project = args.project
-    if args.this_project:
-        project = project_slug(Path.cwd())
-    elif project and ("/" in project or "\\" in project or Path(project).exists()):
-        project = project_slug(project)
-    sessions = load_sessions(project=project, limit=args.limit, include_text=True,
-                             min_turns=args.min_turns)
-    before = sessions_between(sessions, before=args.split)
-    after = sessions_between(sessions, since=args.split)
-    if not before or not after:
-        print(json.dumps({"error": "need sessions on both sides of --split",
-                          "before": len(before), "after": len(after)}, indent=2))
-        return 1
-    diff = compare_reports(harness_report(before), harness_report(after))
-    print(json.dumps({"split": args.split,
-                      "sessions_before": len(before), "sessions_after": len(after),
-                      **diff}, indent=2))
-    return 0
-
-
 def _command_run(args) -> int:
-    if args.allow_local_shell:
-        os.environ["META_HARNESS_ALLOW_LOCAL_SHELL"] = "1"
-    if args.agent_bash:
-        os.environ["META_HARNESS_AGENT_BASH"] = "1"
-    if args.task_type == "agent":
-        root = Path(args.workspace_root or (Path(args.root).parent / ".meta-harness-workspaces"))
-        root.mkdir(parents=True, exist_ok=True)
-        os.environ["META_HARNESS_WORKSPACE_ROOT"] = str(root.resolve())
-    if args.mine_history:
-        sessions = load_sessions(limit=args.history_limit,
-                                 include_text=args.history_include_text)
-        if sessions:
-            view = write_history_view(sessions, Path(args.root) / "history",
-                                      include_text=args.history_include_text)
-            print(f"mined {len(sessions)} session(s) of Claude Code history into {view}")
-        else:
-            print("no local Claude Code history found; continuing without it")
     search_tasks, test_tasks = _load_tasks(args)
-    if args.provider == "claude-cli":
-        from .claude_cli import ClaudeCliModel
-
-        if not ClaudeCliModel.available():
-            print("claude CLI not found on PATH. Install Claude Code, or pass "
-                  "--provider unikey with UNIKEY_API_KEY set.")
-            return 1
     base_model = model_from_environment(args.provider, args.model)
     cache_dir = Path(args.cache_dir) if args.cache_dir else Path(args.root).parent / ".meta-harness-cache"
     model = CachedModel(base_model, cache_dir, enabled=not args.no_cache)
-    if args.proposer_command:
-        proposer = CommandProposer(resolve_command(split_command(args.proposer_command)),
-                                   timeout=args.proposer_timeout)
-    else:
-        proposer = ClaudeCodeProposer(binary=args.proposer_binary, model=args.proposer_model,
-                                      view=args.proposer_view, summarizer=model,
-                                      timeout=args.proposer_timeout)
+    proposer = CommandProposer(resolve_command(split_command(args.proposer_command)),
+                               timeout=args.proposer_timeout)
     config = SearchConfig(root=args.root, iterations=args.iterations,
                           candidates_per_iteration=args.candidates,
                           validation_timeout=args.validation_timeout,
@@ -301,271 +129,6 @@ def _command_run(args) -> int:
 
 
 
-def _enforces(artifact) -> str:
-    """What the plugin will actually do with this artifact once installed - not what its payload
-    claims. A rule is enforced by the hook's matcher, which never executes the payload."""
-    origin = artifact.origin or {}
-    if artifact.type == "rule":
-        tools = ", ".join(origin.get("tools") or []) or "no tool"
-        kind = origin.get("rule_kind") or "no matcher"
-        return f"tool.check {kind} on {tools} (the payload text is description only, never executed)"
-    if artifact.type == "injection":
-        return "context attached to prompts matching its triggers"
-    return f"{artifact.type}: recorded, not enforced by any hook"
-
-def _command_learn(args) -> int:
-    store = HarnessStore(harness_home())
-
-    if args.status:
-        sessions = load_sessions(limit=args.limit, include_text=False)
-        live_signatures = {f.signature for f in
-                           merge_failures(observed_failures(), rank_failures(sessions))}
-        from .receipts import attribute, load_observations, load_receipts, summarize
-        verdicts = {str(row["artifact"]): row["verdict"] for row in summarize(attribute(
-            load_receipts(store.root), load_observations(store.root))) if row["artifact"]}
-        print(json.dumps({
-            "home": str(store.root),
-            "staged": [{"id": a.id, "type": a.type, "signature": a.signature,
-                        "enforces": _enforces(a), "scores": a.scores}
-                       for a in store.list_staged()],
-            "installed": [{"id": a.id, "type": a.type, "signature": a.signature,
-                           "receipt_verdict": verdicts.get(a.id)}
-                          for a in store.list_installed()],
-            "tombstones": sorted(store.tombstones()),
-            "retirement_candidates": [
-                {"id": a.id, "reason": reason}
-                for a, reason in retirement_candidates(store.list_installed(), live_signatures,
-                                                  verdicts=verdicts)
-            ],
-        }, indent=2))
-        return 0
-
-    if args.accept:
-        try:
-            target = store.accept(args.accept)
-        except KeyError as error:
-            print(f"cannot accept {args.accept}: {error}")
-            return 1
-        print(f"installed {args.accept} -> {target}")
-        return 0
-
-    if args.reject:
-        try:
-            target = store.reject(args.reject, wrong=args.wrong)
-        except KeyError as error:
-            print(f"cannot reject {args.reject}: {error}")
-            return 1
-        print(f"archived {args.reject} -> {target}" + (" (tombstoned)" if args.wrong else ""))
-        return 0
-
-    sessions = load_sessions(limit=args.limit, include_text=True)
-    targets = candidate_targets(sessions, store)
-    if not targets:
-        print("no uncovered failure class found")
-        return 0
-    by_session = {s.session_id: s for s in sessions}
-
-    def replays_for(failure):
-        for episode in failure.episodes:
-            session = by_session.get(episode.session_id)
-            replay = build_replay(episode, session) if session is not None else None
-            if replay:
-                yield replay
-
-    if args.dry_run:
-        # Free: selects and shows the first replayable episode, and runs nothing.
-        for failure in targets:
-            replay = next(replays_for(failure), None)
-            if replay:
-                print(f"target: {failure.signature} ({failure.count} occurrences)")
-                print(json.dumps({"signature": failure.signature, "replay": replay}, indent=2))
-                return 0
-        print("no replayable episode for any failure class")
-        return 1
-
-    # The brief's snippet gated this on hasattr(args, "root"), but the learn subparser has no
-    # --root argument, so that check is always false and confusing. Use a plain default.
-    workspace_root = Path(".meta-harness-workspaces")
-    workspace_root.mkdir(parents=True, exist_ok=True)
-
-    # Propose only against a failure a replay without any artifact actually reproduces. A replay
-    # that cannot fail would otherwise credit whatever artifact is attached to it.
-    failure = replay = None
-    probes = 0
-    for candidate in targets:
-        for candidate_replay in replays_for(candidate):
-            if probes >= args.max_probes:
-                break
-            probes += 1
-            try:
-                recurred = reproduces(candidate_replay, workspace_root)
-                outcome = {True: "reproduced", False: "did not reproduce",
-                           None: "never exercised the tool"}[recurred]
-            except AgentRunError as error:
-                recurred, outcome = None, f"could not be run ({error})"
-            origin = candidate_replay.get("_origin") or {}
-            print(f"probe {probes}/{args.max_probes}: {candidate.signature} "
-                  f"(session {str(origin.get('session', ''))[:8]}, turn {origin.get('turn')}): {outcome}")
-            if recurred:
-                failure, replay = candidate, candidate_replay
-                break
-        if failure is not None or probes >= args.max_probes:
-            break
-    if failure is None:
-        print(f"no failure reproduced within {probes} probe(s); nothing proposed")
-        return 0
-    print(f"target: {failure.signature} ({failure.count} occurrences)")
-
-    model = model_from_environment(args.provider, args.model)
-    artifact = propose_artifact(failure, replay,
-                               [a.id for a in store.list_installed()], model)
-    # workspace_root is passed explicitly to run_replay below, which passes it explicitly to
-    # prepare_workspace; nothing on this path reads it from the environment, so it is not set
-    # here. Do not reintroduce an os.environ[...] assignment for it.
-    fixed, detail = run_replay(artifact, workspace_root)
-
-    # The spec's retention gate (section 5.4) is BOTH halves: the origin replay must be fixed and
-    # the task set must not regress, with context cost as the tiebreak. The task set is optional
-    # because most repositories have none; when it is absent the second half is reported as not
-    # run rather than quietly passed, so nothing here claims more than it measured.
-    tasks: list[dict] = []
-    if args.tasks:
-        try:
-            loaded = json.loads(Path(args.tasks).read_text(encoding="utf-8"))
-            tasks = [t for t in loaded if isinstance(t, dict)] if isinstance(loaded, list) else []
-        except (OSError, ValueError) as error:
-            print(f"cannot read task set {args.tasks}: {error}")
-            return 1
-    if tasks:
-        baseline_score, baseline_context = score_task_set(AgentConfig(), tasks, workspace_root)
-        candidate_score, candidate_context = score_task_set(
-            config_with(artifact), tasks, workspace_root)
-    else:
-        baseline_score = candidate_score = 0.0
-        baseline_context = candidate_context = 0.0
-
-    verdict = decide_retention(fixed, candidate_score, baseline_score,
-                               candidate_context, baseline_context)
-    verdict["task_set"] = f"{len(tasks)} tasks" if tasks else "none supplied - not checked"
-    artifact.scores = {"origin_fixed": fixed, "retention": verdict,
-                       "task_set_score": {"baseline": baseline_score,
-                                          "candidate": candidate_score} if tasks else None,
-                       **detail}
-
-    staged = store.stage(artifact)
-    if not verdict["kept"]:
-        store.reject(artifact.id)
-        print(json.dumps({"rejected": artifact.id, "type": artifact.type,
-                          "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
-        return 0
-    print(json.dumps({"staged": artifact.id, "type": artifact.type, "path": str(staged),
-                      "enforces": _enforces(artifact),
-                      "origin_fixed": fixed, "verdict": verdict, "detail": detail}, indent=2))
-    return 0
-
-
-def _write_waste_json(report: dict) -> None:
-    """Write the report to <harness_home>/waste.json, so a first-run hook that reads it has
-    something to read: `meta-harness waste --json` alone only ever printed to stdout. Writes
-    via a temp file plus an atomic rename so a concurrent reader never sees a half-written
-    file, and fails open - a write failure here must never stop the command from printing its
-    report and exiting 0."""
-    from .harness_store import harness_home
-
-    try:
-        home = harness_home()
-        home.mkdir(parents=True, exist_ok=True)
-        target = home / "waste.json"
-        tmp = home / f".waste.json.{os.getpid()}.tmp"
-        tmp.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        os.replace(tmp, target)
-    except OSError as error:
-        print(f"warning: could not write waste.json ({error}); continuing", file=sys.stderr)
-
-
-def _command_waste(args: argparse.Namespace) -> int:
-    from .cc_history import project_slug
-    from .waste import waste_report
-
-    if hasattr(sys.stdout, "reconfigure"):   # a project name or error may not be cp1252-safe
-        sys.stdout.reconfigure(errors="replace")
-
-    project = project_slug(Path.cwd()) if args.this_project else None
-    home = Path(args.home) if args.home else None
-    report = waste_report(home=home, project=project, limit=args.limit, since=args.since)
-    _write_waste_json(report)
-
-    if args.this_project and report["sessions"] == 0:
-        # A slug with no matches is silent failure dressed up as "nothing to report" -
-        # loud on stderr so --json's stdout stays the report, verbatim, for callers that parse it.
-        print(f"no sessions found for project slug {project!r} under "
-              f"{home or 'the default transcript store'}; this can happen from a git worktree, "
-              f"whose slug does not match its main checkout. Try running without --this-project.",
-              file=sys.stderr)
-
-    if args.json:
-        print(json.dumps(report, indent=2))
-        return 0
-
-    corrections = report["corrections"]
-    print(f"sessions {report['sessions']}   tool calls {report['tool_calls']:,}")
-    print()
-    print("wrong-direction work")
-    print(f"  corrections                {corrections['count']}")
-    print(f"  calls burned before you spoke  median {corrections['median']}"
-          f"  p75 {corrections['p75']}  p90 {corrections['p90']}  max {corrections['max']}")
-    print(f"  total calls burned         {corrections['calls_burned']:,}")
-    print()
-    print("repeated identical failures")
-    print(f"  wasted retries             {report['repeats']['wasted_retries']:,}"
-          f"  (in {report['repeats']['sessions_affected']} sessions)")
-    for row in report["repeats"]["top"][:5]:
-        print(f"    {row['wasted']:5d}  {row['tool']}:{row['cause']}")
-    if report["by_project"]:
-        print()
-        print("worst projects by calls burned")
-        for row in report["by_project"][:5]:
-            print(f"    {row['calls_burned']:5d}  {row['project']}  ({row['corrections']} corrections)")
-    print()
-    print(report["caveat"])
-    return 0
-
-
-def _fmt_rate(rate) -> str:
-    return "-" if rate is None else f"{rate:.0%}"
-
-
-def _command_receipts(args) -> int:
-    from .receipts import K, MIN_EFFECT, MIN_PER_ARM, attribute, load_observations, load_receipts, summarize
-
-    home = harness_home()
-    receipts = load_receipts(home)
-    attributed = attribute(receipts, load_observations(home))
-    if args.action == "export":
-        lines = "".join(json.dumps(row, sort_keys=True) + chr(10) for row in attributed)
-        if args.out:
-            Path(args.out).write_text(lines, encoding="utf-8")
-        else:
-            sys.stdout.write(lines)
-        return 0
-    table = summarize(attributed)
-    if args.json:
-        print(json.dumps(table, indent=2))
-        return 0
-    if not table:
-        print("no receipts yet")
-        return 0
-    for row in table:
-        name = row["artifact"] or "(no artifact)"
-        print(f"{row['source']} {name}: {row['verdict']} - acted {row['acted']} "
-              f"(recurred {_fmt_rate(row['acted_rate'])}), held {row['held']} "
-              f"(recurred {_fmt_rate(row['held_rate'])})")
-    print(f"recurrence = the same failure within K={K} calls of the decision, same session; "
-          f"a verdict needs MIN_PER_ARM={MIN_PER_ARM} per arm and an effect of at least "
-          f"{MIN_EFFECT:.0%}")
-    return 0
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(list(argv) if argv is not None else None)
     if args.command == "demo":
@@ -573,28 +136,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps([r.__dict__ for r in ParetoFrontier.select(FilesystemExperience(root).results())], indent=2))
         return 0
     if args.command == "models":
-        if args.provider == "claude-cli":
-            from .claude_cli import ClaudeCliModel
-
-            if not ClaudeCliModel.available():
-                print("claude CLI not found on PATH; install Claude Code or use --provider unikey")
-                return 1
-            print("\n".join(CLAUDE_CLI_MODELS))
-            return 0
         print("\n".join(list_unikey_models()))
         return 0
-    if args.command == "mine":
-        return _command_mine(args)
-    if args.command == "compare":
-        return _command_compare(args)
     if args.command == "run":
         return _command_run(args)
-    if args.command == "learn":
-        return _command_learn(args)
-    if args.command == "waste":
-        return _command_waste(args)
-    if args.command == "receipts":
-        return _command_receipts(args)
     experience = FilesystemExperience(args.root)
     frontier_file = experience.root / "frontier.json"
     print(json.dumps({
