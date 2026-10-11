@@ -106,9 +106,6 @@ def test_error_entry_reached_via_chat(tmp_path):
 
 def test_malformed_line_names_file_and_line(tmp_path):
     path = tmp_path / "bad.jsonl"
-    path.write_text('{"text": "ok"}
-
-{not json}
-', encoding="utf-8")
+    path.write_text('{"text": "ok"}\n\n{not json}\n', encoding="utf-8")
     with pytest.raises(ValueError, match=r"bad\.jsonl.*line 3"):
         ScriptedModel(path)
