@@ -13,7 +13,7 @@
 | Dataset loaders | `meta_harness/loaders/` | `NAME`, `DOMAIN`, `fetch(cache_dir, http) -> dict[str, Path]` |
 | Optimizers | `meta_harness/optimizers/` | `NAME`, `build(ctx: OptimizerContext) -> Proposer` |
 
-**Tech Stack:** Python 3.10+ stdlib only (`urllib`, `zipfile`, `ctypes`, `difflib`, `sqlite3` allowed); pytest. Docker CLI optional at runtime.
+**Tech Stack:** Python 3.11+ stdlib only (`urllib`, `zipfile`, `ctypes`, `difflib`, `sqlite3` allowed); pytest. Docker CLI optional at runtime.
 
 **Spec:** `docs/superpowers/specs/2026-10-11-standalone-engine-design.md`. Evidence: `.superpowers/pivot/paper-gap.md` (gap rows referenced as G1..G23, ranked gaps as R1..R10).
 

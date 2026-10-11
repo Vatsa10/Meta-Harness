@@ -24,14 +24,9 @@ import json
 import os
 import re
 import subprocess
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # Python 3.10: same API from the tomli backport
-    import tomli as tomllib
 
 NAME = "terminalbench"
 DOMAIN = "terminal"
