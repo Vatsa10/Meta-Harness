@@ -1,18 +1,17 @@
 """Out-of-process interface validation for LLM-written candidate harnesses.
 
-Candidate code is untrusted in the "may hang or explode" sense, not the security sense: it
-runs with the same privileges as the search. The subprocess exists so an infinite loop or an
-interpreter-killing import cannot take the outer loop down with it.
+Validation reuses the evaluation runner (`meta_harness.isolation`): the child has no API keys
+in its environment and runs under memory/CPU limits, so an infinite loop, a memory blow-up or
+an interpreter-killing import cannot take the outer loop down. In `process` mode it still runs
+as the same OS user (see isolation.py for the remaining gap); `docker` mode closes it.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
-import os
-import subprocess
 import sys
-import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -64,42 +63,39 @@ def _check(path: Path, probe: Mapping[str, Any] | None = None, run: bool = True)
 
 def validate_in_subprocess(source: Path | str, timeout: float = 20.0,
                            probe: Mapping[str, Any] | None = None,
-                           probe_dir: Path | str | None = None, import_only: bool = False) -> None:
-    """Import and smoke-run a candidate in a child process. Raises HarnessValidationError.
+                           probe_dir: Path | str | None = None, import_only: bool = False,
+                           isolation: str = "process", memory_mb: int = 2048, cpu_seconds: int = 600,
+                           image: str | None = None) -> None:
+    """Import and smoke-run a candidate in an isolated child. Raises HarnessValidationError.
 
-    `probe` is a real task row (targets removed by the caller); it is written to a temp JSON
-    file and handed to the child as argv[2]. Without it the legacy {"input": "validation"} row
-    is used. `probe_dir` keeps that temp file inside the run directory. `import_only` checks the
-    import and the harness interface without running it (domains whose harnesses need a task
-    container, like terminal, cannot smoke-run on the host).
+    Uses the same runner as evaluation (`isolation.IsolatedHarness`): no API keys in the child's
+    environment, memory/CPU limits, model calls answered by this process with a fixed
+    "validation-response". `probe` is a real task row (targets removed by the caller); without
+    it the legacy {"input": "validation"} row is used. `probe_dir` is accepted for compatibility
+    (the probe now travels over the protocol, no temp file). `import_only` checks the import and
+    the harness interface without running it (domains whose harnesses need a task container).
+    `isolation="none"` still uses a child process (validation is never in-process), but with
+    the parent environment passed through, as the evaluation itself would see it.
     """
     from .core import HarnessValidationError  # local import breaks the import cycle
+    from .isolation import DEFAULT_IMAGE, IsolatedHarness, IsolationError, IsolationTimeout
 
-    source = Path(source)
-    argv = [sys.executable, "-m", "meta_harness.sandbox", str(source)]
-    probe_file = None
-    if import_only:
-        argv.append(IMPORT_ONLY)
-    elif probe is not None:
-        handle, probe_file = tempfile.mkstemp(suffix=".json", prefix="probe-",
-                                             dir=str(probe_dir) if probe_dir else None)
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(dict(probe), stream, ensure_ascii=False, default=str)
-        argv.append(probe_file)
+    mode = "docker" if isolation == "docker" else "process"
+    started = time.monotonic()
+    child = IsolatedHarness(Path(source), mode, memory_mb, cpu_seconds, image or DEFAULT_IMAGE,
+                            inherit_env=isolation == "none")
     try:
-        completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                                   encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
+        child.start(timeout=timeout)
+        if import_only:
+            return
+        remaining = max(0.0, timeout - (time.monotonic() - started))
+        child.run(dict(probe) if probe is not None else dict(LEGACY_PROBE), None, None, timeout=remaining)
+    except IsolationTimeout:
         raise HarnessValidationError(f"validation timed out after {timeout}s") from None
+    except IsolationError as exc:
+        raise HarnessValidationError(str(exc)) from None
     finally:
-        if probe_file:
-            try:
-                os.unlink(probe_file)
-            except OSError:
-                pass
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        raise HarnessValidationError(detail[-1] if detail else f"validation exited {completed.returncode}")
+        child.close()
 
 
 def main(argv: list[str]) -> int:

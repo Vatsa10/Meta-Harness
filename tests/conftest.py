@@ -27,3 +27,14 @@ def isolated_env(monkeypatch, tmp_path_factory):
             monkeypatch.delenv(name, raising=False)
     missing = tmp_path_factory.getbasetemp() / "no-such-dir" / ".env"
     monkeypatch.setenv("META_HARNESS_ENV_FILE", str(missing))
+
+
+@pytest.fixture(autouse=True)
+def fast_isolation(request, monkeypatch):
+    """CandidateEvaluator defaults to in-process in tests (speed). test_isolation.py keeps the
+    production default (a limited child process); the search CLI passes --isolation explicitly
+    (default process), so CLI tests stay end-to-end through the child."""
+    if request.node.module.__name__.endswith("test_isolation"):
+        return
+    from meta_harness import core
+    monkeypatch.setattr(core, "DEFAULT_ISOLATION", "none")
