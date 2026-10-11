@@ -227,7 +227,13 @@ class AgentProposer:
                                    domain=self.domain, domain_notes=self.domain_notes,
                                    max_tool_calls=self.max_tool_calls, objective=self.objective,
                                    view_note=VIEW_NOTES.get(self.view, VIEW_NOTES["full"]))
-            paths.append(self._propose(sandbox, output, name, prompt, splits, root))
+            try:
+                paths.append(self._propose(sandbox, output, name, prompt, splits, root))
+            except (ProposerBudgetExceeded, ProposerStuck, ProposerTruncated) as exc:
+                # One proposal giving up must not discard its siblings' written candidates.
+                (output / f"{name}.error").write_text(repr(exc), encoding="utf-8")
+                if index == count - 1 and not paths:
+                    raise
         return paths
 
     def _propose(self, sandbox: ToolSandbox, output: Path, name: str, prompt: str,

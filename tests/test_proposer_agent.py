@@ -257,3 +257,18 @@ def test_proposer_is_told_to_write_before_the_budget_runs_out(tmp_path):
     events = [e for e in log if e.get("event") == "budget_reminder"]
     assert len(events) == 1 and events[0]["left"] == 3
     assert (root / "candidates" / "iteration-0001-00" / "harness.py").is_file()
+
+
+def test_a_failed_sibling_proposal_keeps_the_written_candidate(tmp_path):
+    seed = tmp_path / "seed.py"
+    seed.write_text(SEED, encoding="utf-8")
+    rows = [{"tool_calls": [WRITE]},
+            *({"tool_calls": [{"name": "list", "arguments": {"path": "candidates" + "/" * i}}]}
+              for i in range(1, 4))]
+    proposer = AgentProposer(scripted(tmp_path, rows), max_tool_calls=3)
+    config = SearchConfig(root=tmp_path / "store", iterations=1, candidates_per_iteration=2)
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "vehicle"), proposer).run(
+        [seed], [{"input": "apple", "label": "fruit"}], [{"input": "pear", "label": "fruit"}])
+    assert (config.root / "candidates" / "iteration-0001-00" / "harness.py").is_file()
+    assert "ProposerBudgetExceeded" in (proposals(config.root) / "candidate-01.error").read_text(encoding="utf-8")
+    assert not (proposals(config.root) / "proposer.error").exists()
