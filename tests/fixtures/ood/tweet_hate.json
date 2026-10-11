@@ -1,0 +1,50 @@
+{
+ "kind": "hf",
+ "features": [
+  {
+   "feature_idx": 0,
+   "name": "text",
+   "type": {
+    "dtype": "string",
+    "_type": "Value"
+   }
+  },
+  {
+   "feature_idx": 1,
+   "name": "label",
+   "type": {
+    "names": [
+     "non-hate",
+     "hate"
+    ],
+    "_type": "ClassLabel"
+   }
+  }
+ ],
+ "rows": [
+  {
+   "row_idx": 0,
+   "row": {
+    "text": "@user , you are correct that Reid certainly is a weasel. Sadly, we've got our own weasels; @user Sen McConnell & @user .The corrupt Mueller investigation w/be STOPPED if those 3 did their jobs.#MAGA #KAG #POTUS #Trump #NEWS #VoteRed #NoDACA #USA",
+    "label": 0
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 1,
+   "row": {
+    "text": "Whoever just unfollowed me you a bitch",
+    "label": 1
+   },
+   "truncated_cells": []
+  },
+  {
+   "row_idx": 2,
+   "row": {
+    "text": "@user @user Those People Invaded Us!!! They DO NOT BELING HERE & HAVE NO RIGHTS! Its #AmericaFIRST! Open Your House To Them If Your That IGNORANT! & Yes Im A #Christian Too! #NODACA!",
+    "label": 1
+   },
+   "truncated_cells": []
+  }
+ ]
+}

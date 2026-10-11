@@ -1,0 +1,10 @@
+{
+ "kind": "fpb",
+ "member": "FinancialPhraseBank-v1.0/Sentences_AllAgree.txt",
+ "lines": [
+  "According to Gran , the company has no plans to move all production to Russia , although that is where the company is growing .@neutral",
+  "For the last quarter of 2010 , Componenta 's net sales doubled to EUR131m from EUR76m for the same period a year earlier , while it moved to a zero pre-tax profit from a pre-tax loss of EUR7m .@positive",
+  "Jan. 6 -- Ford is struggling in the face of slowing truck and SUV sales and a surfeit of up-to-date , gotta-have cars .@negative",
+  "In the third quarter of 2010 , net sales increased by 5.2 % to EUR 205.5 mn , and operating profit by 34.9 % to EUR 23.5 mn .@positive"
+ ]
+}
