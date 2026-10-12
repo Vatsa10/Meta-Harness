@@ -90,6 +90,32 @@ def _image_name(task_id: str, version: str) -> str:
     return f"meta-harness-tb/{re.sub(r'[^a-z0-9_.-]', '-', task_id.lower())}:{version}"
 
 
+def _dockerfile_workdir(context: Path, default: str = "/app") -> str:
+    """The last absolute `WORKDIR` in the task's Dockerfile. The container is started with
+    `-w <workdir>`, which overrides the image's own WORKDIR, so the two must match: a few TB2
+    tasks use /app/<project> or /workspace, and their tests and solutions rely on that cwd."""
+    path = Path(context) / "Dockerfile"
+    found = default
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"^\s*WORKDIR\s+(\S+)\s*$", line, flags=re.IGNORECASE)
+            if match and match.group(1).startswith("/"):
+                found = match.group(1).rstrip("/") or "/"
+    return found
+
+
+def _check_line_endings(paths: Iterable[Path]) -> None:
+    """Refuse shell scripts with CRLF line endings (a Windows checkout with core.autocrlf): bash
+    fails on them inside the Linux container and every task would silently score 0."""
+    for root in paths:
+        root = Path(root)
+        items = sorted(root.rglob("*.sh")) if root.is_dir() else [root] if root.is_file() else []
+        for path in items:
+            if b"\r\n" in path.read_bytes():
+                raise ValueError(f"{path} has CRLF line endings; re-clone the TerminalBench checkout "
+                                 "with `git clone -c core.autocrlf=false ...`")
+
+
 def read_task(task_dir: Path, version: str = DEFAULT_VERSION) -> dict[str, Any] | None:
     task_dir = Path(task_dir)
     task_id = task_dir.name
@@ -121,7 +147,8 @@ def read_task(task_dir: Path, version: str = DEFAULT_VERSION) -> dict[str, Any] 
         return None
     if not row["instruction"].strip():
         return None
-    return {"id": task_id, **row, "workdir": "/app", "expected_outputs": _expected_outputs(tests_dir),
+    _check_line_endings([tests_dir, task_dir / "run-tests.sh"])
+    return {"id": task_id, **row, "workdir": _dockerfile_workdir(Path(row["dockerfile_dir"])), "expected_outputs": _expected_outputs(tests_dir),
             "dataset": NAME, "dataset_version": version}
 
 

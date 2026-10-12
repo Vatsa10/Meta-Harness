@@ -180,7 +180,7 @@ def _tb_checkout(root: Path) -> Path:
         "instruction: |-\n  Create /app/hello.txt\n  containing Hello.\ndifficulty: easy\n"
         "max_agent_timeout_sec: 300\n", encoding="utf-8")
     (yaml_task / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
-    (yaml_task / "run-tests.sh").write_text("pytest\n", encoding="utf-8")
+    (yaml_task / "run-tests.sh").write_bytes(b"pytest\n")
     (yaml_task / "tests" / "test_outputs.py").write_text(
         "def test_it():\n    assert open('/app/hello.txt').read() == 'Hello, world from TB!'\n", encoding="utf-8")
     toml_task = root / "tasks" / "sort-numbers"
@@ -190,7 +190,7 @@ def _tb_checkout(root: Path) -> Path:
         "[agent]\ntimeout_sec = 600\n[verifier]\ntimeout_sec = 120\n[environment]\nallow_internet = true\n",
         encoding="utf-8")
     (toml_task / "instruction.md").write_text("Sort the numbers in /app/in.txt.\n", encoding="utf-8")
-    (toml_task / "tests" / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n", encoding="utf-8")
+    (toml_task / "tests" / "test.sh").write_bytes(b"echo 1 > /logs/verifier/reward.txt\n")
     return root
 
 
@@ -308,6 +308,36 @@ def test_toml_task_network_defaults_to_allowed(tmp_path: Path):
     assert terminalbench.read_task(task)["network"] is True
     (task / "task.toml").write_text("[environment]\nallow_internet = false\n", encoding="utf-8")
     assert terminalbench.read_task(task)["network"] is False
+
+
+def _toml_task(root: Path) -> Path:
+    task = root / "t1"
+    (task / "tests").mkdir(parents=True)
+    (task / "environment").mkdir()
+    (task / "task.toml").write_text("[agent]\ntimeout_sec = 60\n", encoding="utf-8")
+    (task / "instruction.md").write_text("do it\n", encoding="utf-8")
+    return task
+
+
+def test_workdir_follows_dockerfile(tmp_path: Path):
+    # Live finding (TB2 fix-git, WORKDIR /app/personal-site): forcing `-w /app` made the
+    # reference solution's git commands run outside the repo, so it scored 0.
+    task = _toml_task(tmp_path)
+    assert terminalbench.read_task(task)["workdir"] == "/app"  # no Dockerfile: default
+    (task / "environment" / "Dockerfile").write_text(
+        "FROM python:3.13\nWORKDIR /app\nRUN true\nWORKDIR /app/personal-site/\n", encoding="utf-8")
+    assert terminalbench.read_task(task)["workdir"] == "/app/personal-site"
+
+
+def test_crlf_test_scripts_are_refused(tmp_path: Path):
+    # Live finding: a Windows checkout with core.autocrlf made tests/test.sh CRLF; bash failed in
+    # the container and every task silently scored 0.
+    task = _toml_task(tmp_path)
+    (task / "tests" / "test.sh").write_bytes(b"#!/bin/bash\r\necho 1\r\n")
+    with pytest.raises(ValueError, match="CRLF"):
+        terminalbench.read_task(task)
+    (task / "tests" / "test.sh").write_bytes(b"#!/bin/bash\necho 1\n")
+    assert terminalbench.read_task(task)["id"] == "t1"
 
 
 # --------------------------------------------------------------------------- tamper checks
