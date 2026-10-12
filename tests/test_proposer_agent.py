@@ -215,3 +215,60 @@ def test_prompt_template_renders_without_leftovers():
     assert "test split is not available" in text and "write_candidate" in text
     with pytest.raises(KeyError):
         render_prompt("iteration {iteration} {missing}", iteration=1)
+
+
+def test_grep_on_a_missing_path_is_an_error_not_no_matches(tmp_path):
+    root, _ = run_search(tmp_path, [
+        {"tool_calls": [{"name": "grep", "arguments": {"pattern": "reward",
+                                                       "path": "candidates/initial-0000/nope.jsonl"}}]},
+        {"tool_calls": [WRITE]},
+    ])
+    log = tool_records(read_log(root))
+    assert log[0]["ok"] is False
+
+
+def test_seed_view_prompt_says_traces_are_absent(tmp_path):
+    seen = []
+
+    class Spy:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def chat(self, system, messages, tools, **kwargs):
+            seen.append(messages[0]["content"])
+            return self.inner.chat(system, messages, tools, **kwargs)
+
+    seed = tmp_path / "seed.py"
+    seed.write_text(SEED, encoding="utf-8")
+    proposer = AgentProposer(Spy(scripted(tmp_path, [{"tool_calls": [WRITE]}])), view="seed",
+                             max_tool_calls=5)
+    config = SearchConfig(root=tmp_path / "store", iterations=1)
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "vehicle"), proposer).run(
+        [seed], [{"input": "apple", "label": "fruit"}], [{"input": "pear", "label": "fruit"}])
+    assert "traces.jsonl, proposer_reasoning.md and summary.md are absent" in seen[0]
+    assert (config.root / "candidates" / "iteration-0001-00" / "harness.py").is_file()
+
+
+def test_proposer_is_told_to_write_before_the_budget_runs_out(tmp_path):
+    reads = [{"tool_calls": [{"name": "list", "arguments": {"path": f"candidates{'/' * i}"}}]}
+             for i in range(1, 8)]
+    root, _ = run_search(tmp_path, [*reads, {"tool_calls": [WRITE]}], max_tool_calls=10)
+    log = read_log(root)
+    events = [e for e in log if e.get("event") == "budget_reminder"]
+    assert len(events) == 1 and events[0]["left"] == 3
+    assert (root / "candidates" / "iteration-0001-00" / "harness.py").is_file()
+
+
+def test_a_failed_sibling_proposal_keeps_the_written_candidate(tmp_path):
+    seed = tmp_path / "seed.py"
+    seed.write_text(SEED, encoding="utf-8")
+    rows = [{"tool_calls": [WRITE]},
+            *({"tool_calls": [{"name": "list", "arguments": {"path": "candidates" + "/" * i}}]}
+              for i in range(1, 4))]
+    proposer = AgentProposer(scripted(tmp_path, rows), max_tool_calls=3)
+    config = SearchConfig(root=tmp_path / "store", iterations=1, candidates_per_iteration=2)
+    SearchRunner(config, CandidateEvaluator(lambda p, **_: "vehicle"), proposer).run(
+        [seed], [{"input": "apple", "label": "fruit"}], [{"input": "pear", "label": "fruit"}])
+    assert (config.root / "candidates" / "iteration-0001-00" / "harness.py").is_file()
+    assert "ProposerBudgetExceeded" in (proposals(config.root) / "candidate-01.error").read_text(encoding="utf-8")
+    assert not (proposals(config.root) / "proposer.error").exists()

@@ -282,6 +282,11 @@ Caveats:
 - These numbers can't be compared with the paper's Table 2.
 - The Best-of-N comparison is inconclusive: it produced 0 candidates under the 20-tool-call cap.
 
+Medium comparison, 2026-10-11 ([docs/results/2026-10-11-medium.md](docs/results/2026-10-11-medium.md)):
+100 search / 100 test examples, one finished seed. Meta-Harness 0.61 test against 0.53 for Best-of-N
+(McNemar p = 0.039), but Best-of-N proposed nothing in that run because of two proposer bugs, since
+fixed. The fixed reruns stopped when the OpenAI credits ran out, so the comparison is unresolved.
+
 ## Roadmap and limits
 
 Not implemented:

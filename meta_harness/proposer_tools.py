@@ -257,6 +257,8 @@ class ToolSandbox:
         except re.error as exc:
             raise ToolRefused(f"bad regex: {exc}") from None
         start = self.resolve(path)
+        if not start.exists():  # "(no matches)" here would send the proposer hunting for absent files
+            raise ToolRefused(f"no such file or directory: {path}")
         candidates: list[Path] = []
         if start.is_file():
             candidates.append(start)

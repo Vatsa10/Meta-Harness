@@ -42,7 +42,22 @@ TRUNCATED = "error: your output was truncated - call one tool with smaller argum
 BATCH_POINTER = (f"error: the results of this turn exceeded {TURN_RESULT_TOKENS} tokens; this result "
                  f"was dropped - narrow the request (smaller limit, narrower path or pattern)")
 SPLIT_DENIED = "error: the held-out test split is not available to the proposer"
-_DEFAULTS = {"domain_notes": ""}
+REMIND_BUDGET = ("Reminder: {left} tool calls remain for this candidate. Stop investigating and call "
+                 "write_candidate now with your best hypothesis.")
+VIEW_NOTES = {
+    "full": "Every file in the layout below is present.",
+    "scores": "This view holds only run.json, frontier.json and, per candidate, harness.py and "
+              "scores.json. traces.jsonl, proposer_reasoning.md and summary.md are absent: do not "
+              "list, read or grep for them. Form your hypothesis from the source and the scores.",
+    "summary": "This view holds only run.json, frontier.json and, per candidate, harness.py, "
+               "scores.json and summary.md. traces.jsonl and proposer_reasoning.md are absent: do "
+               "not list, read or grep for them.",
+    "seed": "This view holds only run.json, frontier.json and the seed candidates (initial-*), each "
+            "with harness.py and scores.json. traces.jsonl, proposer_reasoning.md and summary.md "
+            "are absent: do not list, read or grep for them. Read the seeds' source and scores, "
+            "then write.",
+}
+_DEFAULTS = {"domain_notes": "", "view_note": VIEW_NOTES["full"]}
 
 
 class _Strict(dict):
@@ -210,8 +225,15 @@ class AgentProposer:
             sandbox = ToolSandbox(Path(view_root), output, forbidden)
             prompt = render_prompt(template, iteration=iteration, count=count, index=index,
                                    domain=self.domain, domain_notes=self.domain_notes,
-                                   max_tool_calls=self.max_tool_calls, objective=self.objective)
-            paths.append(self._propose(sandbox, output, name, prompt, splits, root))
+                                   max_tool_calls=self.max_tool_calls, objective=self.objective,
+                                   view_note=VIEW_NOTES.get(self.view, VIEW_NOTES["full"]))
+            try:
+                paths.append(self._propose(sandbox, output, name, prompt, splits, root))
+            except (ProposerBudgetExceeded, ProposerStuck, ProposerTruncated) as exc:
+                # One proposal giving up must not discard its siblings' written candidates.
+                (output / f"{name}.error").write_text(repr(exc), encoding="utf-8")
+                if index == count - 1 and not paths:
+                    raise
         return paths
 
     def _propose(self, sandbox: ToolSandbox, output: Path, name: str, prompt: str,
@@ -227,6 +249,8 @@ class AgentProposer:
         used = 0
         length_stops = 0
         streak: dict[str, Any] = {"key": None, "n": 0, "fail": 0, "reminded": False}
+        budget_reminded = False
+        warn_at = max(3, self.max_tool_calls // 5)  # calls left when the proposer is told to write
         pending: list[ToolCall] = []
 
         def close(calls: Sequence[ToolCall], text: str, step: int) -> None:
@@ -336,6 +360,11 @@ class AgentProposer:
                 if written is not None:
                     stop_reason = "done"
                     return written
+                left = self.max_tool_calls - used
+                if not budget_reminded and 0 < left <= warn_at:
+                    budget_reminded = True
+                    log.write({"event": "budget_reminder", "role": "event", "step": step, "left": left})
+                    reminder = "\n".join(filter(None, [reminder, REMIND_BUDGET.format(left=left)]))
                 if reminder:
                     messages.append({"role": "user", "content": reminder})
             stop_reason = "step_limit"

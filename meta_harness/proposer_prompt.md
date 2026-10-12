@@ -10,7 +10,7 @@ that tests that hypothesis.
 You work through four tools: `list`, `read`, `grep` and `write_candidate`. Every path is a
 relative POSIX path inside this directory, and you may only read inside this directory. The
 held-out test split is not available here and every attempt to reach it is refused and recorded.
-Some files may be deliberately absent in this view; do not go looking for them elsewhere.
+{view_note} Do not go looking for absent files elsewhere.
 
 You have at most {max_tool_calls} tool calls for this candidate. Every model turn and every tool
 call counts against that budget. You may issue up to 8 read-only calls (`list`, `read`, `grep`)
