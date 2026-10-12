@@ -386,3 +386,12 @@ def test_recorded_live_response_parses_one_list_call(fixture):
     assert [(c.name, c.arguments) for c in turn.tool_calls] == [("list", {"path": "."})]
     assert turn.stop_reason == "tool_use"
     assert turn.usage.input > 0 and turn.usage.output > 0
+
+
+def test_429_out_of_credits_is_not_retried():
+    body = b'{"error": {"type": "insufficient_quota", "code": "credit_balance_exhausted"}}'
+    quota = urllib.error.HTTPError("http://x", 429, "err", {}, io.BytesIO(body))
+    client, calls, sleeps = _client([quota, OK])
+    with pytest.raises(providers.ProviderError, match="QUOTA_EXHAUSTED"):
+        client.post("http://x", {}, {})
+    assert len(calls) == 1 and sleeps == []

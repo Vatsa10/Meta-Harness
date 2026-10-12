@@ -59,6 +59,9 @@ class RetryPolicy:
     attempts: int = 4
 
 
+QUOTA_EXHAUSTED = ("insufficient_quota", "credit_balance_exhausted", "insufficient_user_quota")
+
+
 class _Retryable(Exception):
     """A provider failure of a retryable class: EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT."""
 
@@ -114,6 +117,9 @@ class _HttpClient:
         except urllib.error.HTTPError as error:
             body_text = error.read().decode("utf-8", errors="replace")
             message = f"HTTP {error.code}: {body_text[:1000]}"
+            if error.code == 429 and any(code in body_text for code in QUOTA_EXHAUSTED):
+                # Out of credits, not throttled: retrying only burns time on every call.
+                raise ProviderError(f"QUOTA_EXHAUSTED: {message}", status=error.code) from error
             if error.code == 429:
                 raise _Retryable("RATE_LIMIT", message, _retry_after(error.headers.get("Retry-After")
                                                                    if error.headers else None),
