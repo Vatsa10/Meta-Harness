@@ -196,3 +196,14 @@ in `.superpowers/pivot/refs-*.md`.
   `py_compile` diagnostics in seed edit tools; cost per task and an optional context-window sweep in
   reports; up to 8 read-only proposer calls answered in one turn; TerminalBench dataset version is
   a loader parameter recorded in `run.json`.
+- **From harness2** (google-research/harness2, Apache-2.0; notes `refs-harness2.md`; code ports
+  listed in `NOTICE`): (1) grader-verdict and held-out leak tripwire on the proposer's context and
+  on candidate source; (2) budget ledger: one uniquely labelled entry per evaluation and proposer
+  call with tokens and cost, `run.json` counts checked against it exactly and against the
+  equal-budget cap (`BudgetError`); (3) a short mission-pointer proposer prompt that names the
+  evidence files instead of inlining them; (4) a content-addressed proposer-call cache keyed on
+  every experience-view file; (5) distilled lesson records `{cue, lesson, evidence, confidence}`
+  for cross-task transfer; (6) anonymised, seeded-shuffle candidate ids for LLM judging; (7) an
+  invalid proposal retried once with its validation error, then the parent kept, and no-op
+  candidates (equal `ast.dump` to an existing one) rejected as `rejected_noop` without evaluation;
+  (8) a diversity metric across candidates.

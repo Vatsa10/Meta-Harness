@@ -1,0 +1,18 @@
+Meta-Harness
+A standalone, stdlib-only implementation of "Meta-Harness: End-to-End Optimization of Model
+Harnesses" (arXiv 2603.28052).
+
+Portions adapted from google-research/harness2 (Apache-2.0)
+https://github.com/google-research/harness2
+Copyright 2026 Google LLC. Licensed under the Apache License, Version 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). Adapted code carries a header comment naming its
+source file:
+- meta_harness/core.py: budget ledger (Ledger, BudgetError), from harness2/core/ledger.py
+
+Designs re-implemented in stdlib Python (designs only, no code copied):
+- soketlabs/loop (https://github.com/soketlabs/loop): proposer loop, tool output bounds,
+  provider layer, Terminus-style seeds
+- rivet-dev/rivet (https://github.com/rivet-dev/rivet): resumable runs, sandbox protocol
+- truefoundry/trueforge (https://github.com/truefoundry/trueforge): proposer loop, tool output
+  bounds, provider layer, benchmark runner, Terminus-style seeds
+- keel (MIT): candidate receipts, crash repair, retries, redaction, read window
