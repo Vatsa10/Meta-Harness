@@ -157,6 +157,21 @@ class Budget:
         for key in ("cache_read", "cache_write", "reasoning"):
             self.proposer_usage[key] += int(delta.get(key, 0) or 0)
 
+    def remove_run(self, entry: Mapping[str, Any]) -> None:
+        """Undo one evaluation `add_run` from its ledger entry (a torn step that is evaluated again)."""
+        if entry.get("split") == "search":
+            self.harness_evaluations -= 1
+        else:
+            self.test_evaluations -= 1
+        self.model_calls -= int(entry.get("calls", 0) or 0)
+        self.prompt_tokens -= int(entry.get("input_tokens", 0) or 0)
+        self.completion_tokens -= int(entry.get("output_tokens", 0) or 0)
+        self.train_prompt_tokens -= int(entry.get("train_prompt_tokens", 0) or 0)
+        self.model_usage["input"] -= int(entry.get("input_tokens", 0) or 0)
+        self.model_usage["output"] -= int(entry.get("output_tokens", 0) or 0)
+        for key in ("cache_read", "cache_write", "reasoning"):
+            self.model_usage[key] -= int(entry.get(key, 0) or 0)
+
     def price(self, model: str | None, proposer_model: str | None,
               prices: Mapping[str, Any] | None = None) -> float | None:
         """Billed USD for both models, or None when any model that was used has no known price.
@@ -174,6 +189,115 @@ class Budget:
                 return None
             total += cost
         return total
+
+
+# Adapted from google-research/harness2 (Apache-2.0), harness2/core/ledger.py
+class BudgetError(AssertionError):
+    """The ledger disagrees with the run's budget counts, or a label was recorded twice."""
+
+
+def _entry_usd(model: str | None, usage: Mapping[str, int], prices: Mapping[str, Any] | None) -> float | None:
+    if not model:
+        return None
+    try:
+        from .chat_types import Usage
+        from .providers import cost_usd, price_for
+
+        return cost_usd(Usage(**{k: int(usage.get(k, 0) or 0) for k in USAGE_KEYS}), price_for(model, prices))
+    except Exception:  # noqa: BLE001 - an unpriced entry is recorded with usd None
+        return None
+
+
+class Ledger:
+    """Every evaluation and proposer call of a run, one labelled entry each, as it happens.
+
+    Labels are unique: recording one twice raises BudgetError, because a repeated label means two
+    steps wrote the same run id and one count would silently stand for work that never happened.
+    `verify` checks that the entries add up exactly to the Budget written in run.json."""
+
+    def __init__(self, entries: Iterable[Mapping[str, Any]] = ()):
+        self.entries: list[dict[str, Any]] = []
+        self._labels: set[str] = set()
+        for entry in entries:
+            self._add(dict(entry))
+
+    def _add(self, entry: dict[str, Any]) -> None:
+        label = str(entry["label"])
+        if label in self._labels:
+            raise BudgetError(f"duplicate ledger label {label!r}: one step was recorded twice")
+        self._labels.add(label)
+        self.entries.append(entry)
+
+    def __contains__(self, label: str) -> bool:
+        return label in self._labels
+
+    def evaluation(self, candidate_id: str, split: str, repeat: int, metrics: Mapping[str, Any],
+                   attempt: int | None = None, usd: float | None = None) -> dict[str, Any]:
+        tag = split if attempt is None else f"{split}{attempt}"
+        entry = {"kind": "evaluation", "label": f"eval:{candidate_id}:{tag}:r{repeat}",
+                 "candidate": candidate_id, "split": split, "repeat": repeat, "attempt": attempt,
+                 "calls": int(metrics.get("model_calls", 0) or 0),
+                 "input_tokens": int(metrics.get("prompt_tokens", 0) or 0),
+                 "output_tokens": int(metrics.get("completion_tokens", 0) or 0),
+                 "train_prompt_tokens": int(metrics.get("train_prompt_tokens", 0) or 0),
+                 **{key: int(metrics.get(f"{key}_tokens", 0) or 0)
+                    for key in ("cache_read", "cache_write", "reasoning")},
+                 "usd": usd}
+        self._add(entry)
+        return entry
+
+    def proposer(self, label: str, delta: Mapping[str, Any], usd: float | None = None) -> dict[str, Any]:
+        entry = {"kind": "proposer", "label": f"proposer:{label}",
+                 "calls": int(delta.get("calls", 0) or 0),
+                 "input_tokens": int(delta.get("input_tokens", 0) or 0),
+                 "output_tokens": int(delta.get("output_tokens", 0) or 0),
+                 **{key: int(delta.get(key, 0) or 0) for key in ("cache_read", "cache_write", "reasoning")},
+                 "usd": usd}
+        self._add(entry)
+        return entry
+
+    def attempts(self, prefix: str) -> int:
+        return sum(1 for label in self._labels if label == prefix or label.startswith(prefix + "#"))
+
+    def forget(self, keep: Callable[[Mapping[str, Any]], bool]) -> list[dict[str, Any]]:
+        """Drop the entries `keep` rejects (a torn step that runs again); returns them."""
+        dropped = [e for e in self.entries if not keep(e)]
+        self.entries = [e for e in self.entries if keep(e)]
+        self._labels = {e["label"] for e in self.entries}
+        return dropped
+
+    def totals(self) -> dict[str, Any]:
+        evals = [e for e in self.entries if e["kind"] == "evaluation"]
+        props = [e for e in self.entries if e["kind"] == "proposer"]
+        priced = [e for e in self.entries if e.get("calls")]
+        usd = None if any(e.get("usd") is None for e in priced) else round(sum(e["usd"] for e in priced), 6)
+        return {"entries": len(self.entries),
+                "harness_evaluations": sum(1 for e in evals if e["split"] == "search"),
+                "test_evaluations": sum(1 for e in evals if e["split"] != "search"),
+                "model_calls": sum(e["calls"] for e in evals),
+                "prompt_tokens": sum(e["input_tokens"] for e in evals),
+                "completion_tokens": sum(e["output_tokens"] for e in evals),
+                "proposer_invocations": len(props),
+                "proposer_calls": sum(e["calls"] for e in props),
+                "proposer_input_tokens": sum(e["input_tokens"] for e in props),
+                "proposer_output_tokens": sum(e["output_tokens"] for e in props),
+                "usd": usd}
+
+    def verify(self, budget: "Budget", cap: int | None = None) -> None:
+        """Raise BudgetError unless the Budget counts equal the ledger exactly and stay within `cap`."""
+        totals = self.totals()
+        problems = [f"{key}: run.json {getattr(budget, key)} != ledger {totals[key]}"
+                    for key in ("harness_evaluations", "test_evaluations", "model_calls", "prompt_tokens",
+                                "completion_tokens", "proposer_calls", "proposer_input_tokens",
+                                "proposer_output_tokens")
+                    if getattr(budget, key) != totals[key]]
+        if cap is not None and budget.harness_evaluations > cap:
+            problems.append(f"harness_evaluations {budget.harness_evaluations} exceed the equal-budget cap {cap}")
+        if problems:
+            raise BudgetError("budget ledger mismatch:" + "".join(f"\n  {p}" for p in problems))
+
+    def to_list(self) -> list[dict[str, Any]]:
+        return [dict(e) for e in self.entries]
 
 
 @dataclass
@@ -759,6 +883,8 @@ class SearchRunner:
         self._resuming = False
         self._proposer_seen: dict[str, int] = {}
         self._manifest: dict[str, Any] = {}
+        self.ledger = Ledger()
+        self._ledger_legacy = False   # resumed from a run.json written before the ledger existed
 
     # -- proposal files ------------------------------------------------------------------------
 
@@ -879,7 +1005,25 @@ class SearchRunner:
                     self._verdicts[label] = receipt["verdict"]
                 return result
         shutil.rmtree(directory, ignore_errors=True)  # torn step: evaluate again
+        self._forget_evaluations(lambda e: e.get("candidate") == label and e.get("split") == "search")
         return None
+
+    def _forget_evaluations(self, drop: Callable[[Mapping[str, Any]], bool]) -> None:
+        """A torn step runs again: drop its ledger entries and undo their budget counts."""
+        with self._lock:
+            for entry in self.ledger.forget(lambda e: not (e["kind"] == "evaluation" and drop(e))):
+                self.budget.remove_run(entry)
+
+    def _record_evaluation(self, candidate_id: str, split: str, repeat: int, metrics: Mapping[str, Any],
+                           attempt: int | None = None) -> None:
+        """Count one evaluation in the Budget and the ledger together (call under self._lock)."""
+        usage = {"input": int(metrics.get("prompt_tokens", 0) or 0),
+                 "output": int(metrics.get("completion_tokens", 0) or 0),
+                 **{key: int(metrics.get(f"{key}_tokens", 0) or 0)
+                    for key in ("cache_read", "cache_write", "reasoning")}}
+        usd = _entry_usd(self.config.run_meta.get("model"), usage, self.prices)
+        self.ledger.evaluation(candidate_id, split, repeat, metrics, attempt, usd)
+        self.budget.add_run(metrics, split)
 
     def _reject(self, candidate_id: str, directory: Path, receipt: dict[str, Any], verdict: str,
                 detail: str, split: str) -> EvaluationResult | None:
@@ -957,7 +1101,7 @@ class SearchRunner:
                                           sample_index=repeat)
             runs.append(run)
             with self._lock:
-                self.budget.add_run(run.metrics, split)
+                self._record_evaluation(candidate_id, split, repeat, run.metrics)
         result = self._merge_repeats(candidate_id, runs, split)
         self.experience.write_result(result)
         receipt["evaluation"] = {"repeats": len(runs), "score": result.score, "context_cost": result.context_cost,
@@ -1006,6 +1150,9 @@ class SearchRunner:
                 return stored
             os.replace(current, test_root / f"test_results.{len(archived) + 1}.json")
             archived = sorted(test_root.glob("test_results.*.json"))
+        attempt = len(archived) + 1
+        # entries of an earlier, unfinished try at this same attempt (a killed run) are replaced
+        self._forget_evaluations(lambda e: e.get("split") == "test" and e.get("attempt") == attempt)
         traces = test_root / ("traces" if not archived else f"traces-attempt-{len(archived) + 1}")
         traces.mkdir(parents=True, exist_ok=True)
         results: list[EvaluationResult] = []
@@ -1018,7 +1165,7 @@ class SearchRunner:
                                               traces / name, sample_index=repeat)
                 runs.append(run)
                 with self._lock:
-                    self.budget.add_run(run.metrics, "test")
+                    self._record_evaluation(item.candidate_id, "test", repeat, run.metrics, attempt)
             results.append(self._merge_repeats(item.candidate_id, runs, "test"))
         payload = {"search_root": str(self.experience.root), "results": [asdict(r) for r in results]}
         atomic_write(current, json.dumps(payload, indent=2))
@@ -1030,13 +1177,21 @@ class SearchRunner:
         cap = self.config.max_evaluations
         return None if cap is None else max(0, cap - self.budget.harness_evaluations)
 
-    def _absorb_proposer_usage(self) -> None:
+    def _absorb_proposer_usage(self, label: str) -> None:
+        """Count one proposer invocation, labelled `label` (a re-attempt after a resume gets #n)."""
         usage = dict(getattr(self.proposer, "usage", None) or {})
         delta = {key: int(value or 0) - self._proposer_seen.get(key, 0)
                  for key, value in usage.items() if isinstance(value, (int, float))}
         self._proposer_seen = {key: int(value or 0) for key, value in usage.items()
                                if isinstance(value, (int, float))}
         with self._lock:
+            tries = self.ledger.attempts(f"proposer:{label}")
+            usd = _entry_usd(self.config.run_meta.get("proposer_model"),
+                             {"input": int(delta.get("input_tokens", 0) or 0),
+                              "output": int(delta.get("output_tokens", 0) or 0),
+                              **{k: int(delta.get(k, 0) or 0) for k in ("cache_read", "cache_write", "reasoning")}},
+                             self.prices)
+            self.ledger.proposer(label if not tries else f"{label}#{tries}", delta, usd)
             self.budget.add_proposer(delta)
 
     def frontier(self) -> list[EvaluationResult]:
@@ -1053,8 +1208,32 @@ class SearchRunner:
             payload = {**self._manifest, "run_meta": meta,
                        "cursor": {"iteration": self.cursor},
                        "frontier": [r.candidate_id for r in self.frontier()],
-                       "budget": asdict(self.budget)}
+                       "budget": asdict(self.budget),
+                       # held-out entries live beside test_results.json: the proposer never sees them
+                       "ledger": {"totals": self.ledger.totals(), "legacy_resume": self._ledger_legacy,
+                                  "entries": [e for e in self.ledger.to_list() if e.get("split") != "test"]}}
+            held_out = [e for e in self.ledger.to_list() if e.get("split") == "test"]
+            if held_out or self._test_ledger_path().is_file():
+                atomic_write(self._test_ledger_path(), json.dumps(held_out, indent=2, default=str))
+            cap = self.config.max_evaluations
+            if cap is not None:
+                payload["expected"] = {"max_evaluations": cap, "repeats": self.config.repeats,
+                                       "harness_evaluations_at_most": cap,
+                                       "harness_evaluations": self.budget.harness_evaluations}
             atomic_write(self.experience.root / "run.json", json.dumps(payload, indent=2, default=str))
+
+    def _test_ledger_path(self) -> Path:
+        return Path(self.config.test_root) / "ledger.json"
+
+    def _stored_entries(self, run_payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Ledger entries as persisted: search and proposer entries in run.json, test entries
+        in <test_root>/ledger.json."""
+        entries = list((run_payload.get("ledger") or {}).get("entries") or [])
+        try:
+            held_out = json.loads(self._test_ledger_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            held_out = []
+        return entries + [e for e in held_out if isinstance(e, dict)]
 
     def _begin_resume(self, force: bool) -> None:
         root = self.experience.root
@@ -1073,6 +1252,12 @@ class SearchRunner:
         except (OSError, ValueError):
             previous = {}
         self.budget = Budget.from_dict(previous.get("budget"))
+        stored = previous.get("ledger")
+        if isinstance(stored, Mapping):
+            self.ledger = Ledger(self._stored_entries(previous))
+            self._ledger_legacy = bool(stored.get("legacy_resume"))
+        else:   # a run.json from before the ledger: its counts cannot be checked entry by entry
+            self._ledger_legacy = bool(previous.get("budget"))
         self.cursor = int((previous.get("cursor") or {}).get("iteration", 0) or 0)
         shutil.rmtree(root / "views", ignore_errors=True)   # derived; rebuilt on demand
         self._repair_logs()
@@ -1186,7 +1371,7 @@ class SearchRunner:
                     (proposal_dir / "proposer.error").write_text(repr(exc), encoding="utf-8")
                     proposals = []
                 finally:
-                    self._absorb_proposer_usage()
+                    self._absorb_proposer_usage(f"iteration-{iteration:04d}")
                 proposals = self._persist_proposals(proposals, proposal_dir, proposed_at)
                 with self._lock:
                     self.budget.proposals += len(proposals)
@@ -1203,7 +1388,20 @@ class SearchRunner:
         if test_tasks:
             self.evaluate_on_test(frontier, test_tasks)
         self._checkpoint()
+        self.verify_ledger()
         return frontier
+
+    def verify_ledger(self) -> None:
+        """The counts written to run.json must equal the ledger, and the search split must stay
+        within the equal-budget cap. Raises BudgetError otherwise."""
+        if self._ledger_legacy:
+            return
+        try:
+            stored = json.loads((self.experience.root / "run.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise BudgetError(f"run.json unreadable for the ledger check: {exc}") from exc
+        Ledger(self._stored_entries(stored)).verify(
+            Budget.from_dict(stored.get("budget")), self.config.max_evaluations)
 
     def _run_manifest(self, tasks: Sequence[Mapping[str, Any]],
                       test_tasks: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:
