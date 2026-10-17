@@ -133,7 +133,9 @@ def _copying_proposer(tmp_path, seed, made):
         paths = []
         for index in range(count):
             path = tmp_path / f"p{iteration}-{index}.py"
-            path.write_text(seed.read_text(encoding="utf-8"), encoding="utf-8")
+            # distinct per proposal: an identical copy would be rejected as a no-op
+            path.write_text(seed.read_text(encoding="utf-8") + f"\nVARIANT = {iteration * 100 + index}\n",
+                            encoding="utf-8")
             paths.append(path)
         made.append(iteration)
         return paths
@@ -147,7 +149,7 @@ def test_budget_and_equal_budget_cap(tmp_path):
     made = []
     def proposer(experience, iteration, count):
         path = tmp_path / f"p{iteration}.py"
-        path.write_text(seed.read_text(encoding="utf-8"), encoding="utf-8")
+        path.write_text(seed.read_text(encoding="utf-8") + f"\nVARIANT = {iteration}\n", encoding="utf-8")
         made.append(iteration)
         return [path]
     proposer.usage = {"calls": 2, "input_tokens": 10, "output_tokens": 3}

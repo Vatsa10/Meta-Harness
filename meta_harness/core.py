@@ -11,6 +11,7 @@ results) and `run.json` is checkpointed atomically, so a killed search resumes w
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -41,7 +42,7 @@ _STOP_ALIASES = {"end": "done", "stop": "done", "finished": "done", "length": "o
                  "max_tokens": "overflow", "context_overflow": "overflow", "max_steps": "step_limit",
                  "budget": "step_limit", "aborted": "timeout", "idle": "timeout", "deadline": "timeout"}
 VERDICTS = ("accepted", "rejected_invalid_source", "rejected_split_violation", "stale_parent",
-            "budget_expired", "failed_eval", "incomplete")
+            "budget_expired", "failed_eval", "incomplete", "rejected_noop")
 USAGE_KEYS = ("input", "output", "cache_read", "cache_write", "reasoning")
 MAX_AUTOMATIC_RESUMES = 3
 
@@ -70,6 +71,15 @@ def atomic_write(path: Path, text: str) -> None:
             if attempt == 4:
                 raise
             time.sleep(0.05 * (attempt + 1))
+
+
+def normalised_source(text: str) -> str | None:
+    """The parsed module as `ast.dump`: comments, blank lines and formatting do not change it.
+    None when the text does not parse."""
+    try:
+        return ast.dump(ast.parse(text))
+    except (SyntaxError, ValueError):
+        return None
 
 
 class HarnessValidationError(Exception):
@@ -885,6 +895,7 @@ class SearchRunner:
         self._manifest: dict[str, Any] = {}
         self.ledger = Ledger()
         self._ledger_legacy = False   # resumed from a run.json written before the ledger existed
+        self._sources: dict[str, str] = {}   # candidate id -> normalised source, for no-op detection
 
     # -- proposal files ------------------------------------------------------------------------
 
@@ -933,8 +944,32 @@ class SearchRunner:
     def _references_test_data(self, text: str) -> bool:
         return Path(self.config.test_root).name in text or "test_results" in text
 
+    def _noop_twin(self, candidate_id: str, text: str, check: bool = True) -> str | None:
+        """The earlier candidate whose normalised source equals this one (its parent included), or
+        None; a candidate without a twin is registered so a later duplicate of it is caught."""
+        norm = normalised_source(text)
+        if norm is None:
+            return None
+        with self._lock:
+            twin = next((cid for cid, other in self._sources.items() if other == norm and cid != candidate_id),
+                        None) if check else None
+            if twin is None:
+                self._sources[candidate_id] = norm
+        return twin
+
+    def _register_source(self, candidate_id: str) -> None:
+        try:
+            text = (self.experience.candidate_dir(candidate_id) / "harness.py").read_text(encoding="utf-8")
+        except OSError:
+            return
+        norm = normalised_source(text)
+        if norm is not None:
+            with self._lock:
+                self._sources.setdefault(candidate_id, norm)
+
     def _gate(self, text: str, outcomes: Mapping[str, Any], proposal: Mapping[str, Any],
-              fingerprint_now: str | None, over_budget: bool) -> tuple[str | None, str | None]:
+              fingerprint_now: str | None, over_budget: bool,
+              candidate_id: str | None = None) -> tuple[str | None, str | None]:
         """Host re-validation before a proposal becomes a candidate: (verdict, detail) or (None, None)."""
         try:
             compile(text, "harness.py", "exec")
@@ -949,6 +984,12 @@ class SearchRunner:
             return "stale_parent", f"experience changed since the proposal read it ({claimed} != {fingerprint_now})"
         if over_budget:
             return "budget_expired", "equal-budget cap reached before this proposal was evaluated"
+        # seeds are the user's starting points: registered as references, never rejected as no-ops
+        twin = (self._noop_twin(candidate_id, text, check=not candidate_id.startswith("initial-"))
+                if candidate_id else None)
+        if twin:
+            return "rejected_noop", (f"source equals candidate {twin} once comments and formatting are ignored; "
+                                     "not evaluated")
         return None, None
 
     # -- evaluation ----------------------------------------------------------------------------
@@ -1003,6 +1044,7 @@ class SearchRunner:
                 with self._lock:
                     self._results[label] = result
                     self._verdicts[label] = receipt["verdict"]
+                self._register_source(label)
                 return result
         shutil.rmtree(directory, ignore_errors=True)  # torn step: evaluate again
         self._forget_evaluations(lambda e: e.get("candidate") == label and e.get("split") == "search")
@@ -1065,7 +1107,7 @@ class SearchRunner:
             "validation": None, "evaluation": None, "fallback": None, "verdict": "incomplete"}
         self._write_receipt(directory, receipt)
         text = (directory / "harness.py").read_text(encoding="utf-8", errors="replace")
-        verdict, detail = self._gate(text, outcomes, proposal, fingerprint_now, over_budget)
+        verdict, detail = self._gate(text, outcomes, proposal, fingerprint_now, over_budget, candidate_id)
         if verdict:
             return self._reject(candidate_id, directory, receipt, verdict, detail or "", split)
         audit = getattr(self.evaluator, "source_validator", None)
@@ -1379,6 +1421,7 @@ class SearchRunner:
             over = self._budget_flags(work)
             self._evaluate_many(work, search_tasks, fingerprint_now=fingerprint(self.experience.root),
                                 over_budget=over)
+            self._retry_invalid(work, iteration, proposal_dir, search_tasks)
             with self._lock:
                 self.cursor = max(self.cursor, iteration)
                 self._checkpoint()
@@ -1402,6 +1445,63 @@ class SearchRunner:
             raise BudgetError(f"run.json unreadable for the ledger check: {exc}") from exc
         Ledger(self._stored_entries(stored)).verify(
             Budget.from_dict(stored.get("budget")), self.config.max_evaluations)
+
+    def _retry_invalid(self, work: Sequence[tuple[Path, str]], iteration: int, proposal_dir: Path,
+                       tasks: Sequence[Mapping[str, Any]]) -> None:
+        """A proposal that failed validation is asked for once more, with the error, through the
+        proposer's optional `revise(experience, iteration, source, error) -> [path]` hook. If the
+        retry fails too (or the proposer has no hook) the parent is kept: the rejected candidate
+        never enters the frontier. Without a hook the error is written next to the proposal as
+        `<stem>.validation_error.txt` and the receipt says `retry_requested`, so the next
+        iteration's proposer reads it from the experience directory."""
+        from .proposer_agent import fingerprint
+
+        revise = getattr(self.proposer, "revise", None)
+        for source, label in work:
+            with self._lock:
+                verdict = self._verdicts.get(label)
+            if verdict != "rejected_invalid_source":
+                continue
+            directory = self.experience.candidate_dir(label)
+            receipt = self.read_receipt(directory) or {}
+            if receipt.get("retry_requested"):
+                continue   # handled before a resume
+            error = str(receipt.get("fallback") or "validation failed")
+            note = proposal_dir / f"{Path(source).stem}.validation_error.txt"
+            atomic_write(note, error)
+            receipt["retry_requested"] = True
+            receipt["validation_error_file"] = note.relative_to(self.experience.root).as_posix()
+            if not callable(revise):
+                receipt["fallback"] = f"{error}; parent kept, retry requested from the next iteration"
+                self._write_receipt(directory, receipt)
+                continue
+            retry_dir = proposal_dir / "retry" / label
+            proposed_at = fingerprint(self.experience.root)
+            try:
+                revised = list(revise(self.experience, iteration, Path(source), error) or [])[:1]
+            except Exception as exc:  # noqa: BLE001 - a failed retry keeps the parent
+                retry_dir.mkdir(parents=True, exist_ok=True)
+                (retry_dir / "proposer.error").write_text(repr(exc), encoding="utf-8")
+                revised = []
+            finally:
+                self._absorb_proposer_usage(f"{label}:retry")
+            retried = self._persist_proposals(revised, retry_dir, proposed_at)
+            with self._lock:
+                self.budget.proposals += len(retried)
+            retry_label = f"{label}-retry"
+            if retried:
+                pair = [(retried[0], retry_label)]
+                self._evaluate_many(pair, tasks, fingerprint_now=fingerprint(self.experience.root),
+                                    over_budget=self._budget_flags(pair))
+            with self._lock:
+                outcome = self._verdicts.get(retry_label) if retried else None
+            receipt["retry"] = {"candidate_id": retry_label if retried else None, "verdict": outcome}
+            if outcome != "accepted":
+                state = "failed" if retried else "produced nothing"
+                receipt["fallback"] = f"{error}; retry {state}, parent kept"
+            self._write_receipt(directory, receipt)
+            with self._lock:
+                self._checkpoint()
 
     def _run_manifest(self, tasks: Sequence[Mapping[str, Any]],
                       test_tasks: Sequence[Mapping[str, Any]] | None = None) -> dict[str, Any]:

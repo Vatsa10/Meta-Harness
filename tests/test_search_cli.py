@@ -109,8 +109,9 @@ def test_resume_evaluates_only_the_new_iteration(tmp_path, capsys):
     after = {d.name: (d / "scores.json").stat().st_mtime_ns for d in candidates.iterdir()}
     assert set(after) == set(before) | {"iteration-0002-00"}
     assert all(after[name] == before[name] for name in before), "finished candidates re-evaluated"
-    assert out["budget"]["harness_evaluations"] == 3
-    assert out["verdicts"] == {"accepted": 3}
+    # the scripted proposer replays the same candidate: iteration 2 is a no-op and is not evaluated
+    assert out["budget"]["harness_evaluations"] == 2
+    assert out["verdicts"] == {"accepted": 2, "rejected_noop": 1}
 
 
 def test_force_resume_resets_the_attempt_counter(tmp_path, capsys):
