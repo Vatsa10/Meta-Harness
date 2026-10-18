@@ -1,0 +1,134 @@
+{
+ "usecase": "tau_retail",
+ "model": "deepseek-flash",
+ "n": 15,
+ "score": 0.867,
+ "input_tokens": 588706,
+ "output_tokens": 47872,
+ "cost_usd": 0.0546,
+ "runs": [
+  {
+   "id": "tau-retail-003",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-004",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "tau-retail-007",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-014",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "tau-retail-015",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-017",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-019",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-020",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-028",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 3
+  },
+  {
+   "id": "tau-retail-037",
+   "score": 0.0,
+   "state_ok": false,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-045",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-047",
+   "score": 0.0,
+   "state_ok": false,
+   "missing_outputs": [
+    "1095.55",
+    "1528.14"
+   ],
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "tau-retail-049",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-053",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "tau-retail-059",
+   "score": 1.0,
+   "state_ok": true,
+   "missing_outputs": [],
+   "error": "",
+   "writes": 2
+  }
+ ]
+}
