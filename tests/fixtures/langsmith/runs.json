@@ -1,0 +1,176 @@
+[
+ {
+  "id": "r1",
+  "trace_id": "t1",
+  "name": "support_graph",
+  "run_type": "chain",
+  "parent_run_id": null,
+  "session_name": "support-prod",
+  "start_time": "2026-10-01T10:00:00",
+  "dotted_order": "20261001T100000000000Zr1",
+  "inputs": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are support."
+    },
+    {
+     "role": "user",
+     "content": "Refund order 8812 please, email jane.doe@example.com"
+    }
+   ]
+  },
+  "outputs": {
+   "output": "I refunded order 8812 in full."
+  },
+  "error": null,
+  "extra": {
+   "metadata": {
+    "langgraph_step": 3,
+    "app": "support"
+   }
+  },
+  "feedback": [
+   {
+    "key": "correctness",
+    "score": 0,
+    "comment": "wrong amount refunded"
+   }
+  ],
+  "child_runs": [
+   {
+    "id": "r1a",
+    "name": "planner",
+    "run_type": "chain",
+    "start_time": "2026-10-01T10:00:01",
+    "dotted_order": "20261001T100000000000Zr1.20261001T100001000000Zr1a",
+    "inputs": {
+     "q": "refund"
+    },
+    "outputs": {
+     "plan": "lookup then refund"
+    },
+    "child_runs": [
+     {
+      "id": "r1a1",
+      "name": "ChatOpenAI",
+      "run_type": "llm",
+      "start_time": "2026-10-01T10:00:01.5",
+      "dotted_order": "20261001T100000000000Zr1.20261001T100001000000Zr1a.20261001T100001500000Zr1a1",
+      "inputs": {
+       "prompt": "plan"
+      },
+      "outputs": {
+       "text": "lookup then refund"
+      }
+     }
+    ]
+   },
+   {
+    "id": "r1b",
+    "name": "lookup_order",
+    "run_type": "tool",
+    "start_time": "2026-10-01T10:00:02",
+    "dotted_order": "20261001T100000000000Zr1.20261001T100002000000Zr1b",
+    "inputs": {
+     "order_id": "8812"
+    },
+    "outputs": {
+     "output": {
+      "total": 60.0
+     }
+    }
+   },
+   {
+    "id": "r1c",
+    "name": "issue_refund",
+    "run_type": "tool",
+    "start_time": "2026-10-01T10:00:03",
+    "dotted_order": "20261001T100000000000Zr1.20261001T100003000000Zr1c",
+    "inputs": {
+     "order_id": "8812",
+     "amount": 120.0
+    },
+    "outputs": {
+     "output": "refund ok"
+    }
+   }
+  ]
+ },
+ {
+  "id": "r2",
+  "trace_id": "t2",
+  "name": "support_graph",
+  "run_type": "chain",
+  "session_name": "support-prod",
+  "start_time": "2026-10-01T11:00:00",
+  "dotted_order": "20261001T110000000000Zr2",
+  "inputs": {
+   "input": "What are your opening hours?"
+  },
+  "outputs": {
+   "output": "9am to 5pm, Monday to Friday."
+  },
+  "feedback_stats": {
+   "helpfulness": {
+    "n": 1,
+    "avg": 1.0
+   }
+  }
+ },
+ {
+  "id": "r2a",
+  "trace_id": "t2",
+  "parent_run_id": "r2",
+  "name": "search_kb",
+  "run_type": "tool",
+  "start_time": "2026-10-01T11:00:01",
+  "dotted_order": "20261001T110000000000Zr2.20261001T110001000000Zr2a",
+  "inputs": {
+   "query": "opening hours"
+  },
+  "outputs": {
+   "output": "9-5 weekdays"
+  }
+ },
+ {
+  "id": "r3",
+  "trace_id": "t3",
+  "name": "support_graph",
+  "run_type": "chain",
+  "session_name": "support-prod",
+  "start_time": "2026-10-01T12:00:00",
+  "dotted_order": "20261001T120000000000Zr3",
+  "inputs": {
+   "input": "Cancel my subscription"
+  },
+  "outputs": null
+ },
+ {
+  "id": "r3a",
+  "trace_id": "t3",
+  "parent_run_id": "r3",
+  "name": "cancel_subscription",
+  "run_type": "tool",
+  "start_time": "2026-10-01T12:00:01",
+  "dotted_order": "20261001T120000000000Zr3.20261001T120001000000Zr3a",
+  "inputs": {
+   "user": "u1"
+  },
+  "outputs": null,
+  "error": "billing API 503"
+ },
+ {
+  "id": "r4",
+  "trace_id": "t4",
+  "name": "support_graph",
+  "run_type": "chain",
+  "session_name": "support-prod",
+  "inputs": {
+   "input": "what are your opening hours"
+  },
+  "outputs": {
+   "output": "We open at 9."
+  }
+ }
+]
