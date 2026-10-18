@@ -6,10 +6,11 @@ import json
 from pathlib import Path
 
 from .. import experience_query as q
+from .. import lessons
 from ..redact import redact
 
 NAME = "experience"
-HELP = "query stored experience: top, diff, diff-runs, import, reads, report, export"
+HELP = "query stored experience: top, diff, diff-runs, import, reads, report, export, distil, lessons"
 
 
 def add_arguments(parser) -> None:
@@ -36,6 +37,13 @@ def add_arguments(parser) -> None:
     exp = sub.add_parser("export", help="one case per receipt, as JSONL")
     exp.add_argument("--root", required=True)
     exp.add_argument("--out", required=True)
+    dis = sub.add_parser("distil", help="derive lessons from a finished run into the lessons library")
+    dis.add_argument("root")
+    dis.add_argument("--library", help="library dir (default: $META_HARNESS_LESSONS_DIR or ~/.meta-harness/lessons)")
+    les = sub.add_parser("lessons", help="list library lessons, optionally keyword-filtered")
+    les.add_argument("--query", default=None)
+    les.add_argument("--library")
+    les.add_argument("-k", type=int, default=20)
 
 
 def _dump(value) -> None:
@@ -63,6 +71,11 @@ def run(args) -> int:
         elif cmd == "export":
             count = q.export_cases(Path(args.root), Path(args.out))
             print(redact(f"wrote {count} cases to {args.out}"))
+        elif cmd == "distil":
+            derived, stored = lessons.distil_to_library(Path(args.root), Path(args.library) if args.library else None)
+            print(redact(f"derived {derived} lessons, stored {stored} new"))
+        elif cmd == "lessons":
+            _dump(lessons.query(args.query, Path(args.library) if args.library else None, args.k))
     except (OSError, ValueError) as exc:
         print(redact(f"error: {exc}"))
         return 2
