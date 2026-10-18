@@ -224,3 +224,109 @@ def test_adapt_cli_init_check_and_sync(tmp_path, capsys):
     assert cli.main(["adapt", "sync", str(seed)]) == 0
     assert cli.main(["adapt", "init", "--entrypoint", "x:y", "--config", str(tmp_path / "missing.json"),
                      "--out", str(tmp_path / "o")]) == 2
+
+
+# -- the agent_config domain (the gate's VALIDATE hook) ----------------------------------------
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "agents"
+
+
+def test_agent_config_domain_contract():
+    from meta_harness.domains import get_domain
+    domain = get_domain("agent_config")
+    assert domain.VALIDATE is domain.validate and domain.PROTOCOL == "plain"
+    assert "BEGIN CONFIG" in domain.PROMPT and "config.json" in domain.PROMPT
+    assert domain.adapt([{"input": "a"}]) == [{"input": "a"}]
+
+
+def test_domain_validate_finds_the_seed_in_the_experience_store(tmp_path, seed):
+    from meta_harness.domains import agent_config
+    candidates = tmp_path / "store" / "candidates"
+    initial = candidates / "initial-0000"
+    initial.mkdir(parents=True)
+    (initial / "harness.py").write_bytes((seed / "harness.py").read_bytes())
+    agent_config.validate(initial / "harness.py", [])
+    # a seed is checked against itself: canonical template and a config inside its own schema
+    broken = tmp_path / "other" / "candidates" / "initial-0000"
+    broken.mkdir(parents=True)
+    fixed, _ = split_harness((seed / "harness.py").read_text(encoding="utf-8"))
+    (broken / "harness.py").write_text(fixed.replace("<CONFIG>", json.dumps({**CONFIG, "k": 9})),
+                                       encoding="utf-8")
+    with pytest.raises(ConfigHarnessError, match="above the maximum"):
+        agent_config.validate(broken / "harness.py", [])
+    (broken / "harness.py").write_text((seed / "harness.py").read_text(encoding="utf-8") + "\nX = 1\n",
+                                       encoding="utf-8")
+    with pytest.raises(ConfigHarnessError, match="differs from the generated template"):
+        agent_config.validate(broken / "harness.py", [])
+    good = _candidate(candidates, seed, config={**CONFIG, "k": 3}, name="iteration-0001-00")
+    agent_config.validate(good / "harness.py", [])
+    code = (seed / "harness.py").read_text(encoding="utf-8").replace("import sys\n", "import sys\nimport os\n")
+    edited = _candidate(candidates, seed, text=code, name="iteration-0002-00")
+    with pytest.raises(ConfigHarnessError, match="outside the config block"):
+        agent_config.validate(edited / "harness.py", [])
+    oob = _candidate(candidates, seed, config={**CONFIG, "k": 7}, name="iteration-0003-00")
+    with pytest.raises(ConfigHarnessError, match="above the maximum"):
+        agent_config.validate(oob / "harness.py", [])
+    # a candidate whose embedded schema was loosened is a code edit, not a pass
+    loose = (seed / "harness.py").read_text(encoding="utf-8").replace('"maximum": 5', '"maximum": 9')
+    loose = loose.replace('"k": 2', '"k": 7')
+    widened = _candidate(candidates, seed, text=loose, name="iteration-0004-00")
+    with pytest.raises(ConfigHarnessError, match="outside the config block"):
+        agent_config.validate(widened / "harness.py", [])
+
+
+def test_domain_validate_picks_the_matching_seed_among_several(tmp_path, seed):
+    from meta_harness.domains import agent_config
+    candidates = tmp_path / "store" / "candidates"
+    (candidates / "initial-0000").mkdir(parents=True)
+    (candidates / "initial-0000" / "harness.py").write_text("class Harness:\n    pass\n", encoding="utf-8")
+    other = json.loads(json.dumps(SCHEMA))
+    other["properties"]["k"]["maximum"] = 2
+    (candidates / "initial-0001").mkdir()
+    (candidates / "initial-0001" / "harness.py").write_text(
+        render_harness("adapter_app_t:entry", ".", "absolute", other, CONFIG), encoding="utf-8")
+    (candidates / "initial-0002").mkdir()
+    (candidates / "initial-0002" / "harness.py").write_bytes((seed / "harness.py").read_bytes())
+    # k=4 passes the third seed's schema (maximum 5) but not the second's (maximum 2)
+    good = _candidate(candidates, seed, config={**CONFIG, "k": 4}, name="iteration-0001-00")
+    agent_config.validate(good / "harness.py", [])
+
+
+@pytest.mark.parametrize("app", ["router_graph", "support_agent"])
+def test_example_seeds_are_generated_and_in_sync(app):
+    seed = EXAMPLES / app / "seed"
+    params = parse_harness((seed / "harness.py").read_text(encoding="utf-8"))
+    assert params["entry_base"] == "package" and params["entry_path"] == f"examples/agents/{app}"
+    assert params["config"] == json.loads((EXAMPLES / app / "config.json").read_text(encoding="utf-8"))
+    assert params["schema"] == json.loads((EXAMPLES / app / "schema.json").read_text(encoding="utf-8"))
+    validate_candidate(seed, seed)
+    source = (EXAMPLES / app).glob("*_app.py")
+    assert all("import langgraph" not in p.read_text(encoding="utf-8")
+               and "from agents" not in p.read_text(encoding="utf-8") for p in source)
+
+
+@pytest.mark.parametrize("app,seed_score", [("router_graph", 2 / 6), ("support_agent", 1 / 4)])
+def test_search_agent_config_end_to_end(app, seed_score, tmp_path, capsys, monkeypatch):
+    from meta_harness.commands import search
+    if "agent_config" not in search.DOMAINS:  # until search.py lists the domain in its choices
+        monkeypatch.setattr(search, "DOMAINS", search.DOMAINS + ("agent_config",))
+    folder = EXAMPLES / app
+    root = tmp_path / "store"
+    assert cli.main(["search", "--domain", "agent_config", "--harness", str(folder / "seed" / "harness.py"),
+                     "--search", str(folder / "data.jsonl"), "--metric", "exact",
+                     "--provider", "scripted", "--model", str(folder / "base_script.jsonl"),
+                     "--proposer-provider", "scripted", "--proposer-model", str(folder / "proposer_script.jsonl"),
+                     "--iterations", "3", "--candidates", "1", "--root", str(root), "--no-cache"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdicts"] == {"accepted": 2, "rejected_invalid_source": 2}
+    receipts = {d.name: json.loads((d / "receipt.json").read_text(encoding="utf-8"))
+                for d in (root / "candidates").iterdir()}
+    assert "outside the config block" in receipts["iteration-0001-00"]["fallback"]
+    assert "above the maximum" in receipts["iteration-0002-00"]["fallback"]
+    scores = {d.name: json.loads((d / "scores.json").read_text(encoding="utf-8"))["score"]
+              for d in (root / "candidates").iterdir() if (d / "scores.json").is_file()}
+    assert scores["initial-0000"] == pytest.approx(seed_score)
+    assert scores["iteration-0003-00"] == 1.0
+    winner = parse_harness((root / "candidates" / "iteration-0003-00" / "harness.py").read_text(encoding="utf-8"))
+    seed_config = json.loads((folder / "config.json").read_text(encoding="utf-8"))
+    assert winner["config"] != seed_config  # the proposer changed config.json, nothing else

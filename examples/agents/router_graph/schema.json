@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "required": ["router", "nodes", "few_shot", "retrieval_k", "memory"],
+  "frozen": ["nodes.math.system_prompt"],
+  "properties": {
+    "router": {"type": "object", "required": ["math_threshold"],
+               "properties": {"math_threshold": {"type": "number", "minimum": 0.0, "maximum": 1.0}}},
+    "nodes": {"type": "object", "required": ["math", "chat"], "properties": {
+      "math": {"type": "object", "required": ["system_prompt"],
+               "properties": {"system_prompt": {"type": "string", "maxLength": 400}}},
+      "chat": {"type": "object", "required": ["system_prompt"],
+               "properties": {"system_prompt": {"type": "string", "maxLength": 400}}}}},
+    "few_shot": {"type": "array", "maxItems": 4, "items": {"type": "object", "required": ["question", "answer"],
+                 "properties": {"question": {"type": "string", "maxLength": 200},
+                                "answer": {"type": "string", "maxLength": 50}}}},
+    "retrieval_k": {"type": "integer", "minimum": 0, "maximum": 3},
+    "memory": {"type": "object", "required": ["policy"],
+               "properties": {"policy": {"type": "string", "enum": ["none", "last_turn"]}}}
+  }
+}

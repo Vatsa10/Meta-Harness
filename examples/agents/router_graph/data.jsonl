@@ -1,0 +1,6 @@
+{"id": "rg-1", "input": "what is 12 + 7", "label": "19"}
+{"id": "rg-2", "input": "compute 9 * 3", "label": "27"}
+{"id": "rg-3", "input": "what is 40 - 15", "label": "25"}
+{"id": "rg-4", "input": "what is 6 * 7", "label": "42"}
+{"id": "rg-5", "input": "what is the capital of France", "label": "Paris"}
+{"id": "rg-6", "input": "who wrote Hamlet", "label": "Shakespeare"}

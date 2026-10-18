@@ -1,0 +1,10 @@
+{
+  "router": {"math_threshold": 0.9},
+  "nodes": {
+    "math": {"system_prompt": "You are a calculator. Reply with only the number."},
+    "chat": {"system_prompt": "You are a helpful assistant. Answer in one or two words."}
+  },
+  "few_shot": [{"question": "what is 1 + 1", "answer": "2"}],
+  "retrieval_k": 1,
+  "memory": {"policy": "none"}
+}

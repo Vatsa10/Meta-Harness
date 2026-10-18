@@ -1,0 +1,4 @@
+{"id": "sa-1", "input": "where is order 17?", "label": "shipped"}
+{"id": "sa-2", "input": "where is order 23?", "label": "delivered"}
+{"id": "sa-3", "input": "where is order 42?", "label": "processing"}
+{"id": "sa-4", "input": "please refund order 17", "label": "refund issued"}

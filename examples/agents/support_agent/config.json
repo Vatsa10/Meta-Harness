@@ -1,0 +1,9 @@
+{
+  "instructions": "You are a store support agent. Use a tool when it helps, then answer with FINAL.",
+  "tools": [
+    {"name": "lookup_order", "description": "internal helper"},
+    {"name": "refund_order", "description": "Issue a refund for an order id."}
+  ],
+  "max_turns": 3,
+  "tool_choice": "auto"
+}

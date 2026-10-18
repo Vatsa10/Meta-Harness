@@ -1,0 +1,7 @@
+{"match": "calculator[\\s\\S]*Question: what is 12 \\+ 7$", "text": "19"}
+{"match": "calculator[\\s\\S]*Question: compute 9 \\* 3$", "text": "27"}
+{"match": "calculator[\\s\\S]*Question: what is 40 - 15$", "text": "25"}
+{"match": "calculator[\\s\\S]*Question: what is 6 \\* 7$", "text": "42"}
+{"match": "Question: what is the capital of France$", "text": "Paris"}
+{"match": "Question: who wrote Hamlet$", "text": "Shakespeare"}
+{"default": "I am not sure, maybe ask a calculator."}

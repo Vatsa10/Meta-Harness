@@ -1,0 +1,9 @@
+{"match": "Observation: shipped$", "text": "FINAL shipped"}
+{"match": "Observation: delivered$", "text": "FINAL delivered"}
+{"match": "Observation: processing$", "text": "FINAL processing"}
+{"match": "Observation: refund issued$", "text": "FINAL refund issued"}
+{"match": "lookup_order: [^\\n]*shipping status[\\s\\S]*User: where is order 17\\?$", "text": "CALL lookup_order 17"}
+{"match": "lookup_order: [^\\n]*shipping status[\\s\\S]*User: where is order 23\\?$", "text": "CALL lookup_order 23"}
+{"match": "lookup_order: [^\\n]*shipping status[\\s\\S]*User: where is order 42\\?$", "text": "CALL lookup_order 42"}
+{"match": "refund_order: Issue a refund[\\s\\S]*User: please refund order 17$", "text": "CALL refund_order 17"}
+{"default": "FINAL Sorry, I cannot check that."}
