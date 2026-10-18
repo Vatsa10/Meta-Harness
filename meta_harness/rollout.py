@@ -1,17 +1,50 @@
 """Online rollout: sticky traffic split between a control and a treatment, redacted JSONL
-receipts, and a measured promote / hold / rollback verdict (stdlib only)."""
+receipts, and a measured promote / hold / rollback verdict (stdlib only).
+
+Receipts and limits worth knowing:
+- Privacy: a receipt never holds the raw routing key, only key_hash = sha256(salt + key)[:16].
+  meta values go through redact() and a PII scrub (emails, phone numbers, card-like or long
+  digit runs). The scrub is best effort, so keep meta small and free of free text.
+- Concurrency: each row is one append of one line under a per-Router lock. Several processes may
+  append to one file, but only short rows (small meta) keep the OS append atomic; the lock does
+  not span processes. A torn line is skipped on read and never glued to the next row.
+- Verdict: both the z-test and Fisher exact must agree (p < alpha) before a difference counts as
+  significant. A cost increase above the limit means rollback even when treatment is a
+  significant win. Rows with success=None count for n, cost and latency, never for success rates.
+  Fewer than min_samples judged rows in either arm means hold.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from .redact import redact, redact_obj
+from .redact import redact
+
+PII = (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),
+       re.compile(r"\+?\d(?:[\s().-]?\d){6,}"))
+PII_MASK = "[pii]"
+
+
+def scrub(value: Any) -> Any:
+    """redact() plus removal of emails, phone numbers and card-like digit runs, recursively."""
+    if isinstance(value, str):
+        value = redact(value)
+        for pattern in PII:
+            value = pattern.sub(PII_MASK, value)
+        return value
+    if isinstance(value, dict):
+        return {scrub(str(k)): scrub(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub(v) for v in value]
+    return value
+
 
 ARMS = ("control", "treatment")
 BUCKETS = 10000
@@ -21,17 +54,23 @@ class Router:
     """Deterministic, sticky assignment: bucket = sha256(salt + key) mod 10000;
     treatment when bucket < percent * 100."""
 
-    def __init__(self, control: Any, treatment: Any, percent: float, salt: str = "",
-                 log: str | Path | None = None) -> None:
+    def __init__(self, control: Any, treatment: Any, percent: float, holdout_salt: str = "",
+                 log: str | Path | None = None, salt: str | None = None) -> None:
+        if salt is not None:  # alias of holdout_salt
+            holdout_salt = salt
         if not 0 <= percent <= 100:
             raise ValueError(f"percent must be in [0, 100], got {percent!r}")
-        self.control, self.treatment, self.percent, self.salt = control, treatment, float(percent), salt
+        self.control, self.treatment, self.percent = control, treatment, float(percent)
+        self.holdout_salt = self.salt = holdout_salt
         self.log = Path(log) if log else None
         self._lock = threading.Lock()
 
     def bucket(self, key: str) -> int:
         digest = hashlib.sha256((self.salt + str(key)).encode("utf-8")).digest()
         return int.from_bytes(digest[:8], "big") % BUCKETS
+
+    def key_hash(self, key: str) -> str:
+        return hashlib.sha256((self.salt + str(key)).encode("utf-8")).hexdigest()[:16]
 
     def route(self, key: str) -> str:
         return "treatment" if self.bucket(key) < self.percent * BUCKETS / 100 else "control"
@@ -46,10 +85,10 @@ class Router:
         path = Path(log) if log else self.log
         if path is None:
             raise ValueError("no log path: pass log= to Router or record")
-        row = {"ts": time.time(), "key": redact(str(key)), "arm": arm,
+        row = {"ts": time.time(), "key_hash": self.key_hash(key), "arm": arm,
                "success": None if success is None else bool(success),
                "cost": float(cost), "latency_ms": float(latency_ms),
-               "meta": redact_obj(meta or {})}
+               "meta": scrub(meta or {})}
         line = json.dumps(row, ensure_ascii=False)
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)

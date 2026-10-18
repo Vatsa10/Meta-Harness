@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 
@@ -125,7 +126,7 @@ def test_torn_line_tolerated_and_not_glued(tmp_path):
     assert len(read_log(log)) == 1
     r.record("b", "treatment", False)
     got = read_log(log)
-    assert [x["key"] for x in got] == ["a", "b"]
+    assert [x["key_hash"] for x in got] == [r.key_hash("a"), r.key_hash("b")]
 
 
 def test_cli_report_json_and_table(tmp_path, capsys):
@@ -151,3 +152,25 @@ def test_read_log_skips_non_rows(tmp_path):
     log.write_text('[1, 2]\n"x"\n{"arm": "bogus"}\n\n{"arm": "control", "success": true}\n',
                    encoding="utf-8")
     assert len(read_log(log)) == 1
+
+
+def test_no_raw_key_or_pii_in_log(tmp_path):
+    log = tmp_path / "r.jsonl"
+    r = Router("c", "t", 50, holdout_salt="s", log=log)
+    r.record("user@example.com", "control", True, meta={
+        "email": "mail bob@example.com now", "phone": "call +1 (415) 555-0132",
+        "card": "4111 1111 1111 1111", "nested": [{"n": "id 8675309123"}], "ok": "fine", "n": 3})
+    r.record("8675309123", "treatment", False)
+    text = log.read_text(encoding="utf-8")
+    for leak in ("user@example.com", "bob@example.com", "8675309123", "555-0132", "4111"):
+        assert leak not in text
+    row = read_log(log)[0]
+    assert row["key_hash"] == hashlib.sha256(b"suser@example.com").hexdigest()[:16]
+    assert "key" not in row and row["meta"]["ok"] == "fine" and row["meta"]["n"] == 3
+
+
+def test_holdout_salt_name_and_alias():
+    a = Router("c", "t", 50, holdout_salt="x")
+    b = Router("c", "t", 50, salt="x")
+    assert a.holdout_salt == b.salt == "x"
+    assert [a.route(f"k{i}") for i in range(100)] == [b.route(f"k{i}") for i in range(100)]
