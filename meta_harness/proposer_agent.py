@@ -13,7 +13,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from .chat_types import ToolCall
 from .metrics import estimate_tokens
@@ -117,6 +117,133 @@ def fingerprint(root: Path) -> str:
     return "v1:" + digest.hexdigest()
 
 
+# -- leak tripwire -----------------------------------------------------------------------------
+# Adapted from google-research/harness2 (Apache-2.0), harness2/core/context.py
+# (assert_no_leak_paths, assert_no_grader_verdicts): scan the proposer's whole context tree
+# before any model call and refuse it on a held-out path or a grader marker.
+
+LEAK_REASON = "leak_tripwire"
+GRADER_MARKERS: tuple[str, ...] = ("VERDICT: PASS", "VERDICT: FAIL", "test_results")
+LEAK_FIELDS = ("input", "question", "prompt", "problem")
+TARGET_FIELDS = ("expected", "label", "answer", "target")
+# A short target ("fruit", "42") is shared with search tasks by construction; only targets this
+# long are distinctive enough to hash on their own.
+MIN_TARGET_CHARS = 24
+_SCAN_SKIP_DIRS = ("proposals", "views")
+_SCAN_MAX_BYTES = 8_000_000
+
+
+class ProposerLeak(RuntimeError):
+    """The view the proposer would see references held-out data; the proposal is aborted."""
+
+    stop_reason = "error"
+    reason = LEAK_REASON
+
+    def __init__(self, detail: str):
+        super().__init__(f"{LEAK_REASON}: {detail}")
+        self.detail = detail
+
+
+def leak_digest(value: Any) -> str:
+    """sha256 of one held-out value, whitespace-trimmed; the caller passes digests, never data."""
+    text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def heldout_digests(tasks: Sequence[Any], fields: Sequence[str] = LEAK_FIELDS,
+                    targets: Sequence[str] = TARGET_FIELDS) -> frozenset[str]:
+    """Digests of every held-out task (canonical JSON), its input values and its long targets."""
+    out: set[str] = set()
+    for task in tasks:
+        out.add(leak_digest(task))
+        if not isinstance(task, dict):
+            continue
+        for key in (*fields, *targets):
+            value = task.get(key)
+            if value in (None, ""):
+                continue
+            text = value if isinstance(value, str) else json.dumps(value, sort_keys=True, default=str)
+            if key in fields or len(text.strip()) >= MIN_TARGET_CHARS:
+                out.add(leak_digest(value))
+    return frozenset(out)
+
+
+def _strings(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+    elif isinstance(value, str):
+        yield value
+
+
+def scan_for_leaks(view_root: Path | str, test_root: Path | str | None = None,
+                   digests: Iterable[str] = (), markers: Sequence[str] = GRADER_MARKERS,
+                   skip: Sequence[Path] = ()) -> None:
+    """Raise ProposerLeak when any file visible in the view references the held-out split.
+
+    (a) a path or a file body naming the held-out root (absolute path, basename) or test_results;
+    (b) a grader marker in a body, or a JSON value / text line whose sha256 is in `digests`.
+    """
+    root = Path(view_root)
+    if not root.is_dir():
+        return
+    needles: list[str] = list(markers)
+    if test_root is not None:
+        test = Path(os.path.abspath(test_root))
+        needles += [str(test), test.as_posix(), test.name]
+    needles = [n for n in dict.fromkeys(needles) if n]
+    wanted = frozenset(digests)
+    skipped = [Path(os.path.abspath(p)) for p in skip]
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel.split("/")[0] in _SCAN_SKIP_DIRS:  # forbidden to the proposer anyway
+            continue
+        absolute = Path(os.path.abspath(path))
+        if any(s == absolute or s in absolute.parents for s in skipped):
+            continue
+        for needle in needles:
+            if needle in rel:
+                raise ProposerLeak(f"{rel!r} names held-out marker {needle!r} in its path")
+        try:
+            if path.stat().st_size > _SCAN_MAX_BYTES:
+                continue
+            body = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for needle in needles:
+            if needle in body:
+                raise ProposerLeak(f"{rel!r} contains held-out marker {needle!r}")
+        if not wanted:
+            continue
+        values: list[str] = [line for line in body.splitlines() if line.strip()]
+        for line in values[:]:
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            for item in _strings(parsed):
+                if isinstance(item, dict):
+                    values.append(json.dumps(item, sort_keys=True, default=str))
+                else:
+                    values.append(item)
+        try:
+            for item in _strings(json.loads(body)):
+                values.append(json.dumps(item, sort_keys=True, default=str)
+                              if isinstance(item, dict) else item)
+        except ValueError:
+            pass
+        for value in values:
+            if value.strip() and leak_digest(value) in wanted:
+                raise ProposerLeak(f"{rel!r} contains a held-out task value "
+                                   f"(sha256 {leak_digest(value)[:12]})")
+
+
 class _Log:
     """Append-only JSONL; each record chains to the previous one through `parent`."""
 
@@ -143,7 +270,8 @@ class AgentProposer:
                  objective: str = "maximize score, then minimize context tokens",
                  max_tokens: int = 4096, test_root: Path | str | None = None,
                  idle: float = 600.0, deadline: float = 3600.0,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 heldout_hashes: Iterable[str] = (), leak_markers: Sequence[str] = GRADER_MARKERS):
         if not callable(getattr(model, "chat", None)):
             raise TypeError("proposer provider must support tool calling")
         self.model = model
@@ -157,6 +285,8 @@ class AgentProposer:
         self.max_tokens = max_tokens
         self.test_root = Path(test_root) if test_root else None
         self.idle, self.deadline, self.clock = idle, deadline, clock
+        self.heldout_hashes = frozenset(heldout_hashes)
+        self.leak_markers = tuple(leak_markers)
         self.usage: dict[str, int] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
                                       "cache_read": 0, "cache_write": 0, "reasoning": 0}
 
@@ -218,6 +348,7 @@ class AgentProposer:
         forbidden = [*splits, *self.extra_forbidden, root / "proposals"]
         if Path(view_root).resolve() == root.resolve():
             forbidden.append(root / "views")
+        self._tripwire(Path(view_root), output, splits)
         template = PROMPT_PATH.read_text(encoding="utf-8")
         paths: list[Path] = []
         for index in range(count):
@@ -235,6 +366,18 @@ class AgentProposer:
                 if index == count - 1 and not paths:
                     raise
         return paths
+
+    def _tripwire(self, view_root: Path, output: Path, splits: Sequence[Path]) -> None:
+        """Abort the whole proposal before any model call if the view leaks held-out data."""
+        try:
+            for split in splits:
+                scan_for_leaks(view_root, split, self.heldout_hashes, self.leak_markers,
+                               skip=[output, *self.extra_forbidden])
+        except ProposerLeak as exc:
+            (output / "proposer.leak.json").write_text(
+                json.dumps({"reason": LEAK_REASON, "detail": redact(exc.detail)}, indent=2),
+                encoding="utf-8")
+            raise
 
     def _propose(self, sandbox: ToolSandbox, output: Path, name: str, prompt: str,
                  splits: Sequence[Path], root: Path) -> Path:
@@ -418,5 +561,6 @@ def _candidate_of(path: Any) -> str | None:
     return None
 
 
-__all__ = ["AgentProposer", "PROMPT_PATH", "ProposerBudgetExceeded", "ProposerStuck",
+__all__ = ["AgentProposer", "GRADER_MARKERS", "LEAK_REASON", "PROMPT_PATH", "ProposerLeak",
+           "heldout_digests", "leak_digest", "scan_for_leaks", "ProposerBudgetExceeded", "ProposerStuck",
            "ProposerTruncated", "SYSTEM", "fingerprint", "render_prompt"]
