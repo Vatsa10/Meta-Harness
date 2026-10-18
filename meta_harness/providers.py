@@ -448,6 +448,42 @@ class GroqModel(OpenAICompatibleModel):
     BASE_URL_ENV = "GROQ_BASE_URL"
 
 
+def parse_deepseek(response: Mapping[str, Any]) -> AssistantTurn:
+    """parse_openai plus DeepSeek's own cache accounting.
+
+    DeepSeek reports prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens, so the input
+    total already includes the cached part (input_includes_cache=True) and cache_read is the hit count.
+    `reasoning_content` (deepseek-reasoner) is never part of the parsed text or tool calls.
+    """
+    turn = parse_openai(response)
+    raw = response.get("usage") or {}
+    hit, miss = _int(raw, "prompt_cache_hit_tokens"), _int(raw, "prompt_cache_miss_tokens")
+    if "prompt_cache_hit_tokens" in raw or "prompt_cache_miss_tokens" in raw:
+        turn.usage.cache_read = hit
+        if not turn.usage.input:
+            turn.usage.input = hit + miss
+    return turn
+
+
+class DeepSeekModel(OpenAICompatibleModel):
+    """DeepSeek (https://api.deepseek.com) - OpenAI-compatible chat completions.
+
+    Model ids come from `models --provider deepseek` (this account lists `deepseek-flash`, the latest
+    flash model and the recommended default, and `deepseek-v4-pro`; both returned native tool calls).
+    Older reasoner-style models return `reasoning_content` (ignored here) and may have limited tool
+    calling, so prefer plain `call()` prompts for those. No default prices are shipped: cost is None unless supplied via --price or META_HARNESS_PRICES.
+    """
+
+    DEFAULT_BASE_URL = "https://api.deepseek.com"
+    API_KEY_ENV = "DEEPSEEK_API_KEY"
+    BASE_URL_ENV = "DEEPSEEK_BASE_URL"
+
+    def chat(self, system: str, messages: list[dict], tools: Sequence[ToolSpec], max_tokens: int = 4096,
+             **kwargs: Any) -> AssistantTurn:
+        body = {**openai_request(self.model, system, messages, tools, max_tokens), **kwargs}
+        return parse_deepseek(self.client.post(self.base_url + "/chat/completions", self._headers(), body))
+
+
 class AnthropicModel:
     DEFAULT_BASE_URL = "https://api.anthropic.com"
     API_KEY_ENV = "ANTHROPIC_API_KEY"
@@ -486,7 +522,7 @@ class AnthropicModel:
 
 
 OPENAI_COMPATIBLE = {"openai": OpenAICompatibleModel, "compatible": OpenAICompatibleModel,
-                     "unikey": UnikeyModel, "groq": GroqModel}
+                     "unikey": UnikeyModel, "groq": GroqModel, "deepseek": DeepSeekModel}
 # Every provider name model_from_environment accepts (canonical spellings): the CLI choices.
 PROVIDERS = ("anthropic", *OPENAI_COMPATIBLE, "scripted")
 
@@ -517,6 +553,8 @@ def model_from_environment(provider: str, model: str, **kwargs: Any) -> Any:
         return UnikeyModel(model, **kwargs)
     if provider == "groq":
         return GroqModel(model, **kwargs)
+    if provider == "deepseek":
+        return DeepSeekModel(model, **kwargs)
     if provider == "compatible":
         if not (kwargs.get("base_url") or os.environ.get(OpenAICompatibleModel.BASE_URL_ENV)):
             raise ValueError("compatible needs OPENAI_BASE_URL or --base-url")
@@ -532,8 +570,8 @@ def model_from_environment(provider: str, model: str, **kwargs: Any) -> Any:
 
 
 __all__ = [
-    "AnthropicModel", "AssistantTurn", "GroqModel", "OpenAICompatibleModel", "PROVIDERS", "Price", "ProviderError",
+    "AnthropicModel", "AssistantTurn", "DeepSeekModel", "GroqModel", "OpenAICompatibleModel", "PROVIDERS", "Price", "ProviderError",
     "RetryPolicy", "ToolCall", "ToolSpec", "UnikeyModel", "Usage", "anthropic_request", "cost_usd",
     "list_models", "list_unikey_models", "model_from_environment", "openai_request", "parse_anthropic",
-    "parse_openai", "price_for",
+    "parse_deepseek", "parse_openai", "price_for",
 ]
