@@ -13,6 +13,10 @@ from typing import Any, Callable, Mapping
 from .metrics import math_equivalence
 
 TARGET_FIELDS = ("expected", "label", "answer", "target")
+# Grading-only fields: the metric sees them, the harness never does. A task (or the domain that
+# built it) can declare more under GRADING_KEY, e.g. {"grading_fields": ["rubric"]}.
+GRADING_FIELDS = ("reference_output", "criteria")
+GRADING_KEY = "grading_fields"
 Metric = Callable[[Mapping, Mapping], float]
 
 
@@ -23,8 +27,23 @@ def expected_value(task: Mapping) -> Any:
     return None
 
 
+def hidden_fields(task: Mapping) -> set:
+    declared = task.get(GRADING_KEY) or ()
+    if isinstance(declared, str):
+        declared = (declared,)
+    return {*TARGET_FIELDS, *GRADING_FIELDS, GRADING_KEY, *declared}
+
+
+def hide_grading(task: Mapping) -> dict:
+    """Remove grading-only fields (reference outputs, judge criteria, declared extras)."""
+    hidden = hidden_fields(task) - set(TARGET_FIELDS)
+    return {k: v for k, v in task.items() if k not in hidden}
+
+
 def hide_target(task: Mapping) -> dict:
-    return {k: v for k, v in task.items() if k not in TARGET_FIELDS}
+    """The harness's view of a task: targets and grading-only fields removed."""
+    hidden = hidden_fields(task)
+    return {k: v for k, v in task.items() if k not in hidden}
 
 
 def _positional(fn) -> list:
@@ -33,6 +52,9 @@ def _positional(fn) -> list:
 
 
 def call_run(harness, task, model, trace) -> dict:
+    """Every harness.run goes through here, so grading-only fields never reach a harness, in any
+    protocol or isolation mode; callers keep the original task for the metric and learn()."""
+    task = hide_grading(task) if isinstance(task, Mapping) else task
     value = harness.run(task, model, trace) if len(_positional(harness.run)) >= 3 else harness.run(task, model)
     return dict(value) if isinstance(value, Mapping) and "output" in value else {"output": value}
 

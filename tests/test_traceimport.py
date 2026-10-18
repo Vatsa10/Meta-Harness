@@ -142,3 +142,59 @@ def test_imported_eval_set_runs_through_search_with_the_judge(tmp_path, monkeypa
     results = json.loads((Path(str(tmp_path / "store") + "-test") / "test_results.json").read_text(encoding="utf-8"))
     # only j2 (answered "391", judged against its "wrong, it is 391" criteria) passes: 1 of 3
     assert results["results"][0]["score"] == pytest.approx(1 / 3)
+
+
+def test_harness_never_sees_reference_or_criteria_but_metric_does():
+    from meta_harness import protocol
+    task = {"input": "q", "reference_output": "secret ref", "criteria": "be right",
+            "label": "x", "rubric": "hidden too", "grading_fields": ["rubric"], "id": "t"}
+    view = protocol.hide_target(task)
+    assert view == {"input": "q", "id": "t"}
+    assert task["criteria"] == "be right"            # original untouched for the metric
+
+
+def test_search_harness_echoing_reference_scores_zero_while_judge_sees_criteria(tmp_path, monkeypatch):
+    data = tmp_path / "d.jsonl"
+    data.write_text(json.dumps({"id": "a", "input": "q", "reference_output": "REF-ANSWER",
+                                "criteria": "CRIT-TOKEN"}) + "\n", encoding="utf-8")
+    harness = tmp_path / "echo.py"
+    harness.write_text("class Harness:\n    def run(self, task, model, trace):\n"
+                       "        return {'output': str(task.get('reference_output')) + '|' + str(task.get('criteria'))}\n",
+                       encoding="utf-8")
+    model = tmp_path / "m.jsonl"
+    model.write_text(json.dumps({"default": "x"}) + "\n", encoding="utf-8")
+    judge = tmp_path / "j.jsonl"
+    # PASS only if the judge saw the criteria AND the harness output was None|None (nothing leaked)
+    judge.write_text(json.dumps({"match": r"CRIT-TOKEN[\s\S]*Answer:\nNone\|None", "text": "VERDICT: PASS"}) + "\n"
+                     + json.dumps({"default": "VERDICT: FAIL"}) + "\n", encoding="utf-8")
+    monkeypatch.setenv("META_HARNESS_JUDGE_PROVIDER", "scripted")
+    monkeypatch.setenv("META_HARNESS_JUDGE_MODEL", str(judge))
+    assert cli.main(["search", "--harness", str(harness), "--search", str(data), "--test", str(data),
+                     "--metric", "meta_harness.judge:verdict", "--provider", "scripted", "--model", str(model),
+                     "--root", str(tmp_path / "store"), "--iterations", "0", "--no-cache"]) == 0
+    results = json.loads((Path(str(tmp_path / "store") + "-test") / "test_results.json").read_text(encoding="utf-8"))
+    assert results["results"][0]["score"] == 1.0
+    exact = tmp_path / "e.jsonl"
+    exact.write_text(json.dumps({"id": "a", "input": "q", "reference_output": "None|None"}) + "\n", encoding="utf-8")
+
+
+def test_empty_split_warns_and_dash_writes_stdout(tmp_path, capsys):
+    assert cli.main(["traces", "import", "--format", "otel", "--in", str(FIX / "otel.json"),
+                     "--out", "-", "--out-dir", str(tmp_path / "o"), "--train-fraction", "0"]) == 0
+    captured = capsys.readouterr()
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    assert len(rows) == 3 and rows[0]["failure"] == "error"
+    assert "warning: the train split is empty" in captured.err
+    assert not (Path.cwd() / "-").exists()
+
+
+def test_call_run_strips_grading_fields_for_every_protocol():
+    from meta_harness import protocol
+
+    class Echo:
+        def run(self, task, model, trace):
+            return {"output": sorted(task)}
+
+    task = {"input": "q", "criteria": "c", "reference_output": "r", "rubric": "z", "grading_fields": "rubric"}
+    assert protocol.call_run(Echo(), task, None, None)["output"] == ["input"]
+    assert set(task) == {"input", "criteria", "reference_output", "rubric", "grading_fields"}

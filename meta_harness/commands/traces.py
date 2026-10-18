@@ -17,7 +17,7 @@ def add_arguments(parser) -> None:
     imp = sub.add_parser("import", help="write failure-first, deduplicated eval tasks")
     imp.add_argument("--format", choices=ti.FORMATS, required=True)
     imp.add_argument("--in", dest="inp", required=True, metavar="PATH", help="trace export file")
-    imp.add_argument("--out", help="write every selected task to this JSONL file")
+    imp.add_argument("--out", help="write every selected task to this JSONL file (- for stdout)")
     imp.add_argument("--out-dir", help="write train.jsonl, search.jsonl and test.jsonl here")
     imp.add_argument("--seed", type=int, default=0)
     imp.add_argument("--train-fraction", type=float, default=0.2)
@@ -46,7 +46,9 @@ def run(args) -> int:
         print(f"no traces with an input found in {args.inp}", file=sys.stderr)
         return 2
     summary: dict = {"tasks": len(tasks), "skipped_duplicates": len(traces) - len(ti.select(traces))}
-    if args.out:
+    if args.out == "-":
+        sys.stdout.write("".join(json.dumps(task, ensure_ascii=False) + "\n" for task in tasks))
+    elif args.out:
         summary["out"] = str(ti.write_jsonl(args.out, tasks))
     if args.out_dir:
         try:
@@ -57,5 +59,8 @@ def run(args) -> int:
         for name, rows in parts.items():
             summary[name] = {"path": str(ti.write_jsonl(Path(args.out_dir) / f"{name}.jsonl", rows)),
                              "tasks": len(rows)}
-    print(json.dumps(summary, ensure_ascii=False))
+            if not rows:
+                print(f"warning: the {name} split is empty ({len(tasks)} tasks); "
+                      "import more traces or change the fractions", file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False), file=sys.stderr if args.out == "-" else sys.stdout)
     return 0
