@@ -25,10 +25,13 @@ rewrite only those bytes in a copy of the project.
 from __future__ import annotations
 
 import ast
+import difflib
 import fnmatch
 import hashlib
 import json
+import math
 import re
+import shutil
 import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -732,3 +735,256 @@ def rediscover(project_dir: str | Path, manifest_path: str | Path, include=None,
     manifest = discover(project_dir, include=include, exclude=exclude, previous=previous)
     manifest.save(mp)
     return manifest
+
+
+# =========================================================================== apply
+
+_LIMIT_KEYS = _LIMIT_KWARGS | {"max_retries", "max_steps"}
+
+
+@dataclass
+class ApplyResult:
+    out_dir: str
+    diff: str
+    changed: list[str]
+
+
+def _leaf(key: str | None) -> str:
+    if not key:
+        return ""
+    return re.split(r"[.\[]", key.rsplit(".", 1)[-1])[0].lower()
+
+
+def _check_value(k: Knob, new: Any) -> Any:
+    """Type- and bounds-check ``new`` for knob ``k``; return the value to write."""
+    if isinstance(new, bool):
+        raise KnobError(f"{k.id}: booleans are not knob values")
+    leaf = _leaf(k.key)
+    numeric = isinstance(k.value, (int, float))
+    if k.kind == "temperature" or (numeric and leaf == "temperature"):
+        if not isinstance(new, (int, float)) or not math.isfinite(new) or not 0 <= new <= 2:
+            raise KnobError(f"{k.id}: temperature must be a number in [0, 2], got {new!r}")
+        return float(new) if isinstance(k.value, float) else new
+    if k.kind == "limit" or (numeric and leaf in _LIMIT_KEYS):
+        if not isinstance(new, int) or new < 1:
+            raise KnobError(f"{k.id}: limit must be an integer >= 1, got {new!r}")
+        return new
+    if isinstance(k.value, str):
+        if not isinstance(new, str):
+            raise KnobError(f"{k.id}: expected a string, got {type(new).__name__}")
+        if (k.kind == "model" or leaf in _MODEL_KWARGS) and (not new.strip() or "\n" in new):
+            raise KnobError(f"{k.id}: model must be a non-empty single-line string")
+        return new
+    if isinstance(k.value, int):
+        if not isinstance(new, int):
+            raise KnobError(f"{k.id}: expected an integer, got {new!r}")
+        return new
+    if not isinstance(new, (int, float)) or not math.isfinite(new):
+        raise KnobError(f"{k.id}: expected a finite number, got {new!r}")
+    return float(new)
+
+
+def _num(v) -> str:
+    return repr(v) if isinstance(v, float) else str(v)
+
+
+# ---- python literals
+
+_PY_PREFIX = re.compile(r"^([A-Za-z]*)('''|\"\"\"|'|\")")
+
+
+def _py_escape(s: str, quote: str, triple: bool) -> str:
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == quote:
+            out.append("\\" + ch)
+        elif ch == "\n":
+            out.append("\n" if triple else "\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif o < 0x20 or o == 0x7F or 0xD800 <= o <= 0xDFFF:
+            out.append(f"\\x{o:02x}" if o < 0x100 else f"\\u{o:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _render_py(original_src: str, new: Any) -> str:
+    if not isinstance(new, str):
+        return _num(new)
+    m = _PY_PREFIX.match(original_src)
+    quote = m.group(2) if m else '"'
+    lit = quote + _py_escape(new, quote[0], len(quote) == 3) + quote   # r/u/f prefixes dropped
+    if ast.literal_eval(lit) != new:
+        raise KnobError("internal: python literal round-trip failed")
+    return lit
+
+
+# ---- config literals
+
+def _render_json(_src: str, new: Any) -> str:
+    return json.dumps(new, ensure_ascii=False) if isinstance(new, str) else _num(new)
+
+
+def _toml_basic(s: str, multiline: bool) -> str:
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\n" if multiline else "\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif o < 0x20 or o == 0x7F:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _render_toml(src: str, new: Any) -> str:
+    if not isinstance(new, str):
+        return _num(new)
+    if src.startswith(('"""', "'''")):
+        lead = src[3:5] if src[3:5] == "\r\n" else ("\n" if src[3:4] == "\n" else "")
+        return '"""' + lead + _toml_basic(new, True) + '"""'
+    if src.startswith("'") and "'" not in new \
+            and not any(ord(c) < 0x20 or ord(c) == 0x7F for c in new):
+        return "'" + new + "'"
+    return '"' + _toml_basic(new, False) + '"'
+
+
+_YAML_PLAIN_OK = re.compile(r"^[A-Za-z0-9_./(][^\n#:'\"]*$")
+
+
+def _render_yaml(src: str, new: Any) -> str:
+    if not isinstance(new, str):
+        return _num(new)
+    style = _yaml_style(src)
+    if style == "block":
+        body = new[:-1] if new.endswith("\n") else new
+        eol = "\r\n" if "\r\n" in src else "\n"
+        lines = src.split("\n")
+        indent = next((ln[:len(ln) - len(ln.lstrip(" "))] for ln in lines[1:] if ln.strip()),
+                      "  ")
+        if body and not body.startswith((" ", "\n")) and not body.endswith(("\n", " ")) \
+                and "\r" not in body and all(ord(c) >= 0x20 or c in "\n\t" for c in body):
+            header = "|" if new.endswith("\n") else "|-"
+            return header + eol + eol.join(indent + ln if ln else "" for ln in body.split("\n"))
+        style = "double"
+    if style == "plain" and _YAML_PLAIN_OK.match(new) and new == new.strip() \
+            and not _YAML_SPECIAL.match(new):
+        return new
+    if style == "single" and all(ord(c) >= 0x20 for c in new):
+        return "'" + new.replace("'", "''") + "'"
+    return json.dumps(new, ensure_ascii=False)
+
+
+def _renderer(rel: str):
+    low = rel.lower()
+    if low.endswith(".py"):
+        return _render_py
+    if low.endswith(".json"):
+        return _render_json
+    if low.endswith(".toml"):
+        return _render_toml
+    return _render_yaml
+
+
+def _scan_file(rel: str, data: bytes) -> dict[str, Knob]:
+    raw = _scan_python(rel, data) if rel.endswith(".py") else _scan_config(rel, data)
+    return {k.id: k for k in _assign_ids(raw)}
+
+
+def _same(a, b) -> bool:
+    return type(a) is type(b) and a == b
+
+
+def _copy_ignore(directory, names):
+    base = Path(directory)
+    return [n for n in names
+            if (_skip_dir(n) if (base / n).is_dir() else _skip_file(n))]
+
+
+def apply(project_dir: str | Path, out_dir: str | Path, manifest: Manifest,
+          values: dict[str, Any]) -> ApplyResult:
+    """Copy ``project_dir`` to ``out_dir`` and write ``values`` (knob id -> new value).
+
+    Only the recorded source span of each knob is rewritten, keeping its
+    quoting style where the new value allows it. Everything is validated
+    before anything is written: unknown, frozen or dynamic ids, mistyped or
+    out-of-bounds values, and spans whose source no longer holds the
+    manifest's value raise :class:`KnobError`. Each rewritten file is parsed
+    again and every new value must read back exactly. The original project is
+    never modified. The copy skips VCS dirs, virtualenvs, caches and ``.env*``.
+    """
+    root = Path(project_dir).resolve()
+    out = Path(out_dir).resolve()
+    if out == root or root in out.parents:
+        raise KnobError("out_dir must be outside the project directory")
+    if out.exists() and (not out.is_dir() or any(out.iterdir())):
+        raise KnobError(f"out_dir exists and is not an empty directory: {out}")
+
+    edits: dict[str, list[tuple[Knob, Any]]] = {}
+    for knob_id, new in values.items():
+        k = manifest.get(knob_id)
+        if k.frozen:
+            raise KnobError(f"{knob_id}: knob is frozen")
+        if k.dynamic:
+            raise KnobError(f"{knob_id}: knob is dynamic (f-string with expressions)")
+        edits.setdefault(k.file, []).append((k, _check_value(k, new)))
+
+    new_files: dict[str, bytes] = {}
+    diffs: list[str] = []
+    for rel in sorted(edits):
+        src_path = root / rel
+        if not src_path.is_file():
+            raise KnobError(f"{rel}: file is missing")
+        data = src_path.read_bytes()
+        current = _scan_file(rel, data)
+        render = _renderer(rel)
+        result = data
+        ordered = sorted(edits[rel], key=lambda e: e[0].offset, reverse=True)
+        prev_start = None
+        for k, new in ordered:
+            cur = current.get(k.id)
+            if cur is None or (cur.offset, cur.end_offset) != (k.offset, k.end_offset) \
+                    or not _same(cur.value, k.value):
+                raise KnobError(f"{k.id}: source changed since discovery; run discover again")
+            if prev_start is not None and k.end_offset > prev_start:
+                raise KnobError(f"{k.id}: overlapping knob spans")
+            prev_start = k.offset
+            old_src = data[k.offset:k.end_offset].decode("utf-8")
+            lit = render(old_src, new).encode("utf-8")
+            result = result[:k.offset] + lit + result[k.end_offset:]
+        try:
+            if rel.endswith(".py"):
+                ast.parse(result, filename=rel)
+            after = _scan_file(rel, result)
+        except (SyntaxError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError,
+                IndexError) as e:
+            raise KnobError(f"{rel}: rewritten file does not parse: {e}") from e
+        for k, new in edits[rel]:
+            got = after.get(k.id)
+            if got is None or not _same(got.value, new):
+                raise KnobError(f"{k.id}: rewritten value did not read back as {new!r}")
+        new_files[rel] = result
+        a = data.decode("utf-8").splitlines(keepends=True)
+        b = result.decode("utf-8").splitlines(keepends=True)
+        for line in difflib.unified_diff(a, b, fromfile=f"a/{rel}", tofile=f"b/{rel}"):
+            diffs.append(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n")
+
+    if out.exists():
+        out.rmdir()
+    shutil.copytree(root, out, ignore=_copy_ignore, symlinks=True)
+    for rel, blob in new_files.items():
+        (out / rel).write_bytes(blob)
+    return ApplyResult(out_dir=str(out), diff="".join(diffs), changed=sorted(new_files))
