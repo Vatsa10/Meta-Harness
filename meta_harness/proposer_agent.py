@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from .cache import DiskCache, default_proposer_cache_dir, proposer_cache_enabled, proposer_call_key
 from .chat_types import ToolCall
 from .metrics import estimate_tokens
 from .proposer_tools import TOOL_SPECS, ToolRefused, ToolSandbox, dispatch
@@ -57,7 +58,23 @@ VIEW_NOTES = {
             "are absent: do not list, read or grep for them. Read the seeds' source and scores, "
             "then write.",
 }
-_DEFAULTS = {"domain_notes": "", "view_note": VIEW_NOTES["full"]}
+_RUN = ("run.json                       search config and the search-split tasks\n"
+        "frontier.json                  Pareto frontier of the last completed run, if any\n")
+_LAYOUT_LINES = {
+    "harness.py": "candidates/ID/harness.py       the candidate's full source",
+    "scores.json": "candidates/ID/scores.json      score, context_cost, repeats, score_std, valid, error",
+    "traces.jsonl": "candidates/ID/traces.jsonl     one JSON event per line (model_call, task_end, reward)",
+    "proposer_reasoning.md": "candidates/ID/proposer_reasoning.md  why the previous proposer wrote it",
+    "summary.md": "candidates/ID/summary.md       a written summary of its evaluation",
+}
+_VIEW_LAYOUT_FILES = {"full": ("harness.py", "scores.json", "traces.jsonl", "proposer_reasoning.md"),
+                      "scores": ("harness.py", "scores.json"),
+                      "summary": ("harness.py", "scores.json", "summary.md"),
+                      "seed": ("harness.py", "scores.json")}
+LAYOUTS = {view: _RUN + "\n".join(_LAYOUT_LINES[f] for f in files)
+           for view, files in _VIEW_LAYOUT_FILES.items()}
+LAYOUTS["seed"] = LAYOUTS["seed"].replace("candidates/ID/", "candidates/initial-ID/")
+_DEFAULTS = {"domain_notes": "", "view_note": VIEW_NOTES["full"], "layout": LAYOUTS["full"]}
 
 
 class _Strict(dict):
@@ -271,7 +288,8 @@ class AgentProposer:
                  max_tokens: int = 4096, test_root: Path | str | None = None,
                  idle: float = 600.0, deadline: float = 3600.0,
                  clock: Callable[[], float] = time.monotonic,
-                 heldout_hashes: Iterable[str] = (), leak_markers: Sequence[str] = GRADER_MARKERS):
+                 heldout_hashes: Iterable[str] = (), leak_markers: Sequence[str] = GRADER_MARKERS,
+                 cache: Path | str | None = None):
         if not callable(getattr(model, "chat", None)):
             raise TypeError("proposer provider must support tool calling")
         self.model = model
@@ -287,6 +305,9 @@ class AgentProposer:
         self.idle, self.deadline, self.clock = idle, deadline, clock
         self.heldout_hashes = frozenset(heldout_hashes)
         self.leak_markers = tuple(leak_markers)
+        if cache is None and proposer_cache_enabled():
+            cache = os.environ.get("META_HARNESS_PROPOSER_CACHE_DIR") or default_proposer_cache_dir()
+        self.cache = DiskCache(cache) if cache else None
         self.usage: dict[str, int] = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
                                       "cache_read": 0, "cache_write": 0, "reasoning": 0}
 
@@ -357,15 +378,59 @@ class AgentProposer:
             prompt = render_prompt(template, iteration=iteration, count=count, index=index,
                                    domain=self.domain, domain_notes=self.domain_notes,
                                    max_tool_calls=self.max_tool_calls, objective=self.objective,
-                                   view_note=VIEW_NOTES.get(self.view, VIEW_NOTES["full"]))
+                                   view_note=VIEW_NOTES.get(self.view, VIEW_NOTES["full"]),
+                                   layout=LAYOUTS.get(self.view, LAYOUTS["full"]))
+            key = self._cache_key(Path(view_root), root, prompt) if self.cache is not None else None
             try:
+                hit = self._from_cache(key, sandbox, output, name, root) if key else None
+                if hit is not None:
+                    paths.append(hit)
+                    continue
                 paths.append(self._propose(sandbox, output, name, prompt, splits, root))
+                if key:
+                    self._to_cache(key, paths[-1])
             except (ProposerBudgetExceeded, ProposerStuck, ProposerTruncated) as exc:
                 # One proposal giving up must not discard its siblings' written candidates.
                 (output / f"{name}.error").write_text(repr(exc), encoding="utf-8")
                 if index == count - 1 and not paths:
                     raise
         return paths
+
+    # -- proposer call cache (opt-in: META_HARNESS_PROPOSER_CACHE=1) -----------------------------
+
+    def _cache_key(self, view_root: Path, root: Path, prompt: str) -> str:
+        model_id = str(getattr(self.model, "model", None) or type(self.model).__name__)
+        return proposer_call_key(view_root, root, model_id, SYSTEM + "\x00" + prompt,
+                                 skip=_SCAN_SKIP_DIRS)
+
+    def _from_cache(self, key: str, sandbox: ToolSandbox, output: Path, name: str,
+                    root: Path) -> Path | None:
+        stored = self.cache.get(key) if self.cache is not None else None
+        if not stored or not isinstance(stored.get("source"), str):
+            return None
+        written = sandbox.write_candidate(stored["source"], str(stored.get("rationale", "")), name)
+        log = _Log(output / f"{name}.proposer_log.jsonl")
+        log.write({"event": "cache_hit", "role": "event", "cache_hit": True, "key": key})
+        (output / f"{name}.outcomes.json").write_text(json.dumps(
+            {"dispatched": 0, "denied": 0, "denied_split": 0, "failed": 0, "aborted": 0,
+             "cache_hit": 1}, indent=2), encoding="utf-8")
+        proposal = {"candidate": name, "fingerprint": fingerprint(root),
+                    "parents_read": list(stored.get("parents_read") or []), "stop_reason": "done",
+                    "cache_hit": True}
+        (output / f"{name}.proposal.json").write_text(json.dumps(redact_obj(proposal), indent=2),
+                                                     encoding="utf-8")
+        return written
+
+    def _to_cache(self, key: str, written: Path) -> None:
+        if self.cache is None or not written.is_file():
+            return
+        reasoning = written.with_name(written.stem + ".reasoning.md")
+        proposal = written.with_name(written.stem + ".proposal.json")
+        parents = json.loads(proposal.read_text(encoding="utf-8")).get("parents_read", []) \
+            if proposal.is_file() else []
+        self.cache.put(key, {"source": written.read_text(encoding="utf-8"),
+                             "rationale": reasoning.read_text(encoding="utf-8")
+                             if reasoning.is_file() else "", "parents_read": parents})
 
     def _tripwire(self, view_root: Path, output: Path, splits: Sequence[Path]) -> None:
         """Abort the whole proposal before any model call if the view leaks held-out data."""
@@ -387,7 +452,7 @@ class AgentProposer:
         parents: list[str] = []
         stop_reason = "error"
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-        log.write({"role": "user", "chars": len(prompt)})
+        log.write({"role": "user", "chars": len(prompt), "cache_hit": False})
         watchdog = Watchdog(self.idle, self.deadline, clock=self.clock)
         used = 0
         length_stops = 0
@@ -561,6 +626,6 @@ def _candidate_of(path: Any) -> str | None:
     return None
 
 
-__all__ = ["AgentProposer", "GRADER_MARKERS", "LEAK_REASON", "PROMPT_PATH", "ProposerLeak",
+__all__ = ["AgentProposer", "GRADER_MARKERS", "LAYOUTS", "LEAK_REASON", "PROMPT_PATH", "ProposerLeak",
            "heldout_digests", "leak_digest", "scan_for_leaks", "ProposerBudgetExceeded", "ProposerStuck",
            "ProposerTruncated", "SYSTEM", "fingerprint", "render_prompt"]

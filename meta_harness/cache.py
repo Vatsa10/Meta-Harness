@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
+
+PROPOSER_CACHE_ENV = "META_HARNESS_PROPOSER_CACHE"
 
 
 def cache_key(model_id: str, prompt: str, kwargs: Mapping[str, Any],
@@ -15,6 +18,45 @@ def cache_key(model_id: str, prompt: str, kwargs: Mapping[str, Any],
                           "sample": sample_index},
                          sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def proposer_cache_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """The proposer call cache is opt-in so live runs draw fresh proposals by default."""
+    return (os.environ if environ is None else environ).get(PROPOSER_CACHE_ENV, "") == "1"
+
+
+def default_proposer_cache_dir() -> Path:
+    return Path.home() / ".cache" / "meta_harness" / "proposer"
+
+
+# Adapted from google-research/harness2 (Apache-2.0), harness2/core/proposer.py
+# (_call_fingerprint): content-address a proposer call by every evidence file and its workspace.
+def proposer_call_key(view_root: Path | str, workspace: Path | str, model_id: str, prompt: str,
+                      skip: Iterable[str] = ()) -> str:
+    """sha256 over model id, prompt, resolved workspace path and every visible file (path+bytes).
+
+    The workspace path is part of the key: two runs with byte-identical evidence stay independent
+    draws. Top-level directories in `skip` (the proposer cannot read them) are left out.
+    """
+    skipped = set(skip)
+    digest = hashlib.sha256()
+    for value in ("v1", model_id, prompt, str(Path(workspace).resolve())):
+        digest.update(value.encode("utf-8", errors="replace") + b"\0")
+    root = Path(view_root)
+    if root.is_dir():
+        for path in sorted(root.rglob("*")):
+            rel = path.relative_to(root).as_posix()
+            if not path.is_file() or rel.split("/")[0] in skipped or "__pycache__" in path.parts:
+                continue
+            digest.update(rel.encode("utf-8", errors="replace") + b"\0")
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(chunk)
+            except OSError as exc:
+                digest.update(f"<unreadable:{type(exc).__name__}>".encode("utf-8"))
+            digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class DiskCache:
@@ -95,4 +137,5 @@ class CachedModel:
         return upstream
 
 
-__all__ = ["CachedModel", "DiskCache", "cache_key"]
+__all__ = ["CachedModel", "DiskCache", "PROPOSER_CACHE_ENV", "cache_key", "default_proposer_cache_dir",
+           "proposer_cache_enabled", "proposer_call_key"]
