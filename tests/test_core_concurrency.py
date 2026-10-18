@@ -19,7 +19,7 @@ class Harness:
         self.run_index = previous
 
     def run(self, task, model, trace):
-        return task.get("label", "") if self.run_index % 2 == 0 else "wrong"
+        return task.get("input", "") if self.run_index % 2 == 0 else "wrong"
 '''
 
 SLEEPER = '''
@@ -29,7 +29,7 @@ import time
 class Harness:
     def run(self, task, model, trace):
         time.sleep(0.6)
-        return task["label"]
+        return task["input"]
 '''
 
 
@@ -74,7 +74,7 @@ def test_results_are_tagged_with_split(tmp_path: Path):
     source.write_text('''
 class Harness:
     def run(self, task, model, trace):
-        return task["label"]
+        return task["input"]
 ''')
     config = SearchConfig(tmp_path / "store", iterations=0)
     runner = SearchRunner(config, CandidateEvaluator(lambda p, **_: p), lambda *_: [])

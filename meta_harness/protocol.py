@@ -52,9 +52,9 @@ def _positional(fn) -> list:
 
 
 def call_run(harness, task, model, trace) -> dict:
-    """Every harness.run goes through here, so grading-only fields never reach a harness, in any
+    """Every harness.run goes through here, so targets and grading-only fields never reach a harness, in any
     protocol or isolation mode; callers keep the original task for the metric and learn()."""
-    task = hide_grading(task) if isinstance(task, Mapping) else task
+    task = hide_target(task) if isinstance(task, Mapping) else task
     value = harness.run(task, model, trace) if len(_positional(harness.run)) >= 3 else harness.run(task, model)
     return dict(value) if isinstance(value, Mapping) and "output" in value else {"output": value}
 

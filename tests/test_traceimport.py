@@ -198,3 +198,37 @@ def test_call_run_strips_grading_fields_for_every_protocol():
     task = {"input": "q", "criteria": "c", "reference_output": "r", "rubric": "z", "grading_fields": "rubric"}
     assert protocol.call_run(Echo(), task, None, None)["output"] == ["input"]
     assert set(task) == {"input", "criteria", "reference_output", "rubric", "grading_fields"}
+
+
+def test_cheating_harness_returning_label_scores_zero_in_plain_search(tmp_path):
+    data = tmp_path / "d.jsonl"
+    data.write_text("".join(json.dumps({"input": f"item {i}", "label": f"L{i}"}) + "\n" for i in range(4)),
+                    encoding="utf-8")
+    harness = tmp_path / "cheat.py"
+    harness.write_text("class Harness:\n    def run(self, task, model, trace):\n"
+                       "        return {'output': str(task.get('label') or task.get('expected'))}\n", encoding="utf-8")
+    model = tmp_path / "m.jsonl"
+    model.write_text(json.dumps({"default": "x"}) + "\n", encoding="utf-8")
+    for isolation in ("none", "process"):
+        root = tmp_path / f"store-{isolation}"
+        assert cli.main(["search", "--harness", str(harness), "--search", str(data), "--test", str(data),
+                         "--protocol", "plain", "--isolation", isolation, "--provider", "scripted",
+                         "--model", str(model), "--root", str(root), "--iterations", "0", "--no-cache"]) == 0
+        results = json.loads((Path(str(root) + "-test") / "test_results.json").read_text(encoding="utf-8"))
+        assert results["results"][0]["score"] == 0.0, isolation
+
+
+def test_draft_verification_learns_labels_only_through_learn():
+    from meta_harness.cls_harnesses import DraftVerificationHarness
+    from meta_harness import protocol
+
+    class Trace:
+        def event(self, *a, **k):
+            pass
+
+    harness = DraftVerificationHarness(["fruit", "vehicle"])
+    task = {"input": "apple pie", "label": "fruit"}
+    result = protocol.call_run(harness, task, lambda prompt: "fruit", Trace())
+    assert harness.memory == []
+    protocol.call_learn(harness, task, result, None)
+    assert [(m.text, m.label) for m in harness.memory] == [("apple pie", "fruit")]

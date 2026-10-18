@@ -107,10 +107,13 @@ class DraftVerificationHarness:
             verify_prompt = f"Initial label: {draft}\n{verification}\nInput: {query}\nKeep or revise; return one label."
             trace.event("verification_prompt", {"prompt": verify_prompt})
             final = _label(_call(model, verify_prompt), self.labels)
-        if "label" in task:
-            self.memory.append(MemoryExample(query, str(task["label"])))
         trace.event("classification_result", {"draft": draft, "prediction": final})
         return final
+
+    def learn(self, task: Mapping[str, Any], result: Any = None) -> None:
+        # labels arrive only through learn(); run() never sees targets
+        if "label" in task:
+            self.memory.append(MemoryExample(str(task.get("input", "")), str(task["label"])))
 
 
 __all__ = ["MemoryExample", "LabelPrimedQueryHarness", "DraftVerificationHarness", "_call", "_label"]

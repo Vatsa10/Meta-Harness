@@ -5,7 +5,7 @@ from meta_harness.core import CandidateEvaluator, FilesystemExperience, SearchCo
 HARNESS = '''
 class Harness:
     def run(self, task, model, trace):
-        return task["label"]
+        return task["input"]
 '''
 
 
