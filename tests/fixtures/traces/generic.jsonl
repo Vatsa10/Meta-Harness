@@ -1,0 +1,10 @@
+{"id": "j1", "input": "Translate 'good morning' to French", "output": "Bonjour", "feedback": "good"}
+{"id": "j2", "input": "What is 17 * 23?", "output": "381", "feedback": "wrong, it is 391"}
+{"id": "j3", "input": "Write a haiku about rain", "output": "", "error": "RateLimitError: 429 Too Many Requests"}
+{"id": "j4", "input": "Convert 5 km to miles", "output": "About 3.11 miles.", "score": 0.9}
+{"id": "j5", "input": "WHAT is 17 * 23 ?", "output": "391"}
+{"id": "j6", "input": "Use key sk-abcdef1234567890XYZ to call the API", "output": "Done.", "score": 0.2}
+{"id": "j7", "input": "Name the capital of Australia", "output": "Canberra", "feedback": 1}
+{"id": "j8", "input": "List three prime numbers", "output": "2, 3, 5"}
+{"id": "j9", "input": "Spell 'necessary'", "output": "neccessary", "feedback": 0}
+{"id": "j10", "input": "What day follows Friday?", "output": "Saturday"}

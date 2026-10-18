@@ -1,0 +1,35 @@
+{
+  "data": [
+    {"id": "lf-trace-001", "name": "rag-answer", "timestamp": "2026-10-17T09:12:03.120Z", "userId": "u-77",
+     "input": {"messages": [{"role": "user", "content": "What is the warranty period for the X200 router?"}]},
+     "output": {"content": "The X200 has a 2 year warranty."},
+     "observations": [
+       {"id": "obs-1", "type": "SPAN", "name": "retrieve", "startTime": "2026-10-17T09:12:03.200Z", "level": "DEFAULT",
+        "input": "warranty X200", "output": ["doc-17", "doc-42"]},
+       {"id": "obs-2", "type": "GENERATION", "name": "answer", "model": "gpt-4o", "startTime": "2026-10-17T09:12:03.900Z",
+        "level": "DEFAULT", "input": [{"role": "user", "content": "What is the warranty period for the X200 router?"}],
+        "output": {"role": "assistant", "content": "The X200 has a 2 year warranty."}}
+     ],
+     "scores": [{"name": "correctness", "value": 1.0, "dataType": "NUMERIC", "comment": "matches policy doc"}]},
+    {"id": "lf-trace-002", "name": "rag-answer", "timestamp": "2026-10-17T09:20:44.010Z",
+     "input": "Cancel my subscription, card 4111 1111 1111 1111, call me on +1 415-555-0132",
+     "output": "I have upgraded your subscription to Pro.",
+     "observations": [
+       {"id": "obs-3", "type": "GENERATION", "name": "answer", "startTime": "2026-10-17T09:20:44.100Z", "level": "DEFAULT",
+        "input": "Cancel my subscription", "output": "I have upgraded your subscription to Pro."}
+     ],
+     "scores": [{"name": "correctness", "value": 0.0, "dataType": "NUMERIC", "comment": "did the opposite of the request"},
+                {"name": "user-feedback", "value": "negative", "stringValue": "negative", "dataType": "CATEGORICAL"}]},
+    {"id": "lf-trace-003", "name": "rag-answer", "timestamp": "2026-10-17T10:01:00.000Z",
+     "input": "Summarise ticket 5521", "output": null,
+     "observations": [
+       {"id": "obs-4", "type": "GENERATION", "name": "answer", "startTime": "2026-10-17T10:01:00.100Z", "level": "ERROR",
+        "statusMessage": "context length exceeded (131072 tokens)", "input": "Summarise ticket 5521", "output": null}
+     ],
+     "scores": []},
+    {"id": "lf-trace-004", "name": "rag-answer", "timestamp": "2026-10-17T10:05:00.000Z",
+     "input": "Does the X200 support WPA3?", "output": "Yes, after firmware 2.1.",
+     "observations": [], "scores": [{"name": "helpfulness", "value": 0.8, "dataType": "NUMERIC"}]}
+  ],
+  "meta": {"page": 1, "limit": 50, "totalItems": 4, "totalPages": 1}
+}
