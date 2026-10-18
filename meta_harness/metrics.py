@@ -104,6 +104,24 @@ def terminal_metric(task: Any, result: Any = None, timeout: float | None = None)
     return float(code == 0)
 
 
+_TOKEN = re.compile(r"\w+")
+
+
+def diversity(sources: Any) -> float:
+    """Mean pairwise token-set Jaccard distance (0 = identical, 1 = disjoint) between sources.
+    Fewer than two sources -> 0.0. Idea from google-research/harness2 (Apache-2.0), core/tree.py."""
+    sets = [frozenset(_TOKEN.findall(str(source))) for source in sources]
+    if len(sets) < 2:
+        return 0.0
+    total, pairs = 0.0, 0
+    for i in range(len(sets)):
+        for j in range(i + 1, len(sets)):
+            union = len(sets[i] | sets[j])
+            total += (1.0 - len(sets[i] & sets[j]) / union) if union else 0.0
+            pairs += 1
+    return total / pairs
+
+
 def __getattr__(name: str) -> Any:
     # METRICS is protocol.BUILTIN_METRICS, (task, result) metrics; resolved lazily because
     # protocol imports this module.
@@ -113,5 +131,5 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
-__all__ = ["METRICS", "estimate_tokens", "exact_match", "math_equivalence",
+__all__ = ["METRICS", "diversity", "estimate_tokens", "exact_match", "math_equivalence",
            "normalize_answer", "terminal_metric"]

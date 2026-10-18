@@ -323,6 +323,21 @@ def _stage(receipt: dict) -> str:
     return "proposed"
 
 
+def _diversity_report(root: Path) -> dict:
+    """metrics.diversity over candidate sources: overall and per optimizer iteration."""
+    from .metrics import diversity
+    sources: dict[str, list[str]] = {}
+    for directory in _candidate_dirs(root):
+        try:
+            text = (directory / "harness.py").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        sources.setdefault(f"{_iteration_of(directory.name):04d}", []).append(text)
+    everything = [t for texts in sources.values() for t in texts]
+    return {"overall": diversity(everything),
+            "by_iteration": {key: diversity(texts) for key, texts in sorted(sources.items())}}
+
+
 def report(root: Path) -> dict:
     """Receipt verdict and stage counts (overall and per optimizer iteration), and tool outcomes
     joined to scores per verdict (Table 8 with denied / failed / aborted)."""
@@ -352,7 +367,8 @@ def report(root: Path) -> dict:
         group["mean_score"] = group["score_sum"] / group["scored"] if group["scored"] else None
         del group["score_sum"]
     return redact_obj({"receipts": sum(verdicts.values()), "verdicts": verdicts, "stages": stages,
-                       "by_iteration": dict(sorted(by_iteration.items())), "tool_outcomes_by_verdict": joined})
+                       "by_iteration": dict(sorted(by_iteration.items())), "tool_outcomes_by_verdict": joined,
+                       "diversity": _diversity_report(Path(root))})
 
 
 def export_cases(root: Path, out: Path) -> int:
