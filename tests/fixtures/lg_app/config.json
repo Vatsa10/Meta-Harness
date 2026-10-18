@@ -1,0 +1,5 @@
+{
+  "planner": {"model": "gpt-4o", "temperature": 0.0},
+  "tags": ["a", "b"],
+  "debug": true
+}

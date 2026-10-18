@@ -1,0 +1,9 @@
+# agent settings
+worker:
+  model: gpt-4o-mini
+  greeting: 'it''s ready'
+  system: |
+    You are a worker.
+    Stay in scope.
+reviewer:
+  max_iterations: 4  # hard cap

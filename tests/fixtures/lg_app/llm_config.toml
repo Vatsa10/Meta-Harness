@@ -1,0 +1,5 @@
+[llm]
+model = "gpt-4o"  # default
+temperature = 0.5
+system = """
+Be brief."""
