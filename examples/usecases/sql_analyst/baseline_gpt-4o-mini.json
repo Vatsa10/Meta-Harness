@@ -1,0 +1,146 @@
+{
+ "usecase": "sql_analyst",
+ "model": "gpt-4o-mini",
+ "n": 15,
+ "score": 0.733,
+ "input_tokens": 133409,
+ "output_tokens": 12612,
+ "cost_usd": 0.0276,
+ "runs": [
+  {
+   "id": "sql-003",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 3,
+   "gold_rows": 3,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-004",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-005",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 5,
+   "gold_rows": 5,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-007",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "sql-008",
+   "score": 0.0,
+   "saved": true,
+   "got_rows": 4,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-012",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-014",
+   "score": 0.0,
+   "saved": true,
+   "got_rows": 3,
+   "gold_rows": 4,
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "sql-018",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-019",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-021",
+   "score": 0.0,
+   "saved": true,
+   "got_rows": 119,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "sql-023",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 2
+  },
+  {
+   "id": "sql-029",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-032",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-034",
+   "score": 1.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "sql-036",
+   "score": 0.0,
+   "saved": true,
+   "got_rows": 1,
+   "gold_rows": 1,
+   "error": "",
+   "writes": 2
+  }
+ ]
+}

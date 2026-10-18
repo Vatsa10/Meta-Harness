@@ -1,0 +1,131 @@
+{
+ "usecase": "research_ops",
+ "model": "gpt-4o-mini",
+ "n": 15,
+ "score": 0.667,
+ "input_tokens": 39027,
+ "output_tokens": 1228,
+ "cost_usd": 0.0066,
+ "runs": [
+  {
+   "id": "ops-001",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-004",
+   "score": 0.0,
+   "answer_ok": false,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-005",
+   "score": 0.0,
+   "answer_ok": false,
+   "ticket_ok": false,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-007",
+   "score": 0.0,
+   "answer_ok": false,
+   "ticket_ok": false,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-008",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-012",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-017",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-018",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-019",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-021",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-025",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 1
+  },
+  {
+   "id": "ops-026",
+   "score": 0.0,
+   "answer_ok": true,
+   "ticket_ok": false,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-028",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-029",
+   "score": 1.0,
+   "answer_ok": true,
+   "ticket_ok": true,
+   "error": "",
+   "writes": 0
+  },
+  {
+   "id": "ops-031",
+   "score": 0.0,
+   "answer_ok": false,
+   "ticket_ok": false,
+   "error": "",
+   "writes": 0
+  }
+ ]
+}
